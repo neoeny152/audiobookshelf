@@ -972,7 +972,9 @@ class LibraryItemController {
    * so retrying with the original starts could cross a neighbour the first call moved.
    * options.verify = true adds the chapterbot speech check (only when CHAPTERBOT_* is configured, 400 otherwise):
    * it fills each chapter's `speech` and may lower confidence, but never moves a start. It makes the request
-   * longer (seconds per chapter, at most chapterbotSpeech.MAX_VERIFY_STARTS chapters).
+   * longer (seconds per chapter, at most chapterbotSpeech.MAX_VERIFY_STARTS chapters, and snap plus speech check stay
+   * within chapterbotSpeech.VERIFY_DEADLINE_MS so the request fits under a default 60 s proxy timeout; chapters left
+   * unchecked are reported in warnings, to be resent with "indexes").
    *
    * @param {LibraryItemControllerRequest} req
    * @param {Response} res

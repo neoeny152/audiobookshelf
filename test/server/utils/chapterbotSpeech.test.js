@@ -188,19 +188,58 @@ describe('chapterbotSpeech', () => {
       expect(warnings[0]).to.include('5 not checked')
     })
 
-    it('stops at the deadline and reports what was not checked', async () => {
+    it('sizes batches to the time left and stops inside the budget', async () => {
       const client = fakeClient()
       let t = 0
       const now = () => t
       client.verify = sinon.spy(async ({ starts }) => {
-        t += 70000
+        t += 20000
         return { results: starts.map((start) => ({ start, before: '', after: '' })) }
       })
-      const proposals = Array.from({ length: 31 }, (_, i) => proposal(i, i * 10))
-      const { verdicts, warnings } = await createVerifier({ titles: [], client, now, deadlineMs: 120000 }).verify({ proposals, timeline })
-      expect(client.verify.callCount).to.equal(2)
-      expect(verdicts).to.have.length(20)
-      expect(warnings).to.deep.equal(['Speech check time limit reached: 10 chapters not checked'])
+      const verifier = createVerifier({ titles: [], client, now, deadlineMs: 55000 })
+      const proposals = Array.from({ length: 16 }, (_, i) => proposal(i, i * 10))
+      const { verdicts, warnings } = await verifier.verify({ proposals, timeline })
+      // 55 s left: 5 starts; 35 s: 5; 15 s: 4 (fits 4 x 3 s + 2 s); then nothing fits
+      expect(client.verify.getCalls().map((c) => c.args[0].starts.length)).to.deep.equal([5, 5, 4])
+      expect(client.verify.getCalls().map((c) => c.args[0].timeoutMs)).to.deep.equal([55000, 35000, 15000])
+      expect(verdicts).to.have.length(14)
+      expect(warnings).to.deep.equal(['Speech check time limit reached: 1 chapters not checked. Resend with "indexes" set to them to check them.'])
+    })
+
+    it('counts the time the snap took before verify against the same budget', async () => {
+      const client = fakeClient()
+      let t = 0
+      const now = () => t
+      client.verify = sinon.spy(async ({ starts }) => {
+        t += 3000
+        return { results: starts.map((start) => ({ start, before: '', after: '' })) }
+      })
+      const verifier = createVerifier({ titles: [], client, now, deadlineMs: 55000 })
+      t = 50000 // the silence snap ran for 50 s
+      const proposals = Array.from({ length: 4 }, (_, i) => proposal(i, i * 10))
+      const { verdicts, warnings } = await verifier.verify({ proposals, timeline })
+      expect(client.verify.calledOnce).to.equal(true)
+      expect(client.verify.firstCall.args[0].starts).to.have.length(1)
+      expect(client.verify.firstCall.args[0].timeoutMs).to.equal(5000)
+      expect(verdicts).to.have.length(1)
+      expect(warnings[0]).to.include('2 chapters not checked')
+
+      t = 54000
+      const late = createVerifier({ titles: [], client: fakeClient(), now, deadlineMs: 1000 })
+      t = 56000
+      const outcome = await late.verify({ proposals, timeline })
+      expect(outcome.verdicts).to.deep.equal([])
+      expect(outcome.warnings[0]).to.include('3 chapters not checked')
+    })
+
+    it('reports a batch that hits the time limit as not checked', async () => {
+      const client = fakeClient()
+      client.verify = sinon.spy(async () => {
+        throw new ChapterbotError('timeout', 'Chapterbot POST /v1/verify timed out after 55000 ms')
+      })
+      const { verdicts, warnings } = await createVerifier({ titles: [], client }).verify({ proposals: [proposal(0, 0), proposal(1, 10), proposal(2, 20)], timeline })
+      expect(verdicts).to.deep.equal([])
+      expect(warnings).to.deep.equal(['Speech check time limit reached: 2 chapters not checked. Resend with "indexes" set to them to check them.'])
     })
 
     it('turns sidecar failures into a warning and leaves speech empty', async () => {

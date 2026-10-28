@@ -17,11 +17,18 @@ const chapterbotClient = require('./chapterbotClient')
 const Logger = require('../Logger')
 
 /** Starts per /v1/verify request (the sidecar allows 100; smaller batches keep each request short) */
-const BATCH_SIZE = 10
+const BATCH_SIZE = 5
 /** Starts checked per snap request; the rest get speech: null and a warning */
-const MAX_VERIFY_STARTS = 40
-/** No new batch starts after this */
-const VERIFY_DEADLINE_MS = 120000
+const MAX_VERIFY_STARTS = 15
+/**
+ * Budget for the whole snap request (silence snap + speech check), counted from createVerifier(), which the
+ * controller calls just before the snap runs. The request is synchronous, so it has to fit under a reverse proxy's
+ * default 60 s read timeout (nginx), like chapterSnapRunner's DEADLINE_MS.
+ */
+const VERIFY_DEADLINE_MS = 55000
+/** Rough sidecar cost, used to size each batch to the time left (3 starts took 8 s on real audio) */
+const EST_MS_PER_START = 3000
+const EST_MS_PER_REQUEST = 2000
 const BEFORE_SEC = 8
 const AFTER_SEC = 10
 const MAX_TEXT = 1000
@@ -172,6 +179,8 @@ function assessSpeech(title, before, after) {
  * @returns {{verify: Function}}
  */
 function createVerifier({ titles, skipReasons = new Set(), client = chapterbotClient, now = Date.now, deadlineMs = VERIFY_DEADLINE_MS }) {
+  // the budget covers the snap that runs before verify(), so it starts now
+  const deadlineAt = now() + deadlineMs
   return {
     async verify({ proposals, timeline, signal }) {
       const warnings = []
@@ -198,23 +207,28 @@ function createVerifier({ titles, skipReasons = new Set(), client = chapterbotCl
       }
 
       const verdicts = []
-      const startedAt = now()
       let notChecked = 0
-      for (let b = 0; b < checked.length; b += BATCH_SIZE) {
-        const batch = checked.slice(b, b + BATCH_SIZE)
+      let b = 0
+      while (b < checked.length) {
         if (signal?.aborted) break
-        if (now() - startedAt >= deadlineMs) {
-          notChecked += checked.length - b
+        // size each batch to the time left, so the request ends inside the budget
+        const remaining = deadlineAt - now()
+        const fit = Math.floor((remaining - EST_MS_PER_REQUEST) / EST_MS_PER_START)
+        const size = Math.min(BATCH_SIZE, checked.length - b, fit)
+        if (size < 1) {
+          notChecked = checked.length - b
           break
         }
+        const batch = checked.slice(b, b + size)
         let results
         try {
-          ;({ results } = await client.verify({ files, starts: batch.map((p) => p.proposedStart), beforeSec: BEFORE_SEC, afterSec: AFTER_SEC, signal }))
+          ;({ results } = await client.verify({ files, starts: batch.map((p) => p.proposedStart), beforeSec: BEFORE_SEC, afterSec: AFTER_SEC, signal, timeoutMs: remaining }))
         } catch (error) {
           if (signal?.aborted) break
           Logger.warn(`[ChapterbotSpeech] Speech check failed: ${error.message}`)
           const left = checked.length - b
-          warnings.push(error.status === 503 || error.status === 429 ? `Speech check skipped: chapterbot is busy, ${left} chapters not checked, try again later` : `Speech check failed: ${left} chapters not checked`)
+          if (error.code === 'timeout') notChecked = left
+          else warnings.push(error.status === 503 || error.status === 429 ? `Speech check skipped: chapterbot is busy, ${left} chapters not checked, try again later` : `Speech check failed: ${left} chapters not checked`)
           break
         }
         for (const p of batch) {
@@ -224,8 +238,9 @@ function createVerifier({ titles, skipReasons = new Set(), client = chapterbotCl
           const speech = assessSpeech(titles[p.index], r.before, r.after)
           verdicts.push({ index: p.index, speech, ...(speech.late || speech.early ? { confidence: 'low' } : {}) })
         }
+        b += size
       }
-      if (notChecked > 0) warnings.push(`Speech check time limit reached: ${notChecked} chapters not checked`)
+      if (notChecked > 0) warnings.push(`Speech check time limit reached: ${notChecked} chapters not checked. Resend with "indexes" set to them to check them.`)
       return { verdicts, warnings }
     }
   }
