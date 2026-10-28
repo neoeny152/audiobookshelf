@@ -23,6 +23,7 @@ const RssFeedManager = require('../managers/RssFeedManager')
 const CacheManager = require('../managers/CacheManager')
 const CoverManager = require('../managers/CoverManager')
 const ShareManager = require('../managers/ShareManager')
+const ChapterbotEpubManager = require('../managers/ChapterbotEpubManager')
 
 /**
  * @typedef RequestUserObject
@@ -1051,6 +1052,73 @@ class LibraryItemController {
   }
 
   /**
+   * POST: /api/items/:id/epub
+   * Build an EPUB from the book's audio with the chapterbot sidecar (optional, see utils/chapterbotClient.js).
+   * The server follows the job, writes "<Title> (from audio).epub" into the item folder (never overwriting),
+   * rescans the item and emits chapterbot_epub_done / chapterbot_epub_failed to the requesting user.
+   * One job per item; jobs are kept in memory only and are forgotten on a server restart.
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async startEpubJob(req, res) {
+    if (!req.user.canUpdate) {
+      Logger.error(`[LibraryItemController] User "${req.user.username}" attempted to start an EPUB job with invalid permissions`)
+      return res.sendStatus(403)
+    }
+    try {
+      const job = await ChapterbotEpubManager.start(req.libraryItem, req.user)
+      res.status(202).json(job)
+    } catch (error) {
+      if (error instanceof ChapterbotEpubManager.EpubJobError) {
+        const body = { error: error.message }
+        if (error.jobId) body.jobId = error.jobId
+        return res.status(error.status).json(body)
+      }
+      Logger.error(`[LibraryItemController] Starting EPUB job for "${req.libraryItem.id}" failed`, error)
+      res.status(500).json({ error: 'Starting the EPUB job failed' })
+    }
+  }
+
+  /**
+   * GET: /api/items/:id/epub/:jobId
+   * Status of the item's EPUB job: { jobId, status (queued|running|downloading|done|failed|cancelled), stage, progress, ... }
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async getEpubJob(req, res) {
+    if (!req.user.canUpdate) {
+      Logger.error(`[LibraryItemController] User "${req.user.username}" attempted to get an EPUB job with invalid permissions`)
+      return res.sendStatus(403)
+    }
+    const job = await ChapterbotEpubManager.get(req.libraryItem.id, req.params.jobId)
+    if (!job) return res.status(404).json({ error: 'No such EPUB job' })
+    res.json(job)
+  }
+
+  /**
+   * DELETE: /api/items/:id/epub/:jobId
+   * Cancel a queued or running EPUB job. Needs canUpdate (not canDelete: nothing in the library is deleted).
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async cancelEpubJob(req, res) {
+    if (!req.user.canUpdate) {
+      Logger.error(`[LibraryItemController] User "${req.user.username}" attempted to cancel an EPUB job with invalid permissions`)
+      return res.sendStatus(403)
+    }
+    try {
+      res.json(await ChapterbotEpubManager.cancel(req.libraryItem.id, req.params.jobId))
+    } catch (error) {
+      if (error instanceof ChapterbotEpubManager.EpubJobError) return res.status(error.status).json({ error: error.message })
+      Logger.error(`[LibraryItemController] Cancelling EPUB job for "${req.libraryItem.id}" failed`, error)
+      res.status(500).json({ error: 'Cancelling the EPUB job failed' })
+    }
+  }
+
+  /**
    * GET: /api/items/:id/ffprobe/:fileid
    * FFProbe JSON result from audio file
    *
@@ -1330,6 +1398,8 @@ class LibraryItemController {
 
     if (req.path.includes('/play')) {
       // allow POST requests using /play and /play/:episodeId
+    } else if (req.method == 'DELETE' && /\/items\/[^/]+\/epub\/[^/]+$/.test(req.path)) {
+      // cancelling an EPUB job deletes nothing in the library; the handler checks canUpdate
     } else if (req.method == 'DELETE' && !req.user.canDelete) {
       Logger.warn(`[LibraryItemController] User "${req.user.username}" attempted to delete without permission`)
       return res.sendStatus(403)
