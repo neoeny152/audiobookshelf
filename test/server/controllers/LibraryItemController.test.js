@@ -12,6 +12,9 @@ const EventEmitter = require('events')
 const SocketAuthority = require('../../../server/SocketAuthority')
 const ffmpegHelpers = require('../../../server/utils/ffmpegHelpers')
 const chapterSnapRunner = require('../../../server/utils/chapterSnapRunner')
+const chapterSnap = require('../../../server/utils/chapterSnap')
+const chapterbotClient = require('../../../server/utils/chapterbotClient')
+const http = require('http')
 
 describe('LibraryItemController', () => {
   /** @type {ApiRouter} */
@@ -409,7 +412,8 @@ describe('LibraryItemController', () => {
       expect(res.json.firstCall.args[0]).to.deep.equal({ error: 'Item is not a book with audio tracks' })
     })
 
-    it('returns 400 for a bad body and for verify:true', async () => {
+    it('returns 400 for a bad body and for verify:true without chapterbot', async () => {
+      chapterbotClient.configure({})
       const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
       const detect = sinon.stub(ffmpegHelpers, 'detectSilences').resolves({ lines: [] })
 
@@ -422,8 +426,57 @@ describe('LibraryItemController', () => {
       const ordered = await callSnap(libraryItem, { chapters: [{ start: 0 }, { start: 10 }, { start: 5 }] })
       expect(ordered.json.firstCall.args[0].index).to.equal(2)
       const verify = await callSnap(libraryItem, { options: { verify: true } })
-      expect(verify.json.firstCall.args[0]).to.deep.equal({ error: 'verify not implemented' })
+      expect(verify.json.firstCall.args[0]).to.deep.equal({ error: chapterSnap.VERIFY_UNAVAILABLE })
       expect(detect.called).to.be.false
+    })
+
+    it('runs the chapterbot speech check for verify:true, which may lower confidence but never moves a start', async () => {
+      const requests = []
+      const server = http.createServer((req, res) => {
+        const chunks = []
+        req.on('data', (c) => chunks.push(c))
+        req.on('end', () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+          requests.push({ url: req.url, auth: req.headers.authorization, body })
+          const results = body.starts.map((start) => {
+            // chapter 2's heading is heard before its proposed start: LATE
+            if (Math.abs(start - 1502.75) < 0.001) return { start, before: 'and it was over. Chapter Two.', after: 'The rain had not stopped.' }
+            const n = Math.round((start + 497.25) / 1000)
+            return { start, before: 'and it was over.', after: `Chapter ${n}. The rain had not stopped.` }
+          })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ model: 'base.en', results }))
+        })
+      })
+      await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+      const token = 'controller-test-token-123456'
+      chapterbotClient.configure({ CHAPTERBOT_URL: `http://127.0.0.1:${server.address().port}`, CHAPTERBOT_TOKEN: token, CHAPTERBOT_PATH_MAP: '/books=' })
+      try {
+        const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+        sinon.stub(ffmpegHelpers, 'detectSilences').callsFake(async (params) => ({ lines: silenceLines(params) }))
+        const res = await callSnap(libraryItem, { options: { verify: true } })
+
+        expect(res.statusCode).to.equal(200)
+        const result = res.json.firstCall.args[0]
+        expect(requests).to.have.length(1)
+        expect(requests[0].url).to.equal('/v1/verify')
+        expect(requests[0].auth).to.equal(`Bearer ${token}`)
+        expect(requests[0].body.files.map((f) => f.path)).to.deep.equal(['Black Ice/part0.mp3', 'Black Ice/part1.mp3', 'Black Ice/part2.mp3', 'Black Ice/part3.mp3'])
+        expect(requests[0].body.starts).to.deep.equal([502.75, 1502.75, 2502.75])
+
+        expect(result.chapters[0].speech).to.equal(null)
+        expect(result.chapters[1]).to.include({ proposedStart: 502.75, confidence: 'high' })
+        expect(result.chapters[1].speech).to.deep.equal({ before: 'and it was over.', after: 'Chapter 1. The rain had not stopped.', heading: true, late: false, early: false })
+        expect(result.chapters[2]).to.include({ proposedStart: 1502.75, confidence: 'low' })
+        expect(result.chapters[2].speech).to.include({ heading: false, late: true, early: false })
+        expect(result.chapters[3].speech).to.include({ heading: true, late: false })
+        expect(result.proposedChapters.map((c) => c.start)).to.deep.equal([0, 502.75, 1502.75, 2502.75])
+        expect(result.warnings).to.deep.equal([])
+        expect(chapterSnapRunner._runningJobs.size).to.equal(0)
+      } finally {
+        chapterbotClient.configure({})
+        await new Promise((resolve) => server.close(resolve))
+      }
     })
 
     it('returns a proposal for the item chapters and saves nothing', async () => {

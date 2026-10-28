@@ -65,9 +65,13 @@ describe('chapterSnap', () => {
       expect(() => chapterSnap.parseOptions({ noiseDb: '-38dB' })).to.throw(SnapInputError)
     })
 
-    it('rejects verify:true, a non-boolean snapToFileStart and a non-object', () => {
-      expect(() => chapterSnap.parseOptions({ verify: true })).to.throw(SnapInputError, 'verify not implemented')
+    it('rejects verify:true unless the speech check is available, a non-boolean snapToFileStart and a non-object', () => {
+      expect(() => chapterSnap.parseOptions({ verify: true })).to.throw(SnapInputError, chapterSnap.VERIFY_UNAVAILABLE)
+      expect(chapterSnap.VERIFY_UNAVAILABLE).to.include('CHAPTERBOT_URL')
       expect(chapterSnap.parseOptions({ verify: false })).to.deep.equal(DEFAULT_OPTIONS)
+      expect(chapterSnap.parseOptions({ verify: false }, { verifyAvailable: true })).to.deep.equal(DEFAULT_OPTIONS)
+      expect(chapterSnap.parseOptions({ verify: true }, { verifyAvailable: true })).to.deep.equal({ ...DEFAULT_OPTIONS, verify: true })
+      expect(() => chapterSnap.parseOptions({ verify: 'yes' }, { verifyAvailable: true })).to.throw(SnapInputError)
       expect(() => chapterSnap.parseOptions({ snapToFileStart: 'yes' })).to.throw(SnapInputError)
       expect(() => chapterSnap.parseOptions({ snapToFileStart: 1 })).to.throw(SnapInputError)
       expect(() => chapterSnap.parseOptions('fast')).to.throw(SnapInputError)

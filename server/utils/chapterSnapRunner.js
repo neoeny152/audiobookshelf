@@ -115,7 +115,8 @@ async function runPool({ segments, timeline, options, detect, signal, deadlineMs
  * @param {AbortSignal} [params.signal]
  * @param {number} [params.deadlineMs]
  * @param {Function} [params.detect] - injected for tests, defaults to ffmpegHelpers.detectSilences
- * @param {{verify: Function}[]} [params.verifiers] - Whisper seam; may only set speech and lower confidence
+ * @param {{verify: Function}[]} [params.verifiers] - Whisper seam; may only set speech and lower confidence.
+ *   verify() returns verdicts ([{index, speech?, confidence?}]) or {verdicts, warnings}
  * @param {number} [params.pool]
  * @param {() => number} [params.now]
  */
@@ -183,10 +184,13 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
     proposal.speech = null
   }
 
-  // Verifier seam (Whisper, later): may only fill speech and lower confidence, never move a start
+  // Verifier seam (chapterbot speech check): may only fill speech and lower confidence, never move a start
   for (const verifier of verifiers) {
     const snapshot = proposals.map((p) => Object.freeze({ index: p.index, originalStart: p.originalStart, proposedStart: p.proposedStart, reason: p.reason, confidence: p.confidence, pause: p.pause ? Object.freeze({ ...p.pause }) : null }))
-    const verdicts = (await verifier.verify({ proposals: Object.freeze(snapshot), timeline, signal })) || []
+    const outcome = (await verifier.verify({ proposals: Object.freeze(snapshot), timeline, signal })) || []
+    if (signal?.aborted) throw snapError('SNAP_ABORTED', 'Chapter snap aborted')
+    const verdicts = Array.isArray(outcome) ? outcome : Array.isArray(outcome.verdicts) ? outcome.verdicts : []
+    if (!Array.isArray(outcome) && Array.isArray(outcome.warnings)) warnings.push(...outcome.warnings.filter((w) => typeof w === 'string'))
     for (const verdict of verdicts) {
       const proposal = proposals[verdict?.index]
       if (!proposal) continue

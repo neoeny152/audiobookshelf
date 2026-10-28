@@ -72,6 +72,8 @@ const REASONS = Object.freeze({
 
 const CONFIDENCE_RANK = Object.freeze({ none: 0, low: 1, medium: 2, high: 3 })
 
+const VERIFY_UNAVAILABLE = 'verify needs the chapterbot speech check, which is not configured on this server (CHAPTERBOT_URL, CHAPTERBOT_TOKEN, CHAPTERBOT_PATH_MAP)'
+
 /**
  * Bad request input. The controller maps it to a 400 `{ error, index? }`.
  */
@@ -107,16 +109,21 @@ function clamp(value, min, max) {
  * @property {number} leadSec
  * @property {number} headingLookbackSec - how far before the chosen pause a longer pause may sit to win (0 = off)
  * @property {boolean} snapToFileStart
+ * @property {boolean} [verify] - run the chapterbot speech check (only present when true)
  */
 
 /**
  * Validate and clamp the request options.
  * Finite numbers out of range are clamped silently; anything present that is not a finite number is an error.
  *
+ * `verify: true` (the chapterbot speech check) is only accepted when the caller says it is available; the returned
+ * options then carry `verify: true` (the key is absent otherwise).
+ *
  * @param {*} raw
+ * @param {{verifyAvailable?: boolean}} [context]
  * @returns {SnapOptions}
  */
-function parseOptions(raw) {
+function parseOptions(raw, { verifyAvailable = false } = {}) {
   if (raw === undefined || raw === null) return { ...DEFAULT_OPTIONS }
   if (!isPlainObject(raw)) throw new SnapInputError('options must be an object')
 
@@ -137,8 +144,10 @@ function parseOptions(raw) {
 
   if ('verify' in raw && raw.verify !== undefined) {
     if (typeof raw.verify !== 'boolean') throw new SnapInputError('options.verify must be a boolean')
-    // Reserved for the Whisper speech check
-    if (raw.verify) throw new SnapInputError('verify not implemented')
+    if (raw.verify) {
+      if (!verifyAvailable) throw new SnapInputError(VERIFY_UNAVAILABLE)
+      options.verify = true
+    }
   }
 
   return options
@@ -873,6 +882,8 @@ module.exports = {
   NUMERIC_OPTION_BOUNDS,
   REASONS,
   CONFIDENCE_RANK,
+  SKIP_REASONS,
+  VERIFY_UNAVAILABLE,
   SnapInputError,
   round3,
   parseOptions,
@@ -895,5 +906,6 @@ module.exports = {
   resolveOrder,
   confidenceFor,
   lowerConfidence,
+  resolveTitle,
   buildResponse
 }

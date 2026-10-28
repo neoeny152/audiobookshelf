@@ -10,6 +10,8 @@ const Database = require('../Database')
 const zipHelpers = require('../utils/zipHelpers')
 const chapterSnap = require('../utils/chapterSnap')
 const chapterSnapRunner = require('../utils/chapterSnapRunner')
+const chapterbotClient = require('../utils/chapterbotClient')
+const chapterbotSpeech = require('../utils/chapterbotSpeech')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
@@ -967,6 +969,9 @@ class LibraryItemController {
    * When the response has complete: false, retry with chapters = that response's proposedChapters and
    * indexes = the chapters marked not-analysed. Each chapter is bounded by its neighbours' starts in the request,
    * so retrying with the original starts could cross a neighbour the first call moved.
+   * options.verify = true adds the chapterbot speech check (only when CHAPTERBOT_* is configured, 400 otherwise):
+   * it fills each chapter's `speech` and may lower confidence, but never moves a start. It makes the request
+   * longer (seconds per chapter, at most chapterbotSpeech.MAX_VERIFY_STARTS chapters).
    *
    * @param {LibraryItemControllerRequest} req
    * @param {Response} res
@@ -989,7 +994,7 @@ class LibraryItemController {
 
     let options, chapters, indexes
     try {
-      options = chapterSnap.parseOptions(body.options)
+      options = chapterSnap.parseOptions(body.options, { verifyAvailable: chapterbotClient.isConfigured() })
       chapters = chapterSnap.validateChapters(body.chapters ?? media.chapters ?? [], T)
       indexes = chapterSnap.validateIndexes(body.indexes, chapters.length)
     } catch (error) {
@@ -1007,6 +1012,12 @@ class LibraryItemController {
       if (!res.writableEnded) ac.abort()
     })
 
+    const verifiers = []
+    if (options.verify) {
+      const titles = chapters.map((chapter, i) => chapterSnap.resolveTitle(chapter.title, media.chapters, i))
+      verifiers.push(chapterbotSpeech.createVerifier({ titles, skipReasons: chapterSnap.SKIP_REASONS }))
+    }
+
     try {
       const result = await chapterSnapRunner.runSnap({
         libraryItemId: libraryItem.id,
@@ -1017,7 +1028,8 @@ class LibraryItemController {
         indexes,
         options,
         signal: ac.signal,
-        deadlineMs: chapterSnapRunner.DEADLINE_MS
+        deadlineMs: chapterSnapRunner.DEADLINE_MS,
+        verifiers
       })
       if (ac.signal.aborted) return
       res.json(result)

@@ -241,6 +241,31 @@ describe('chapterSnapRunner', () => {
     expect(result.chapters[2]).to.include({ proposedStart: 1502.75, confidence: 'high', speech: null })
   })
 
+  it('accepts {verdicts, warnings} from a verifier and adds its warnings', async () => {
+    const verifier = {
+      verify: async () => ({
+        verdicts: [{ index: 3, speech: { before: 'a', after: 'b', heading: false, late: true, early: false }, confidence: 'low' }],
+        warnings: ['Speech check failed: 1 chapters not checked', 42]
+      })
+    }
+    const result = await run({ verifiers: [verifier] })
+    expect(result.chapters[3]).to.include({ proposedStart: 2502.75, confidence: 'low' })
+    expect(result.chapters[3].speech).to.include({ late: true })
+    expect(result.warnings).to.deep.equal(['Speech check failed: 1 chapters not checked'])
+  })
+
+  it('aborts when the client goes away during the speech check', async () => {
+    const ac = new AbortController()
+    const verifier = {
+      verify: async () => {
+        ac.abort()
+        return []
+      }
+    }
+    const error = await run({ verifiers: [verifier], signal: ac.signal }).catch((e) => e)
+    expect(error.code).to.equal('SNAP_ABORTED')
+  })
+
   describe('multi-file joints', () => {
     // Two 3600 s files split at a chapter: part 0 ends with 0.45 s of silence, part 1 starts with 0.5 s,
     // and part 1 has a 2.5 s mid-sentence pause ending at book 3612
