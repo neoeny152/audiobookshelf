@@ -267,10 +267,11 @@ function trackIndexAt(timeline, t) {
  */
 
 /**
- * Window of book time searched for chapter i
+ * Window of book time searched for chapter i.
+ * Reaches headingLookbackSec further back so the longer pause before a spoken heading is decoded in full.
  */
 function chapterWindow(t, T, options) {
-  return [Math.max(0, t - options.windowSec - PAD_BEFORE), Math.min(T, t + options.windowSec + PAD_AFTER)]
+  return [Math.max(0, t - options.windowSec - PAD_BEFORE - options.headingLookbackSec), Math.min(T, t + options.windowSec + PAD_AFTER)]
 }
 
 /**

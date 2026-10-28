@@ -195,9 +195,17 @@ describe('chapterSnap', () => {
       expect(plan.windows[0]).to.equal(null)
       expect(plan.chapterSegments[0]).to.deep.equal([])
       expect(plan.segments).to.have.length(1)
-      expect(plan.segments[0].localStart).to.be.closeTo(5000 - 25 - 3.5, 1e-9)
-      expect(plan.segments[0].localDur).to.be.closeTo(25 + 3.5 + 25 + 1, 1e-9)
+      expect(plan.segments[0].localStart).to.be.closeTo(5000 - 25 - 3.5 - 3, 1e-9)
+      expect(plan.segments[0].localDur).to.be.closeTo(25 + 3.5 + 3 + 25 + 1, 1e-9)
       expect(plan.chapterSegments[1]).to.deep.equal([0])
+    })
+
+    it('reaches headingLookbackSec further back, and not with the look-back off', () => {
+      const plan = chapterSnap.planSegments([0, 5000], null, big, 36000, opts({ windowSec: 2, headingLookbackSec: 6 }))
+      expect(plan.windows[1][0]).to.be.closeTo(5000 - 2 - 3.5 - 6, 1e-9)
+      expect(plan.segments[0].localStart).to.be.closeTo(5000 - 11.5, 1e-9)
+      const off = chapterSnap.planSegments([0, 5000], null, big, 36000, opts({ windowSec: 2, headingLookbackSec: 0 }))
+      expect(off.windows[1]).to.deep.equal([5000 - 5.5, 5000 + 3])
     })
 
     it('skips chapters not in indexes', () => {
@@ -230,8 +238,8 @@ describe('chapterSnap', () => {
       expect(plan.segments).to.have.length(2)
       const [a, b] = plan.segments
       expect(a.trackIndex).to.equal(0)
-      expect(a.localStart).to.be.closeTo(2010 - 28.5, 1e-9)
-      expect(a.localDur).to.be.closeTo(18.5, 1e-9)
+      expect(a.localStart).to.be.closeTo(2010 - 31.5, 1e-9)
+      expect(a.localDur).to.be.closeTo(21.5, 1e-9)
       expect(a.reachesFileEnd).to.equal(true)
       expect(b.trackIndex).to.equal(1)
       expect(b.localStart).to.equal(0)
