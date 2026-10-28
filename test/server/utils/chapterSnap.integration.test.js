@@ -25,7 +25,9 @@ const TOLERANCE = 0.05
 describe('chapterSnap integration (real ffmpeg)', function () {
   this.timeout(60000)
 
+  // Resolved at load time: other suites (BinaryManager) delete process.env.FFMPEG_PATH before this one runs
   const ffmpegBin = findFfmpeg()
+  const savedFfmpegPath = process.env.FFMPEG_PATH
   let dir
 
   /**
@@ -44,6 +46,7 @@ describe('chapterSnap integration (real ffmpeg)', function () {
 
   before(function () {
     if (!ffmpegBin) return this.skip()
+    if (ffmpegBin !== 'ffmpeg') process.env.FFMPEG_PATH = ffmpegBin
     dir = require('fs').mkdtempSync(Path.join(os.tmpdir(), 'abs snap '))
     // Two files split in the middle of a 2 s silence (book 8-10), plus a pause at book 15-16.5
     generate(Path.join(dir, 'part0.wav'), 9, [[8, 9]], ['-c:a', 'pcm_s16le'])
@@ -55,6 +58,8 @@ describe('chapterSnap integration (real ffmpeg)', function () {
 
   after(async function () {
     if (dir) await fs.remove(dir)
+    if (savedFfmpegPath === undefined) delete process.env.FFMPEG_PATH
+    else process.env.FFMPEG_PATH = savedFfmpegPath
   })
 
   beforeEach(() => {
