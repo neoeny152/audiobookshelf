@@ -50,10 +50,34 @@ describe('chapterSnap integration (real ffmpeg)', function () {
     dir = require('fs').mkdtempSync(Path.join(os.tmpdir(), 'abs snap '))
     // Two files split in the middle of a 2 s silence (book 8-10), plus a pause at book 15-16.5
     generate(Path.join(dir, 'part0.wav'), 9, [[8, 9]], ['-c:a', 'pcm_s16le'])
-    generate(Path.join(dir, 'part1.wav'), 11, [[0, 1], [6, 7.5]], ['-c:a', 'pcm_s16le'])
+    generate(
+      Path.join(dir, 'part1.wav'),
+      11,
+      [
+        [0, 1],
+        [6, 7.5]
+      ],
+      ['-c:a', 'pcm_s16le']
+    )
     // Single files with pauses at 10-12 and 20-21.5
-    generate(Path.join(dir, 'single.mp3'), 30, [[10, 12], [20, 21.5]], ['-c:a', 'libmp3lame', '-b:a', '64k'])
-    generate(Path.join(dir, 'single.m4b'), 30, [[10, 12], [20, 21.5]], ['-c:a', 'aac', '-b:a', '64k', '-f', 'mp4'])
+    generate(
+      Path.join(dir, 'single.mp3'),
+      30,
+      [
+        [10, 12],
+        [20, 21.5]
+      ],
+      ['-c:a', 'libmp3lame', '-b:a', '64k']
+    )
+    generate(
+      Path.join(dir, 'single.m4b'),
+      30,
+      [
+        [10, 12],
+        [20, 21.5]
+      ],
+      ['-c:a', 'aac', '-b:a', '64k', '-f', 'mp4']
+    )
   })
 
   after(async function () {

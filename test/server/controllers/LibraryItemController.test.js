@@ -413,17 +413,7 @@ describe('LibraryItemController', () => {
       const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
       const detect = sinon.stub(ffmpegHelpers, 'detectSilences').resolves({ lines: [] })
 
-      const bad = [
-        { chapters: 'x' },
-        { chapters: [] },
-        { chapters: [{ start: 0 }, { start: -1 }] },
-        { chapters: [{ start: 0 }, { start: 5000 }] },
-        { chapters: [{ start: 0 }, { start: 10 }, { start: 5 }] },
-        { indexes: [9] },
-        { options: { windowSec: '25' } },
-        { options: { noiseDb: null } },
-        { options: { verify: true } }
-      ]
+      const bad = [{ chapters: 'x' }, { chapters: [] }, { chapters: [{ start: 0 }, { start: -1 }] }, { chapters: [{ start: 0 }, { start: 5000 }] }, { chapters: [{ start: 0 }, { start: 10 }, { start: 5 }] }, { indexes: [9] }, { options: { windowSec: '25' } }, { options: { noiseDb: null } }, { options: { verify: true } }]
       for (const body of bad) {
         const res = await callSnap(libraryItem, body)
         expect(res.statusCode, JSON.stringify(body)).to.equal(400)
@@ -503,7 +493,7 @@ describe('LibraryItemController', () => {
       )
       const res = fakeResponse()
       const pending = LibraryItemController.snapMediaChapters.bind(apiRouter)({ user: user(), libraryItem, body: {}, params: { id: bookItemId } }, res)
-      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setTimeout(resolve, 0))
       res.emit('close')
       await pending
 

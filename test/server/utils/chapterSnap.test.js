@@ -162,7 +162,10 @@ describe('chapterSnap', () => {
       const timeline = chapterSnap.buildTimeline(ten)
       expect(timeline.map((t) => t.offset)).to.deep.equal(getTracklistOffsets(ten))
       expect(timeline[9].path).to.equal('/b/9.mp3')
-      expect(chapterSnap.computeDuration(timeline, undefined)).to.be.closeTo(ten.reduce((s, af) => s + af.duration, 0), 1e-9)
+      expect(chapterSnap.computeDuration(timeline, undefined)).to.be.closeTo(
+        ten.reduce((s, af) => s + af.duration, 0),
+        1e-9
+      )
       expect(chapterSnap.computeDuration(timeline, 1000)).to.equal(1000)
     })
 

@@ -153,7 +153,7 @@ describe('chapterSnapRunner', () => {
           })
         })
     })
-    await new Promise((resolve) => setImmediate(resolve))
+    await new Promise((resolve) => setTimeout(resolve, 0))
     ac.abort()
     try {
       await promise
