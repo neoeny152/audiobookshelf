@@ -1,0 +1,43 @@
+const { version } = require('../../package.json')
+
+/**
+ * Optional server capabilities that clients can feature-detect.
+ *
+ * Exposed as `serverFeatures` in GET /status. The field is purely additive: stock clients
+ * (web, iOS, Android) ignore unknown keys, and clients that look for it must treat a missing
+ * field (stock server) as an empty list and fall back to the per-item endpoints.
+ *
+ * Feature names are stable identifiers; never rename or reuse one.
+ *
+ * - batchEpisodes: POST /api/podcasts/batch/episodes/update and /api/podcasts/batch/episodes/delete
+ * - libraryDownloadPost: POST /api/libraries/:id/download with ids in the request body
+ */
+const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost'])
+
+/**
+ * Payload for GET /status (unauthenticated).
+ * Keys are the same as before serverFeatures was added; serverFeatures is the only addition.
+ *
+ * @param {{ hasRootUser: boolean, serverSettings: { language: string, authActiveAuthMethods: string[], authFormData: Object } }} Database
+ * @returns {Object}
+ */
+function buildStatusPayload(Database) {
+  // status check for client to see if server has been initialized
+  // server has been initialized if a root user exists
+  const payload = {
+    app: 'audiobookshelf',
+    serverVersion: version,
+    isInit: Database.hasRootUser,
+    language: Database.serverSettings.language,
+    authMethods: Database.serverSettings.authActiveAuthMethods,
+    authFormData: Database.serverSettings.authFormData,
+    serverFeatures: [...SERVER_FEATURES]
+  }
+  if (!payload.isInit) {
+    payload.ConfigPath = global.ConfigPath
+    payload.MetadataPath = global.MetadataPath
+  }
+  return payload
+}
+
+module.exports = { SERVER_FEATURES, buildStatusPayload }

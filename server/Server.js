@@ -9,6 +9,7 @@ const cookieParser = require('cookie-parser')
 const axios = require('axios')
 
 const { version } = require('../package.json')
+const { buildStatusPayload } = require('./utils/serverFeatures')
 
 // Utils
 const is = require('./libs/requestIp/isJs')
@@ -382,21 +383,8 @@ class Server {
       this.initializeServer(req, res)
     })
     router.get('/status', (req, res) => {
-      // status check for client to see if server has been initialized
-      // server has been initialized if a root user exists
-      const payload = {
-        app: 'audiobookshelf',
-        serverVersion: version,
-        isInit: Database.hasRootUser,
-        language: Database.serverSettings.language,
-        authMethods: Database.serverSettings.authActiveAuthMethods,
-        authFormData: Database.serverSettings.authFormData
-      }
-      if (!payload.isInit) {
-        payload.ConfigPath = global.ConfigPath
-        payload.MetadataPath = global.MetadataPath
-      }
-      res.json(payload)
+      // status check for client to see if server has been initialized (see utils/serverFeatures.js)
+      res.json(buildStatusPayload(Database))
     })
     router.get('/ping', (req, res) => {
       Logger.info('Received ping')
