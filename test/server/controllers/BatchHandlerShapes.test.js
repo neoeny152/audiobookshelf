@@ -100,10 +100,28 @@ describe('Existing batch handlers keep their shapes', () => {
     it('still returns 400 for duplicate ids and 404 when an item is missing', async () => {
       const a = await createBook('A')
       let res = fakeRes()
-      await LibraryItemController.batchUpdate.bind(apiRouter)({ user, body: [{ id: a.id, mediaPayload: {} }, { id: a.id, mediaPayload: {} }] }, res)
+      await LibraryItemController.batchUpdate.bind(apiRouter)(
+        {
+          user,
+          body: [
+            { id: a.id, mediaPayload: {} },
+            { id: a.id, mediaPayload: {} }
+          ]
+        },
+        res
+      )
       expect(statusOf(res)).to.equal(400)
       res = fakeRes()
-      await LibraryItemController.batchUpdate.bind(apiRouter)({ user, body: [{ id: a.id, mediaPayload: {} }, { id: 'missing', mediaPayload: {} }] }, res)
+      await LibraryItemController.batchUpdate.bind(apiRouter)(
+        {
+          user,
+          body: [
+            { id: a.id, mediaPayload: {} },
+            { id: 'missing', mediaPayload: {} }
+          ]
+        },
+        res
+      )
       expect(statusOf(res)).to.equal(404)
     })
   })
@@ -140,7 +158,12 @@ describe('Existing batch handlers keep their shapes', () => {
       expect(checkAuthorsSpy.calledOnce).to.be.true
 
       const events = SocketAuthority.emitter.getCalls().map((call) => [call.args[0], call.args[1].id])
-      expect(events.filter((e) => e[0] === 'item_removed').map((e) => e[1]).sort()).to.deep.equal([a.id, b.id].sort())
+      expect(
+        events
+          .filter((e) => e[0] === 'item_removed')
+          .map((e) => e[1])
+          .sort()
+      ).to.deep.equal([a.id, b.id].sort())
       expect(events.filter((e) => e[0] === 'series_removed')).to.deep.equal([['series_removed', sharedSeries.id]])
       expect(events.filter((e) => e[0] === 'author_removed')).to.deep.equal([['author_removed', sharedAuthor.id]])
 
