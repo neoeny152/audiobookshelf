@@ -466,7 +466,7 @@ describe('LibraryItemController', () => {
 
         expect(result.chapters[0].speech).to.equal(null)
         expect(result.chapters[1]).to.include({ proposedStart: 502.75, confidence: 'high' })
-        expect(result.chapters[1].speech).to.deep.equal({ before: 'and it was over.', after: 'Chapter 1. The rain had not stopped.', heading: true, late: false, early: false })
+        expect(result.chapters[1].speech).to.deep.equal({ before: 'and it was over.', after: 'Chapter 1. The rain had not stopped.', heading: true, late: false, early: false, heard: 'Chapter 1' })
         expect(result.chapters[2]).to.include({ proposedStart: 1502.75, confidence: 'low' })
         expect(result.chapters[2].speech).to.include({ heading: false, late: true, early: false })
         expect(result.chapters[3].speech).to.include({ heading: true, late: false })
