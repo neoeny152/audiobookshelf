@@ -1,13 +1,16 @@
 /**
  * Chapter snap speech check (options.verify = true): what Whisper hears around each proposed start.
  *
- * Fills each snap chapter's `speech` with {before, after, heading, late, early}, using the rules of the
+ * Fills each snap chapter's `speech` with {before, after, heading, late, early, heard}, using the rules of the
  * unraid/scripts verify-report.ps1 (with the Tokens normaliser from build-chapters.ps1):
  * - LATE: the chapter's heading words are heard at the end of the before-clip (last 8 words) and the after-clip
  *   does not start with them (first 3 words)
  * - EARLY: the heading is in the after-clip (first 25 words) but more than 5 words in
  * - heading: the heading words are in the after-clip at most 5 words in, as whole words with the title's stop words
  *   ignored (the start looks right); not EARLY
+ * - heard (not in the script, additive): a spoken heading such as "Chapter 3", "Part 2" or "Prologue" starting within
+ *   the first 5 words of the after-clip, normalised (number words and roman numerals become digits), whatever the
+ *   title is; null when none is heard. Clients may offer it as the chapter title.
  * LATE and EARLY only apply to titles that start with chapter/prologue/epilogue/interlude/part, as in the script.
  *
  * Speech never moves a start (that is the snap rule's job). It may only lower confidence: LATE or EARLY -> low.
@@ -64,6 +67,13 @@ const NUMBER_WORDS = Object.freeze({
 })
 const HEADING_WORD_RE = /^(chapter|prologue|epilogue|interlude|part)$/
 const TITLE_STOP = new Set(['the', 'a', 'of'])
+/** heard: the heading word has to start within this many words of the after-clip */
+const HEARD_MAX_LEAD_WORDS = 5
+/** heard: spoken headings that need a number after them, and ones that stand alone */
+const HEARD_NUMBERED = Object.freeze({ chapter: 'Chapter', part: 'Part' })
+const HEARD_NAMED = Object.freeze({ prologue: 'Prologue', epilogue: 'Epilogue', interlude: 'Interlude' })
+/** A well-formed roman numeral from 1 to 399, so words like "civil" or "mix" are not read as numbers */
+const ROMAN_RE = /^(?=[ivxlc])c{0,3}(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$/
 
 function romanToInt(r) {
   const v = { i: 1, v: 5, x: 10, l: 50, c: 100 }
@@ -116,6 +126,68 @@ function tokens(s) {
   return out
 }
 
+/**
+ * The chapter number spoken at arr[i]: digits ("3", "03"), roman numerals ("xii", "i"), or number words up to the
+ * hundreds ("twenty one", "one hundred and two").
+ *
+ * @param {string[]} arr - lower case words, punctuation removed
+ * @param {number} i
+ * @returns {number|null}
+ */
+function spokenNumberAt(arr, i) {
+  const w = arr[i]
+  if (w === undefined) return null
+  if (/^\d{1,4}$/.test(w)) return Number(w) || null
+  if (ROMAN_RE.test(w)) return romanToInt(w)
+  if (!(w in NUMBER_WORDS)) return null
+
+  let n = NUMBER_WORDS[w]
+  let k = i + 1
+  if (n < 10 && arr[k] === 'hundred') {
+    n *= 100
+    k++
+    if (arr[k] === 'and' && arr[k + 1] in NUMBER_WORDS) k++
+    if (arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 100) {
+      const rest = NUMBER_WORDS[arr[k]]
+      n += rest
+      k++
+      if (rest >= 20 && arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 10) n += NUMBER_WORDS[arr[k]]
+    }
+    return n
+  }
+  if (n >= 20 && arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 10) n += NUMBER_WORDS[arr[k]]
+  return n
+}
+
+/**
+ * A spoken heading at the start of the after-clip, normalised: "Chapter Twenty-One. The rain" -> "Chapter 21",
+ * "Part Two" -> "Part 2", "Prologue" -> "Prologue". Only counts when the heading word is one of the first
+ * HEARD_MAX_LEAD_WORDS words, so a short lead-in ("Heat two of seven. Chapter three.") is allowed but prose that
+ * mentions a chapter later is not. "Chapter" or "Part" without a number after it is not a heading.
+ *
+ * @param {string} after - transcript of the clip after the start
+ * @returns {string|null}
+ */
+function heardHeading(after) {
+  const arr = String(after || '')
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+  const limit = Math.min(arr.length, HEARD_MAX_LEAD_WORDS)
+  for (let i = 0; i < limit; i++) {
+    const w = arr[i]
+    if (w in HEARD_NAMED) return HEARD_NAMED[w]
+    if (w in HEARD_NUMBERED) {
+      const n = spokenNumberAt(arr, i + 1)
+      if (n) return `${HEARD_NUMBERED[w]} ${n}`
+    }
+  }
+  return null
+}
+
 function words(s) {
   return String(s || '')
     .split(/\s+/)
@@ -128,7 +200,7 @@ function words(s) {
  * @param {string} title
  * @param {string} before - transcript of the clip before the start
  * @param {string} after - transcript of the clip after the start
- * @returns {{before: string, after: string, heading: boolean, late: boolean, early: boolean}}
+ * @returns {{before: string, after: string, heading: boolean, late: boolean, early: boolean, heard: string|null}}
  */
 function assessSpeech(title, before, after) {
   before = String(before || '')
@@ -164,7 +236,7 @@ function assessSpeech(title, before, after) {
   const keyAt = key ? afterKeyTok.indexOf(` ${key} `) : -1
   const heading = keyAt >= 0 && words(afterKeyTok.slice(0, keyAt)).length <= 5 && !early
 
-  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early }
+  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early, heard: heardHeading(after) }
 }
 
 /**
@@ -251,6 +323,7 @@ module.exports = {
   MAX_VERIFY_STARTS,
   VERIFY_DEADLINE_MS,
   tokens,
+  heardHeading,
   assessSpeech,
   createVerifier
 }

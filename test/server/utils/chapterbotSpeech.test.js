@@ -5,7 +5,7 @@ const Logger = require('../../../server/Logger')
 const chapterbotSpeech = require('../../../server/utils/chapterbotSpeech')
 const { ChapterbotError } = require('../../../server/utils/chapterbotClient')
 
-const { tokens, assessSpeech, createVerifier } = chapterbotSpeech
+const { tokens, heardHeading, assessSpeech, createVerifier } = chapterbotSpeech
 
 describe('chapterbotSpeech', () => {
   describe('tokens (build-chapters.ps1 Tokens)', () => {
@@ -20,6 +20,48 @@ describe('chapterbotSpeech', () => {
       expect(tokens("Don’t stop, Ana's")).to.deep.equal(['dont', 'stop', 'anas'])
       expect(tokens('')).to.deep.equal([])
     })
+  })
+
+  describe('heardHeading', () => {
+    const fixtures = [
+      ["Chapter 3 The rain didn't let up...", 'Chapter 3'],
+      ['Chapter Twenty-One. Morning came.', 'Chapter 21'],
+      ['chapter twenty one, morning came', 'Chapter 21'],
+      ['Chapter Twelve.', 'Chapter 12'],
+      ['CHAPTER XII. The rain.', 'Chapter 12'],
+      ['Chapter I. It began.', 'Chapter 1'],
+      ['Chapter 007', 'Chapter 7'],
+      ['Chapter one hundred and two. The end.', 'Chapter 102'],
+      ['Chapter One Hundred. The end.', 'Chapter 100'],
+      ['Prologue. In the year of the comet', 'Prologue'],
+      ['Epilogue. Ten years later', 'Epilogue'],
+      ['Interlude: Quasar. The ship drifted.', 'Interlude'],
+      ['Part Two. The Return.', 'Part 2'],
+      ['Part II: Winter', 'Part 2'],
+      ['Heat two of seven. Chapter three. The track was wet.', 'Chapter 3'],
+      ['Black Ice, Chapter Four. Snow.', 'Chapter 4']
+    ]
+    for (const [after, heard] of fixtures) {
+      it(`hears "${heard}" in "${after}"`, () => {
+        expect(heardHeading(after)).to.equal(heard)
+      })
+    }
+
+    const misses = [
+      ['nothing heard', ''],
+      ['no heading', 'The rain had not stopped for three days.'],
+      ['heading more than 5 words in', 'and she never looked back again. Chapter Twelve. The rain'],
+      ['"chapter" without a number', 'Chapter. The rain had not stopped.'],
+      ['"part" in prose', 'Part of me wanted to stay.'],
+      ['"chapter" in prose', 'That chapter of my life was over.'],
+      ['a word made of roman numeral letters', 'Chapter civil war had begun.'],
+      ['not a string', undefined]
+    ]
+    for (const [name, after] of misses) {
+      it(`hears nothing: ${name}`, () => {
+        expect(heardHeading(after)).to.equal(null)
+      })
+    }
   })
 
   describe('assessSpeech (verify-report.ps1 rules)', () => {
@@ -99,12 +141,21 @@ describe('chapterbotSpeech', () => {
     for (const f of fixtures) {
       it(f.name, () => {
         const speech = assessSpeech(f.title, f.before, f.after)
-        expect(speech).to.have.keys(['before', 'after', 'heading', 'late', 'early'])
+        expect(speech).to.have.keys(['before', 'after', 'heading', 'late', 'early', 'heard'])
         expect(speech).to.include(f.expected)
         expect(speech.before).to.equal(f.before)
         expect(speech.after).to.equal(f.after)
       })
     }
+
+    it('reports the heading heard at the start of the after-clip, whatever the title is', () => {
+      // QA: the title is a file-style name, the narrator reads out a chapter number
+      const speech = assessSpeech('Black Ice - Part 02', 'and the door slammed behind her.', "Chapter 3 The rain didn't let up all night.")
+      expect(speech).to.include({ heading: false, late: false, early: false, heard: 'Chapter 3' })
+      expect(assessSpeech('Chapter 12', 'the end.', 'Chapter Twelve. The rain had not stopped.').heard).to.equal('Chapter 12')
+      expect(assessSpeech('Chapter 12', 'the end.', 'The rain had not stopped for three days.').heard).to.equal(null)
+      expect(assessSpeech('Chapter 9', '', '').heard).to.equal(null)
+    })
 
     it('caps the echoed transcripts', () => {
       const speech = assessSpeech('Chapter 1', 'x '.repeat(2000), 'y '.repeat(2000))
@@ -159,7 +210,7 @@ describe('chapterbotSpeech', () => {
       expect(client.verify.firstCall.args[0].starts).to.deep.equal([500.5, 1500.25, 1800])
       expect(warnings).to.deep.equal([])
       expect(verdicts).to.have.length(3)
-      expect(verdicts[0]).to.deep.equal({ index: 1, speech: { before: 'the end.', after: 'Chapter one. Hello.', heading: true, late: false, early: false } })
+      expect(verdicts[0]).to.deep.equal({ index: 1, speech: { before: 'the end.', after: 'Chapter one. Hello.', heading: true, late: false, early: false, heard: 'Chapter 1' } })
       expect(verdicts[1]).to.include({ index: 2, confidence: 'low' })
       expect(verdicts[1].speech).to.include({ late: true, early: false })
       expect(verdicts[2]).to.include({ index: 3, confidence: 'low' })
