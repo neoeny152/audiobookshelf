@@ -1,3 +1,10 @@
+> [!WARNING]
+> **Personal fork. Not the official Audiobookshelf project, not affiliated with or endorsed by its maintainers.**
+> I use this for my own experiments and my own server. It is not supported, may break, and may never be updated. Use it at your own risk.
+> I am not accepting issues or PRs here, and changes are not being offered upstream.
+> For the real project, go to [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) and [audiobookshelf.org](https://www.audiobookshelf.org).
+> Licensed under GPL-3.0, like upstream.
+
 <br />
 <div align="center">
    <img alt="Audiobookshelf Banner" src="https://github.com/advplyr/audiobookshelf/raw/master/images/banner.svg" width="600">
