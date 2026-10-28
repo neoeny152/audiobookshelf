@@ -46,6 +46,7 @@ function run(overrides = {}) {
 describe('chapterSnapRunner', () => {
   beforeEach(() => {
     sinon.stub(Logger, 'info')
+    sinon.stub(Logger, 'warn')
     sinon.stub(Logger, 'error')
   })
 
@@ -120,6 +121,21 @@ describe('chapterSnapRunner', () => {
     expect(result.warnings).to.have.length(1)
     expect(result.warnings[0]).to.include('track 2')
     expect(result.warnings[0]).to.not.include('/books')
+  })
+
+  it('does not echo ffmpeg error text to the client, but logs it', async () => {
+    const ffmpegMessage = 'ffmpeg exited with code 1: file:/mnt/nas/secret/part2.mp3: No such file or directory'
+    const result = await run({
+      detect: async (params) => {
+        if (params.path.endsWith('part2.mp3')) throw new Error(ffmpegMessage)
+        return { lines: linesFor(params) }
+      }
+    })
+    expect(result.warnings).to.have.length(1)
+    expect(result.warnings[0]).to.match(/^Silence detection failed for track 2 at [0-9.]+s$/)
+    expect(JSON.stringify(result)).to.not.include('/mnt/nas')
+    expect(JSON.stringify(result)).to.not.include('No such file')
+    expect(Logger.warn.calledWithMatch(sinon.match('No such file or directory'))).to.equal(true)
   })
 
   it('throws ALL_FAILED when every segment fails', async () => {

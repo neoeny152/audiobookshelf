@@ -140,7 +140,9 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
       analysedSec += seg.localDur
     } else if (result.status === 'failed') {
       failedSegments++
-      warnings.push(`Silence detection failed for track ${seg.trackIndex} at ${seg.localStart.toFixed(1)}s: ${String(result.error).slice(0, 200)}`)
+      // ffmpeg's message can contain file paths and diagnostics: log it, never return it to the client
+      Logger.warn(`[ChapterSnap] Silence detection failed for "${libraryItemId}" track ${seg.trackIndex} at ${seg.localStart.toFixed(1)}s: ${String(result.error).slice(0, 500)}`)
+      warnings.push(`Silence detection failed for track ${seg.trackIndex} at ${seg.localStart.toFixed(1)}s`)
     } else {
       skippedSegments++
     }
