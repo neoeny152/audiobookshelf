@@ -584,22 +584,20 @@ class LibraryItemController {
 
     const libraryId = itemsToDelete[0].libraryId
 
+    // Collect series & authors of all deleted books and check them once after all items are deleted
+    const seriesIds = new Set()
+    const authorIds = new Set()
+
     for (const libraryItem of itemsToDelete) {
       const libraryItemPath = libraryItem.path
       Logger.info(`[LibraryItemController] (${hardDelete ? 'Hard' : 'Soft'}) deleting Library Item "${libraryItem.media.title}" with id "${libraryItem.id}"`)
       const mediaItemIds = []
-      const seriesIds = []
-      const authorIds = []
       if (libraryItem.isPodcast) {
         mediaItemIds.push(...libraryItem.media.podcastEpisodes.map((ep) => ep.id))
       } else {
         mediaItemIds.push(libraryItem.media.id)
-        if (libraryItem.media.series?.length) {
-          seriesIds.push(...libraryItem.media.series.map((se) => se.id))
-        }
-        if (libraryItem.media.authors?.length) {
-          authorIds.push(...libraryItem.media.authors.map((au) => au.id))
-        }
+        libraryItem.media.series?.forEach((se) => seriesIds.add(se.id))
+        libraryItem.media.authors?.forEach((au) => authorIds.add(au.id))
       }
       await this.handleDeleteLibraryItem(libraryItem.id, mediaItemIds, libraryItem.libraryId)
       if (hardDelete) {
@@ -608,12 +606,13 @@ class LibraryItemController {
           Logger.error(`[LibraryItemController] Failed to delete library item from file system at "${libraryItemPath}"`, error)
         })
       }
-      if (seriesIds.length) {
-        await this.checkRemoveEmptySeries(seriesIds)
-      }
-      if (authorIds.length) {
-        await this.checkRemoveAuthorsWithNoBooks(authorIds)
-      }
+    }
+
+    if (seriesIds.size) {
+      await this.checkRemoveEmptySeries([...seriesIds])
+    }
+    if (authorIds.size) {
+      await this.checkRemoveAuthorsWithNoBooks([...authorIds])
     }
 
     await Database.resetLibraryIssuesFilterData(libraryId)
@@ -667,9 +666,11 @@ class LibraryItemController {
     const seriesIdsRemoved = []
     const authorIdsRemoved = []
 
+    const libraryItemMap = new Map(libraryItems.map((li) => [li.id, li]))
+
     for (const updatePayload of updatePayloads) {
       const mediaPayload = updatePayload.mediaPayload
-      const libraryItem = libraryItems.find((li) => li.id === updatePayload.id)
+      const libraryItem = libraryItemMap.get(updatePayload.id)
 
       if (libraryItem.isPodcast && mediaPayload.autoDownloadSchedule && !cron.validate(mediaPayload.autoDownloadSchedule)) {
         Logger.warn(`[LibraryItemController] Invalid auto download schedule cron expression "${mediaPayload.autoDownloadSchedule}" for library item "${libraryItem.media.title}" - skipping update`)
