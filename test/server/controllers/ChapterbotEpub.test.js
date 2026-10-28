@@ -17,6 +17,7 @@ const SocketAuthority = require('../../../server/SocketAuthority')
 const chapterbotClient = require('../../../server/utils/chapterbotClient')
 const ChapterbotEpubManager = require('../../../server/managers/ChapterbotEpubManager')
 const { filePathToPOSIX } = require('../../../server/utils/fileUtils')
+const fsExtra = require('../../../server/libs/fsExtra')
 
 const TOKEN = 'epub-test-token-0123456789'
 const JOB_ID = '0123456789abcdef0123456789abcdef'
@@ -42,7 +43,11 @@ async function startSidecar() {
     requests: [],
     state: { status: 'queued', stage: null, progress: 0, chaptersDone: 0, chaptersTotal: 4, error: null, cancelRequested: false },
     createStatus: 202,
-    deleteAnswer: { status: 'cancelled' }
+    deleteAnswer: { status: 'cancelled' },
+    deleteDelayMs: 0,
+    /** when set, GET result waits until sidecar.releaseResult() */
+    holdResult: false,
+    releaseResult: null
   }
   const server = http.createServer((req, res) => {
     const chunks = []
@@ -60,10 +65,19 @@ async function startSidecar() {
       }
       if (req.method === 'GET' && req.url === `/v1/jobs/${JOB_ID}`) return json(200, { id: JOB_ID, kind: 'epub', ...sidecar.state })
       if (req.method === 'GET' && req.url === `/v1/jobs/${JOB_ID}/result`) {
-        res.writeHead(200, { 'Content-Type': 'application/epub+zip' })
-        return res.end(EPUB_BYTES)
+        const send = () => {
+          res.writeHead(200, { 'Content-Type': 'application/epub+zip' })
+          res.end(EPUB_BYTES)
+        }
+        if (!sidecar.holdResult) return send()
+        sidecar.releaseResult = send
+        return
       }
-      if (req.method === 'DELETE' && req.url === `/v1/jobs/${JOB_ID}`) return json(200, { id: JOB_ID, ...sidecar.deleteAnswer })
+      if (req.method === 'DELETE' && req.url === `/v1/jobs/${JOB_ID}`) {
+        const answer = { id: JOB_ID, ...sidecar.deleteAnswer }
+        if (!sidecar.deleteDelayMs) return json(200, answer)
+        return setTimeout(() => json(200, answer), sidecar.deleteDelayMs)
+      }
       json(404, { detail: { code: 'not_found', message: 'no such job' } })
     })
   })
@@ -358,6 +372,60 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(payload).to.include({ status: 'failed', error: 'Chapterbot: audio_failed' })
     expect(fs.readdirSync(itemDir)).to.deep.equal([])
     expect(scanItem.called).to.equal(false)
+  })
+
+  it('answers a status GET at once while the finished EPUB is still downloading', async () => {
+    expect((await call('startEpubJob')).statusCode).to.equal(202)
+    const record = ChapterbotEpubManager.jobs.get(bookItemId)
+    // only the GET polls from here on
+    ChapterbotEpubManager.pollMs = 60000
+    await until(() => !record.refreshing)
+    ChapterbotEpubManager.schedule(record)
+    sidecar.holdResult = true
+    sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+    record.lastPolledAt = 0
+
+    const res = await call('getEpubJob', { params: { jobId: JOB_ID } })
+    expect(res.json.firstCall.args[0]).to.include({ status: 'downloading' })
+    await until(() => sidecar.releaseResult)
+    expect(record.status).to.equal('downloading')
+    // a second poll does not wait for the download either
+    expect((await call('getEpubJob', { params: { jobId: JOB_ID } })).json.firstCall.args[0]).to.include({ status: 'downloading' })
+
+    sidecar.releaseResult()
+    await until(() => record.status === 'done')
+    expect(fs.existsSync(Path.join(itemDir, 'Black Ice (from audio).epub'))).to.equal(true)
+    expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+  })
+
+  it('fails the job, without crashing, when the staging file cannot be opened', async () => {
+    const realCreate = fsExtra.createWriteStream
+    sinon.stub(fsExtra, 'createWriteStream').callsFake((path, opts) => realCreate(Path.join(stagingDir, 'missing-dir', 'x.epub'), opts))
+    expect((await call('startEpubJob')).statusCode).to.equal(202)
+    sidecar.state = { ...sidecar.state, status: 'done' }
+    await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'failed')
+    expect(ChapterbotEpubManager.jobs.get(bookItemId).error).to.equal('Saving the EPUB into the library failed')
+    expect(fs.readdirSync(itemDir)).to.deep.equal([])
+    // the open failed before the sidecar was asked for the result
+    expect(sidecar.requests.some((r) => r.url === `/v1/jobs/${JOB_ID}/result`)).to.equal(false)
+    expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_failed')).to.equal(true)
+  })
+
+  it('leaves a job that finished while being cancelled to the finish path', async () => {
+    expect((await call('startEpubJob')).statusCode).to.equal(202)
+    sidecar.deleteDelayMs = 100
+    sidecar.deleteAnswer = { status: 'deleted' }
+    const cancelling = call('cancelEpubJob', { params: { jobId: JOB_ID } })
+    // the job ends on the sidecar while the DELETE is in flight; the next poll sees it
+    sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+    const res = await cancelling
+    expect(res.statusCode).to.equal(200)
+    expect(res.json.firstCall.args[0].status).to.be.oneOf(['downloading', 'done'])
+    expect(res.json.firstCall.args[0].cancelRequested).to.equal(false)
+
+    await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+    expect(clientEmitter.callCount).to.equal(1)
+    expect(clientEmitter.firstCall.args[1]).to.equal('chapterbot_epub_done')
   })
 
   it('maps sidecar refusals to 429 / 502 and frees the item', async () => {

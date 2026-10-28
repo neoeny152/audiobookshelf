@@ -187,7 +187,9 @@ class ChapterbotEpubManager {
       lastPolledAt: 0,
       pollFailures: 0,
       timer: null,
-      refreshing: null
+      refreshing: null,
+      /** @type {Promise<void>|null} the background download/copy/rescan once the sidecar reports done */
+      finishing: null
     }
     this.jobs.set(libraryItem.id, record)
 
@@ -263,7 +265,13 @@ class ChapterbotEpubManager {
         record.status = state.status
         return
       case 'done':
-        return this.finish(record)
+        // download, copy and rescan in the background: finish() marks the record 'downloading' before its first
+        // await, so a status GET that triggered this poll answers at once and the socket event reports the end
+        record.finishing = this.finish(record).catch((error) => {
+          Logger.error(`[ChapterbotEpubManager] Finishing EPUB job ${record.jobId} failed`, error)
+          if (record.status === 'downloading') this.fail(record, 'Saving the EPUB into the library failed')
+        })
+        return
       case 'cancelled':
         return this.cancelled(record)
       case 'failed':
@@ -315,6 +323,11 @@ class ChapterbotEpubManager {
       await fs.remove(temp)
       const out = fs.createWriteStream(temp, { flags: 'wx' })
       const closed = new Promise((resolve) => out.once('close', resolve))
+      // open the staging file before asking the sidecar, so an open() failure is an ordinary error here
+      await new Promise((resolve, reject) => {
+        out.once('open', resolve)
+        out.once('error', reject)
+      })
       try {
         await this.client.downloadJobResult(record.jobId, out)
       } catch (error) {
@@ -425,6 +438,9 @@ class ChapterbotEpubManager {
     const record = this.getRecord(libraryItemId)
     if (!record || record.jobId !== jobId) throw new EpubJobError(404, 'No such EPUB job')
     if (!['queued', 'running'].includes(record.status)) throw new EpubJobError(409, `The EPUB job is ${record.status}`)
+    // a poll in flight may be about to see the job end; let it land first
+    if (record.refreshing) await record.refreshing.catch(() => {})
+    if (!['queued', 'running'].includes(record.status)) throw new EpubJobError(409, `The EPUB job is ${record.status}`)
     let state
     try {
       state = await this.client.deleteJob(jobId)
@@ -432,7 +448,13 @@ class ChapterbotEpubManager {
       Logger.error(`[ChapterbotEpubManager] Cancelling EPUB job ${jobId} failed: ${error.message}`)
       throw new EpubJobError(502, 'Chapterbot could not cancel the EPUB job')
     }
+    if (!['queued', 'running'].includes(record.status)) {
+      // a poll saw the job end while the DELETE was in flight: that path (finish/fail/cancelled) owns the record now
+      Logger.info(`[ChapterbotEpubManager] EPUB job ${jobId} ended (${record.status}) while it was being cancelled`)
+      return this.toJSON(record)
+    }
     record.cancelRequested = true
+    // "deleted": the job had already finished on the sidecar and its result is gone, so it is cancelled here too
     // a queued job is cancelled at once; a running one stops at its next segment (seen on a later poll)
     if (state?.status === 'cancelled' || state?.status === 'deleted') this.cancelled(record)
     return this.toJSON(record)
