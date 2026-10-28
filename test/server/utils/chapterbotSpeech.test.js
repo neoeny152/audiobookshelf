@@ -39,7 +39,13 @@ describe('chapterbotSpeech', () => {
       ['Part Two. The Return.', 'Part 2'],
       ['Part II: Winter', 'Part 2'],
       ['Heat two of seven. Chapter three. The track was wet.', 'Chapter 3'],
-      ['Black Ice, Chapter Four. Snow.', 'Chapter 4']
+      ['Black Ice, Chapter Four. Snow.', 'Chapter 4'],
+      ['End of chapter two. Chapter three.', 'Chapter 3'],
+      ['End of prologue. Chapter one.', 'Chapter 1'],
+      ['Chapter I It began.', 'Chapter 1'],
+      ['Part V', 'Part 5'],
+      ['Chapter One. Two days later.', 'Chapter 1'],
+      ['Chapter one hundred twenty one.', 'Chapter 121']
     ]
     for (const [after, heard] of fixtures) {
       it(`hears "${heard}" in "${after}"`, () => {
@@ -55,6 +61,11 @@ describe('chapterbotSpeech', () => {
       ['"part" in prose', 'Part of me wanted to stay.'],
       ['"chapter" in prose', 'That chapter of my life was over.'],
       ['a word made of roman numeral letters', 'Chapter civil war had begun.'],
+      ['the previous chapter closing', 'End of chapter two. And so it was.'],
+      ['the pronoun I after part', 'The part I liked best was'],
+      ['the pronoun I after a heading word', 'Part I was afraid of the dark.'],
+      ['number words it cannot read', 'chapter one thousand'],
+      ['number words run together', 'Chapter twenty twenty'],
       ['not a string', undefined]
     ]
     for (const [name, after] of misses) {
@@ -155,6 +166,14 @@ describe('chapterbotSpeech', () => {
       expect(assessSpeech('Chapter 12', 'the end.', 'Chapter Twelve. The rain had not stopped.').heard).to.equal('Chapter 12')
       expect(assessSpeech('Chapter 12', 'the end.', 'The rain had not stopped for three days.').heard).to.equal(null)
       expect(assessSpeech('Chapter 9', '', '').heard).to.equal(null)
+    })
+
+    it('hears nothing at a start flagged EARLY or LATE (the clip may hold the neighbouring chapter)', () => {
+      const early = assessSpeech('Chapter 4', '', 'End of chapter three. Thank you for listening. Chapter four. The rain')
+      expect(early).to.include({ heading: false, early: true, heard: null })
+      const late = assessSpeech('Chapter 4', 'and that was that. Chapter four.', 'Part two. The rain had stopped.')
+      expect(late).to.include({ late: true, heard: null })
+      expect(heardHeading('Part two. The rain had stopped.')).to.equal('Part 2')
     })
 
     it('caps the echoed transcripts', () => {

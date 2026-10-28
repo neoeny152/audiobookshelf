@@ -10,7 +10,8 @@
  *   ignored (the start looks right); not EARLY
  * - heard (not in the script, additive): a spoken heading such as "Chapter 3", "Part 2" or "Prologue" starting within
  *   the first 5 words of the after-clip, normalised (number words and roman numerals become digits), whatever the
- *   title is; null when none is heard. Clients may offer it as the chapter title.
+ *   title is; null when none is heard, and null when the start is LATE or EARLY (the clip may hold the neighbouring
+ *   chapter). Clients may offer it as the chapter title.
  * LATE and EARLY only apply to titles that start with chapter/prologue/epilogue/interlude/part, as in the script.
  *
  * Speech never moves a start (that is the snap rule's job). It may only lower confidence: LATE or EARLY -> low.
@@ -127,58 +128,96 @@ function tokens(s) {
 }
 
 /**
- * The chapter number spoken at arr[i]: digits ("3", "03"), roman numerals ("xii", "i"), or number words up to the
- * hundreds ("twenty one", "one hundred and two").
+ * The words of a transcript for heardHeading: lower case (apostrophes dropped, anything else non-alphanumeric splits
+ * words), each with whether clause punctuation (or the end of the text) follows it and whether it was capitalised.
  *
- * @param {string[]} arr - lower case words, punctuation removed
+ * @param {string} text
+ * @returns {{w: string, stop: boolean, cap: boolean}[]}
+ */
+function headingWords(text) {
+  const s = String(text || '').replace(/[’']/g, '')
+  const found = []
+  const re = /[A-Za-z0-9]+/g
+  let m
+  while ((m = re.exec(s))) found.push({ raw: m[0], start: m.index, end: m.index + m[0].length })
+  return found.map((f, k) => {
+    const sep = s.slice(f.end, k + 1 < found.length ? found[k + 1].start : s.length)
+    return { w: f.raw.toLowerCase(), stop: k + 1 === found.length || /[.,;:!?…—–]/.test(sep), cap: /^[A-Z]/.test(f.raw) }
+  })
+}
+
+/** Number words that can continue a number; one left over after the part spokenNumberAt reads means it misread it */
+function isNumberWord(w) {
+  return w in NUMBER_WORDS || w === 'hundred' || w === 'thousand' || w === 'million'
+}
+
+/**
+ * The chapter number spoken at arr[i]: digits ("3", "03"), roman numerals ("xii", "i"), or number words up to the
+ * hundreds ("twenty one", "one hundred and two"). Null when number words follow that it does not read ("one
+ * thousand", "twenty twenty"), and for a one-letter numeral ("I", "V", "X") that runs on into prose ("Part I was"),
+ * since a wrong number is worse than none.
+ *
+ * @param {{w: string, stop: boolean, cap: boolean}[]} arr - from headingWords
  * @param {number} i
  * @returns {number|null}
  */
 function spokenNumberAt(arr, i) {
-  const w = arr[i]
-  if (w === undefined) return null
+  if (!arr[i]) return null
+  const w = arr[i].w
   if (/^\d{1,4}$/.test(w)) return Number(w) || null
-  if (ROMAN_RE.test(w)) return romanToInt(w)
+  if (ROMAN_RE.test(w)) {
+    if (w.length > 1) return romanToInt(w)
+    // a lone "i" is usually the pronoun: a numeral only at a clause boundary or before a new capitalised word
+    const next = arr[i + 1]
+    const boundary = arr[i].stop || (next.cap && next.w !== 'i')
+    return boundary ? romanToInt(w) : null
+  }
   if (!(w in NUMBER_WORDS)) return null
 
+  const at = (k) => (arr[k] ? arr[k].w : undefined)
   let n = NUMBER_WORDS[w]
   let k = i + 1
-  if (n < 10 && arr[k] === 'hundred') {
+  if (n < 10 && !arr[i].stop && at(k) === 'hundred') {
     n *= 100
     k++
-    if (arr[k] === 'and' && arr[k + 1] in NUMBER_WORDS) k++
-    if (arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 100) {
-      const rest = NUMBER_WORDS[arr[k]]
+    if (!arr[k - 1].stop && at(k) === 'and' && at(k + 1) in NUMBER_WORDS) k++
+    if (!arr[k - 1].stop && at(k) in NUMBER_WORDS && NUMBER_WORDS[at(k)] < 100) {
+      const rest = NUMBER_WORDS[at(k)]
       n += rest
       k++
-      if (rest >= 20 && arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 10) n += NUMBER_WORDS[arr[k]]
+      if (rest >= 20 && !arr[k - 1].stop && at(k) in NUMBER_WORDS && NUMBER_WORDS[at(k)] < 10) {
+        n += NUMBER_WORDS[at(k)]
+        k++
+      }
     }
-    return n
+  } else if (n >= 20 && !arr[i].stop && at(k) in NUMBER_WORDS && NUMBER_WORDS[at(k)] < 10) {
+    n += NUMBER_WORDS[at(k)]
+    k++
   }
-  if (n >= 20 && arr[k] in NUMBER_WORDS && NUMBER_WORDS[arr[k]] < 10) n += NUMBER_WORDS[arr[k]]
+  // the last word read ends the number unless more number words run on from it
+  if (!arr[k - 1].stop && isNumberWord(at(k))) return null
   return n
 }
+
+/** "End of chapter two", "the end of part one": a heading word right after these closes the previous chapter */
+const HEARD_CLOSING = new Set(['of', 'end'])
 
 /**
  * A spoken heading at the start of the after-clip, normalised: "Chapter Twenty-One. The rain" -> "Chapter 21",
  * "Part Two" -> "Part 2", "Prologue" -> "Prologue". Only counts when the heading word is one of the first
  * HEARD_MAX_LEAD_WORDS words, so a short lead-in ("Heat two of seven. Chapter three.") is allowed but prose that
- * mentions a chapter later is not. "Chapter" or "Part" without a number after it is not a heading.
+ * mentions a chapter later is not. "Chapter" or "Part" without a number after it is not a heading, and neither is
+ * the previous chapter's closing line ("End of chapter two. Chapter three." -> "Chapter 3").
  *
  * @param {string} after - transcript of the clip after the start
  * @returns {string|null}
  */
 function heardHeading(after) {
-  const arr = String(after || '')
-    .toLowerCase()
-    .replace(/[’']/g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
+  const arr = headingWords(after)
   const limit = Math.min(arr.length, HEARD_MAX_LEAD_WORDS)
   for (let i = 0; i < limit; i++) {
-    const w = arr[i]
+    const w = arr[i].w
+    if (i > 0 && HEARD_CLOSING.has(arr[i - 1].w)) continue
     if (w in HEARD_NAMED) return HEARD_NAMED[w]
     if (w in HEARD_NUMBERED) {
       const n = spokenNumberAt(arr, i + 1)
@@ -236,7 +275,11 @@ function assessSpeech(title, before, after) {
   const keyAt = key ? afterKeyTok.indexOf(` ${key} `) : -1
   const heading = keyAt >= 0 && words(afterKeyTok.slice(0, keyAt)).length <= 5 && !early
 
-  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early, heard: heardHeading(after) }
+  // a start flagged LATE or EARLY is not where the speech check listened for, so what it heard there may be the
+  // neighbouring chapter ("End of chapter three. ... Chapter four.")
+  const heard = late || early ? null : heardHeading(after)
+
+  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early, heard }
 }
 
 /**
