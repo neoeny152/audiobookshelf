@@ -1415,6 +1415,7 @@ class LibraryController {
   /**
    * GET: /api/library/:id/download
    * Downloads multiple library items
+   * Query param ?ids=id1,id2,...
    *
    * @param {LibraryControllerRequest} req
    * @param {Response} res
@@ -1430,8 +1431,49 @@ class LibraryController {
       return
     }
 
-    const itemIds = req.query.ids.split(',')
+    return LibraryController.handleDownloadMultiple(req, res, req.query.ids.split(','))
+  }
 
+  /**
+   * POST: /api/libraries/:id/download
+   * Same as the GET route but takes the ids in the request body so large selections
+   * do not hit URL length limits. Accepts a JSON body or a urlencoded form body
+   * (so a plain HTML form submit with ?token= in the action URL can trigger a browser download).
+   *
+   * Body: { ids: string[] | string } where a string is a comma separated list of ids
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  async downloadMultiplePost(req, res) {
+    if (!req.user.canDownload) {
+      Logger.warn(`User "${req.user.username}" attempted to download without permission`)
+      return res.sendStatus(403)
+    }
+
+    const ids = req.body?.ids
+    let itemIds = null
+    if (typeof ids === 'string' && ids) {
+      itemIds = ids.split(',')
+    } else if (Array.isArray(ids) && ids.length && ids.every((id) => typeof id === 'string' && id)) {
+      itemIds = ids
+    }
+    if (!itemIds) {
+      res.status(400).send('Invalid request. ids must be a string or an array of strings')
+      return
+    }
+
+    return LibraryController.handleDownloadMultiple(req, res, itemIds)
+  }
+
+  /**
+   * Shared implementation of GET and POST /api/libraries/:id/download
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   * @param {string[]} itemIds
+   */
+  static async handleDownloadMultiple(req, res, itemIds) {
     const libraryItems = await Database.libraryItemModel.findAllExpandedWhere({
       id: itemIds,
       libraryId: req.library.id

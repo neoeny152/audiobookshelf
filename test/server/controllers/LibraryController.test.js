@@ -175,4 +175,94 @@ describe('LibraryController.downloadMultiple', () => {
     expect(pathObjects).to.have.length(1)
     expect(pathObjects[0].path).to.equal('/test-lib/allowed')
   })
+  describe('POST /api/libraries/:id/download', () => {
+    function makePostReq(body, user = restrictedUser) {
+      return { method: 'POST', query: {}, body, user, library: libraryRecord }
+    }
+
+    it('accepts an array of ids in the body', async () => {
+      const res = makeRes()
+      await LibraryController.downloadMultiplePost(makePostReq({ ids: [allowedItemId] }), res)
+      expect(res.sendStatus.called).to.be.false
+      expect(zipHelpers.zipDirectoriesPipe.calledOnce).to.be.true
+      expect(zipHelpers.zipDirectoriesPipe.firstCall.args[0].map((po) => po.path)).to.deep.equal(['/test-lib/allowed'])
+    })
+
+    it('accepts a comma separated string of ids in the body (form submit)', async () => {
+      const res = makeRes()
+      await LibraryController.downloadMultiplePost(makePostReq({ ids: `${allowedItemId}` }), res)
+      expect(zipHelpers.zipDirectoriesPipe.calledOnce).to.be.true
+    })
+
+    it('applies the same access checks as GET (403 on explicit / tag-restricted items)', async () => {
+      for (const ids of [[explicitItemId], [taggedItemId], [allowedItemId, explicitItemId]]) {
+        const res = makeRes()
+        await LibraryController.downloadMultiplePost(makePostReq({ ids }), res)
+        expect(res.sendStatus.calledWith(403)).to.be.true
+      }
+      expect(zipHelpers.zipDirectoriesPipe.called).to.be.false
+    })
+
+    it('returns 403 without download permission', async () => {
+      restrictedUser.permissions = { ...restrictedUser.permissions, download: false }
+      const res = makeRes()
+      await LibraryController.downloadMultiplePost(makePostReq({ ids: [allowedItemId] }), res)
+      expect(res.sendStatus.calledWith(403)).to.be.true
+      expect(zipHelpers.zipDirectoriesPipe.called).to.be.false
+    })
+
+    it('returns 404 when no ids are in this library and 400 for invalid bodies', async () => {
+      let res = makeRes()
+      await LibraryController.downloadMultiplePost(makePostReq({ ids: ['does-not-exist'] }), res)
+      expect(res.status.calledWith(404)).to.be.true
+
+      for (const body of [undefined, {}, { ids: '' }, { ids: [] }, { ids: [5] }, { ids: { a: 1 } }]) {
+        res = makeRes()
+        await LibraryController.downloadMultiplePost(makePostReq(body), res)
+        expect(res.status.calledWith(400), JSON.stringify(body)).to.be.true
+      }
+      expect(zipHelpers.zipDirectoriesPipe.called).to.be.false
+    })
+
+    it('is routed next to the existing GET route and parses JSON and urlencoded bodies like Server.js', async () => {
+      const express = require('express')
+      const axios = require('axios')
+      const ApiRouter = require('../../../server/routers/ApiRouter')
+      const Auth = require('../../../server/Auth')
+      const ApiCacheManager = require('../../../server/managers/ApiCacheManager')
+      const apiRouter = new ApiRouter({ auth: new Auth(), apiCacheManager: new ApiCacheManager() })
+      const routes = apiRouter.router._router.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods).join(',')} ${l.route.path}`)
+      expect(routes).to.include('get /libraries/:id/download')
+      expect(routes).to.include('post /libraries/:id/download')
+
+      // Same body parsers as Server.js, then the real ApiRouter
+      zipHelpers.zipDirectoriesPipe.callsFake(async (pathObjects, filename, res) => {
+        res.json({ paths: pathObjects.map((po) => po.path) })
+      })
+      const app = express()
+      app.use(express.urlencoded({ extended: true, limit: '5mb' }))
+      app.use(express.json({ limit: '10mb' }))
+      app.use((req, res, next) => {
+        req.user = restrictedUser
+        next()
+      })
+      app.use('/api', apiRouter.router)
+      const server = await new Promise((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s))
+      })
+      try {
+        const base = `http://127.0.0.1:${server.address().port}/api/libraries/${library.id}/download`
+        const formRes = await axios.post(base, new URLSearchParams({ ids: allowedItemId }).toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } })
+        expect(formRes.data.paths).to.deep.equal(['/test-lib/allowed'])
+
+        const jsonRes = await axios.post(base, { ids: [allowedItemId] })
+        expect(jsonRes.data.paths).to.deep.equal(['/test-lib/allowed'])
+
+        const getRes = await axios.get(`${base}?ids=${allowedItemId}`)
+        expect(getRes.data.paths).to.deep.equal(['/test-lib/allowed'])
+      } finally {
+        await new Promise((resolve) => server.close(resolve))
+      }
+    })
+  })
 })

@@ -95,6 +95,7 @@ class ApiRouter {
     this.router.post('/libraries/:id/remove-metadata', LibraryController.middleware.bind(this), LibraryController.removeAllMetadataFiles.bind(this))
     this.router.get('/libraries/:id/podcast-titles', LibraryController.middleware.bind(this), LibraryController.getPodcastTitles.bind(this))
     this.router.get('/libraries/:id/download', LibraryController.middleware.bind(this), LibraryController.downloadMultiple.bind(this))
+    this.router.post('/libraries/:id/download', LibraryController.middleware.bind(this), LibraryController.downloadMultiplePost.bind(this))
 
     //
     // Item Routes
