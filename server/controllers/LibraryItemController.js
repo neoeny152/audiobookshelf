@@ -8,6 +8,8 @@ const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 
 const zipHelpers = require('../utils/zipHelpers')
+const chapterSnap = require('../utils/chapterSnap')
+const chapterSnapRunner = require('../utils/chapterSnapRunner')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
@@ -955,6 +957,80 @@ class LibraryItemController {
       success: true,
       updated: hasUpdates
     })
+  }
+
+  /**
+   * POST: /api/items/:id/chapters/snap
+   * Propose chapter starts snapped to pauses in the audio. Never saves anything.
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async snapMediaChapters(req, res) {
+    if (!req.user.canUpdate) {
+      Logger.error(`[LibraryItemController] User "${req.user.username}" attempted to snap chapters with invalid permissions`)
+      return res.sendStatus(403)
+    }
+
+    const libraryItem = req.libraryItem
+    if (libraryItem.isMissing || !libraryItem.isBook || !libraryItem.media.hasAudioTracks) {
+      return res.status(400).json({ error: 'Item is not a book with audio tracks' })
+    }
+
+    const media = libraryItem.media
+    const timeline = chapterSnap.buildTimeline(media.includedAudioFiles)
+    const T = chapterSnap.computeDuration(timeline, media.duration)
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {}
+
+    let options, chapters, indexes
+    try {
+      options = chapterSnap.parseOptions(body.options)
+      chapters = chapterSnap.validateChapters(body.chapters ?? media.chapters ?? [], T)
+      indexes = chapterSnap.validateIndexes(body.indexes, chapters.length)
+    } catch (error) {
+      if (error instanceof chapterSnap.SnapInputError) return res.status(400).json(error.index === undefined ? { error: error.message } : { error: error.message, index: error.index })
+      Logger.error(`[LibraryItemController] Invalid chapter snap request`, error)
+      return res.status(400).json({ error: 'Invalid request body' })
+    }
+
+    const slot = chapterSnapRunner.acquire(libraryItem.id)
+    if (!slot.ok) return res.status(slot.status).json({ error: slot.error })
+
+    const ac = new AbortController()
+    // res, not req: on Node 16+ req 'close' fires as soon as the body has been read
+    res.on('close', () => {
+      if (!res.writableEnded) ac.abort()
+    })
+
+    try {
+      const result = await chapterSnapRunner.runSnap({
+        libraryItemId: libraryItem.id,
+        timeline,
+        T,
+        chapters,
+        itemChapters: media.chapters,
+        indexes,
+        options,
+        signal: ac.signal,
+        deadlineMs: chapterSnapRunner.DEADLINE_MS
+      })
+      if (ac.signal.aborted) return
+      res.json(result)
+    } catch (error) {
+      if (ac.signal.aborted || error.code === 'SNAP_ABORTED') {
+        Logger.info(`[LibraryItemController] Chapter snap for "${libraryItem.id}" canceled by client disconnect`)
+        return
+      }
+      if (error instanceof chapterSnap.SnapInputError) return res.status(400).json({ error: error.message })
+      if (error.code === 'ALL_FAILED') {
+        Logger.error(`[LibraryItemController] Chapter snap for "${libraryItem.id}" failed: silence detection failed for every segment`)
+        return res.status(500).json({ error: 'Silence detection failed' })
+      }
+      Logger.error(`[LibraryItemController] Chapter snap for "${libraryItem.id}" failed`, error)
+      return res.status(500).json({ error: 'Chapter snap failed' })
+    } finally {
+      slot.release()
+    }
   }
 
   /**
