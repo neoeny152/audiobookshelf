@@ -38,6 +38,7 @@ const DEFAULT_OPTIONS = Object.freeze({
   minSilenceSec: 0.7,
   noiseDb: -38,
   leadSec: 0.25,
+  headingLookbackSec: 3,
   snapToFileStart: false
 })
 
@@ -45,7 +46,8 @@ const NUMERIC_OPTION_BOUNDS = Object.freeze({
   windowSec: [2, 60],
   minSilenceSec: [0.2, 5],
   noiseDb: [-80, -20],
-  leadSec: [0, 1]
+  leadSec: [0, 1],
+  headingLookbackSec: [0, 6]
 })
 
 const REASONS = Object.freeze({
@@ -95,6 +97,7 @@ function clamp(value, min, max) {
  * @property {number} minSilenceSec
  * @property {number} noiseDb
  * @property {number} leadSec
+ * @property {number} headingLookbackSec - how far before the chosen pause a longer pause may sit to win (0 = off)
  * @property {boolean} snapToFileStart
  */
 
@@ -767,6 +770,7 @@ function buildResponse({ libraryItemId, T, options, chapters, itemChapters, prop
       minSilenceSec: options.minSilenceSec,
       noiseDb: options.noiseDb,
       leadSec: options.leadSec,
+      headingLookbackSec: options.headingLookbackSec,
       snapToFileStart: options.snapToFileStart
     },
     stats: {

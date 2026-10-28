@@ -52,6 +52,9 @@ describe('chapterSnap', () => {
       expect(chapterSnap.parseOptions({ minSilenceSec: 10 }).minSilenceSec).to.equal(5)
       expect(chapterSnap.parseOptions({ leadSec: 5 }).leadSec).to.equal(1)
       expect(chapterSnap.parseOptions({ leadSec: -1 }).leadSec).to.equal(0)
+      expect(chapterSnap.parseOptions({ headingLookbackSec: 10 }).headingLookbackSec).to.equal(6)
+      expect(chapterSnap.parseOptions({ headingLookbackSec: -1 }).headingLookbackSec).to.equal(0)
+      expect(chapterSnap.parseOptions({ headingLookbackSec: 0 }).headingLookbackSec).to.equal(0)
       expect(chapterSnap.parseOptions({ windowSec: 10, snapToFileStart: true })).to.deep.equal({ ...DEFAULT_OPTIONS, windowSec: 10, snapToFileStart: true })
     })
 
