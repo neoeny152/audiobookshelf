@@ -36,8 +36,8 @@ class FolderWatcher extends EventEmitter {
     this.ignoreDirs = []
     /** @type {string[]} */
     this.pendingDirsToRemoveFromIgnore = []
-    /** @type {NodeJS.Timeout} */
-    this.removeFromIgnoreTimer = null
+    /** @type {Map<string, NodeJS.Timeout>} one timer per dir, so releasing one dir never cancels another's release */
+    this.removeFromIgnoreTimers = new Map()
 
     this.disabled = false
   }
@@ -389,6 +389,8 @@ class FolderWatcher extends EventEmitter {
   addIgnoreDir(path) {
     path = this.cleanDirPath(path)
     this.pendingDirsToRemoveFromIgnore = this.pendingDirsToRemoveFromIgnore.filter((p) => p !== path)
+    clearTimeout(this.removeFromIgnoreTimers.get(path))
+    this.removeFromIgnoreTimers.delete(path)
     if (this.ignoreDirs.includes(path)) {
       // Already ignoring dir
       return
@@ -416,14 +418,16 @@ class FolderWatcher extends EventEmitter {
       this.pendingDirsToRemoveFromIgnore.push(path)
     }
 
-    clearTimeout(this.removeFromIgnoreTimer)
-    this.removeFromIgnoreTimer = setTimeout(() => {
+    clearTimeout(this.removeFromIgnoreTimers.get(path))
+    const timer = setTimeout(() => {
+      this.removeFromIgnoreTimers.delete(path)
       if (this.pendingDirsToRemoveFromIgnore.includes(path)) {
         this.pendingDirsToRemoveFromIgnore = this.pendingDirsToRemoveFromIgnore.filter((p) => p !== path)
         Logger.debug(`[Watcher] removeIgnoreDir: No longer ignoring directory "${path}"`)
         this.ignoreDirs = this.ignoreDirs.filter((p) => p !== path)
       }
     }, 5000)
+    this.removeFromIgnoreTimers.set(path, timer)
   }
 }
 module.exports = new FolderWatcher()
