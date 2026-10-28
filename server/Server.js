@@ -10,6 +10,7 @@ const axios = require('axios')
 
 const { version } = require('../package.json')
 const { buildStatusPayload } = require('./utils/serverFeatures')
+const chapterbotClient = require('./utils/chapterbotClient')
 
 // Utils
 const is = require('./libs/requestIp/isJs')
@@ -384,7 +385,8 @@ class Server {
     })
     router.get('/status', (req, res) => {
       // status check for client to see if server has been initialized (see utils/serverFeatures.js)
-      res.json(buildStatusPayload(Database))
+      // optional chapterbot features come from a cached health check and never wait on the sidecar
+      res.json(buildStatusPayload(Database, chapterbotClient.advertisedFeatures()))
     })
     router.get('/ping', (req, res) => {
       Logger.info('Received ping')

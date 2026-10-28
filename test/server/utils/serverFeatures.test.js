@@ -1,6 +1,6 @@
 const { expect } = require('chai')
 
-const { SERVER_FEATURES, buildStatusPayload } = require('../../../server/utils/serverFeatures')
+const { SERVER_FEATURES, OPTIONAL_FEATURES, buildStatusPayload } = require('../../../server/utils/serverFeatures')
 const { version } = require('../../../package.json')
 const ApiRouter = require('../../../server/routers/ApiRouter')
 const Auth = require('../../../server/Auth')
@@ -42,15 +42,22 @@ describe('serverFeatures', () => {
     expect(Object.isFrozen(SERVER_FEATURES)).to.be.true
   })
 
+  it('adds only known optional features that are currently available', () => {
+    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost'])
+    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'chapterbotVerify', 'chapterbotEpub'])
+  })
+
   it('every advertised feature has its routes registered', () => {
     const apiRouter = new ApiRouter({ auth: new Auth(), apiCacheManager: new ApiCacheManager() })
     const routes = apiRouter.router._router.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods).join(',')} ${l.route.path}`)
     const featureRoutes = {
       batchEpisodes: ['post /podcasts/batch/episodes/update', 'post /podcasts/batch/episodes/delete'],
-      libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download']
+      libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download'],
+      chapterbotVerify: ['post /items/:id/chapters/snap'],
+      chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId']
     }
-    expect(Object.keys(featureRoutes).sort()).to.deep.equal([...SERVER_FEATURES].sort())
-    for (const feature of SERVER_FEATURES) {
+    expect(Object.keys(featureRoutes).sort()).to.deep.equal([...SERVER_FEATURES, ...OPTIONAL_FEATURES].sort())
+    for (const feature of [...SERVER_FEATURES, ...OPTIONAL_FEATURES]) {
       for (const route of featureRoutes[feature]) {
         expect(routes, `${feature}: ${route}`).to.include(route)
       }

@@ -11,17 +11,23 @@ const { version } = require('../../package.json')
  *
  * - batchEpisodes: POST /api/podcasts/batch/episodes/update and /api/podcasts/batch/episodes/delete
  * - libraryDownloadPost: POST /api/libraries/:id/download with ids in the request body
+ *
+ * Optional features, only listed while they work (see utils/chapterbotClient.js advertisedFeatures):
+ * - chapterbotVerify: POST /api/items/:id/chapters/snap accepts options.verify = true (Whisper speech check)
+ * - chapterbotEpub: POST /api/items/:id/epub, GET and DELETE /api/items/:id/epub/:jobId (EPUB from audio)
  */
 const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost'])
+const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub'])
 
 /**
  * Payload for GET /status (unauthenticated).
  * Keys are the same as before serverFeatures was added; serverFeatures is the only addition.
  *
  * @param {{ hasRootUser: boolean, serverSettings: { language: string, authActiveAuthMethods: string[], authFormData: Object } }} Database
+ * @param {string[]} [optionalFeatures] - currently available optional features; anything not in OPTIONAL_FEATURES is ignored
  * @returns {Object}
  */
-function buildStatusPayload(Database) {
+function buildStatusPayload(Database, optionalFeatures = []) {
   // status check for client to see if server has been initialized
   // server has been initialized if a root user exists
   const payload = {
@@ -31,7 +37,7 @@ function buildStatusPayload(Database) {
     language: Database.serverSettings.language,
     authMethods: Database.serverSettings.authActiveAuthMethods,
     authFormData: Database.serverSettings.authFormData,
-    serverFeatures: [...SERVER_FEATURES]
+    serverFeatures: [...SERVER_FEATURES, ...OPTIONAL_FEATURES.filter((f) => optionalFeatures.includes(f))]
   }
   if (!payload.isInit) {
     payload.ConfigPath = global.ConfigPath
@@ -40,4 +46,4 @@ function buildStatusPayload(Database) {
   return payload
 }
 
-module.exports = { SERVER_FEATURES, buildStatusPayload }
+module.exports = { SERVER_FEATURES, OPTIONAL_FEATURES, buildStatusPayload }
