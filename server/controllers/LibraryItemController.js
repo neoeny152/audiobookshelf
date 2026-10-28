@@ -997,7 +997,7 @@ class LibraryItemController {
       return res.status(400).json({ error: 'Invalid request body' })
     }
 
-    const slot = chapterSnapRunner.acquire(libraryItem.id)
+    const slot = chapterSnapRunner.acquire(libraryItem.id, req.user?.id)
     if (!slot.ok) return res.status(slot.status).json({ error: slot.error })
 
     const ac = new AbortController()

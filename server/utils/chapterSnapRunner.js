@@ -11,19 +11,21 @@ const PER_RUN_TIMEOUT_SEC = 30
 /** No new segment starts after this. Under nginx's 60 s default proxy timeout. */
 const DEADLINE_MS = 45000
 
-/** @type {Set<string>} libraryItemIds with a running snap */
-const runningJobs = new Set()
+/** @type {Map<string, string|null>} libraryItemId -> userId of each running snap */
+const runningJobs = new Map()
 
 /**
- * Take a job slot.
+ * Take a job slot. One snap per library item and one per user, so a single user cannot hold every global slot.
  *
  * @param {string} libraryItemId
+ * @param {string} [userId]
  * @returns {{ok: true, release: () => void} | {ok: false, status: number, error: string}}
  */
-function acquire(libraryItemId) {
+function acquire(libraryItemId, userId = null) {
   if (runningJobs.has(libraryItemId)) return { ok: false, status: 409, error: 'Snap already running for this item' }
+  if (userId && [...runningJobs.values()].includes(userId)) return { ok: false, status: 429, error: 'You already have a chapter snap running, try again when it finishes' }
   if (runningJobs.size >= MAX_JOBS) return { ok: false, status: 429, error: 'Chapter snap busy, try again' }
-  runningJobs.add(libraryItemId)
+  runningJobs.set(libraryItemId, userId)
   let released = false
   return {
     ok: true,

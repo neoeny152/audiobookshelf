@@ -477,6 +477,14 @@ describe('LibraryItemController', () => {
       expect(chapterSnapRunner._runningJobs.size).to.equal(0)
     })
 
+    it('returns 429 while the same user has a snap running on another item', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const slot = chapterSnapRunner.acquire('some-other-item', 'user-neo')
+      const busy = await callSnap(libraryItem, {}, { ...user(), id: 'user-neo' })
+      expect(busy.statusCode).to.equal(429)
+      slot.release()
+    })
+
     it('aborts and kills ffmpeg when the client disconnects, without responding', async () => {
       const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
       const kill = sinon.spy()

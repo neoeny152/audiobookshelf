@@ -181,6 +181,20 @@ describe('chapterSnapRunner', () => {
     c.release()
   })
 
+  it('allows one running snap per user so one user cannot hold every slot', () => {
+    const a = chapterSnapRunner.acquire('a', 'user-1')
+    expect(a.ok).to.equal(true)
+    expect(chapterSnapRunner.acquire('b', 'user-1')).to.include({ ok: false, status: 429 })
+    const b = chapterSnapRunner.acquire('b', 'user-2')
+    expect(b.ok).to.equal(true)
+    a.release()
+    const c = chapterSnapRunner.acquire('c', 'user-1')
+    expect(c.ok).to.equal(true)
+    b.release()
+    c.release()
+    expect(chapterSnapRunner._runningJobs.size).to.equal(0)
+  })
+
   it('releases the slot when the job throws', async () => {
     const slot = chapterSnapRunner.acquire('li-1')
     try {
