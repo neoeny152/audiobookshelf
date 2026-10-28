@@ -27,6 +27,147 @@ const CoverManager = require('../managers/CoverManager')
  * @typedef {RequestWithUser & RequestEntityObject} RequestWithLibraryItem
  */
 
+/**
+ * Build the sanitized episode update payload from a request body.
+ * Shared by PATCH /api/podcasts/:id/episode/:episodeId and POST /api/podcasts/batch/episodes/update
+ * so that both accept exactly the same keys with the same validation.
+ *
+ * @param {Object} body
+ * @returns {Object} payload to pass to PodcastEpisode.set()
+ */
+function buildEpisodeUpdatePayload(body) {
+  const updatePayload = {}
+  if (!body || typeof body !== 'object') return updatePayload
+
+  const supportedStringKeys = ['title', 'subtitle', 'description', 'pubDate', 'episode', 'season', 'episodeType']
+  for (const key in body) {
+    if (supportedStringKeys.includes(key) && typeof body[key] === 'string') {
+      let value = body[key]
+      // Sanitize description HTML
+      if (key === 'description' && value) {
+        const sanitizedDescription = htmlSanitizer.sanitize(value)
+        if (sanitizedDescription !== value) {
+          Logger.debug(`[PodcastController] Sanitized description from "${value}" to "${sanitizedDescription}"`)
+          value = sanitizedDescription
+        }
+      } else if (key === 'subtitle' && value) {
+        const sanitizedSubtitle = htmlSanitizer.sanitize(value)
+        if (sanitizedSubtitle !== value) {
+          Logger.debug(`[PodcastController] Sanitized subtitle from "${value}" to "${sanitizedSubtitle}"`)
+          value = sanitizedSubtitle
+        }
+      }
+
+      updatePayload[key] = value
+    } else if (key === 'enclosure') {
+      const enclosure = body.enclosure
+      if (enclosure === null) {
+        updatePayload.enclosureURL = null
+        updatePayload.enclosureSize = null
+        updatePayload.enclosureType = null
+      } else if (typeof enclosure === 'object' && typeof enclosure.url === 'string') {
+        updatePayload.enclosureURL = enclosure.url
+        updatePayload.enclosureType = typeof enclosure.type === 'string' ? enclosure.type : null
+        updatePayload.enclosureSize = enclosure.length !== undefined && enclosure.length !== null ? enclosure.length : null
+      }
+    } else if (key === 'chapters' && Array.isArray(body[key]) && body[key].every((ch) => typeof ch === 'object' && ch.title && ch.start)) {
+      updatePayload[key] = body[key]
+    } else if (key === 'publishedAt' && typeof body[key] === 'number') {
+      updatePayload[key] = body[key]
+    }
+  }
+  return updatePayload
+}
+
+/**
+ * Validate and load the podcasts referenced by a batch episode request.
+ *
+ * Applies the same checks as PodcastController.middleware does for the per-episode routes,
+ * for every podcast in the batch, before anything is changed:
+ *  - library item must exist and have media (404)
+ *  - library item must be a podcast (400)
+ *  - user must be able to access the library item, incl. library access, explicit content and tags (403)
+ *  - every episode must belong to its listed podcast (404)
+ *
+ * The whole batch is rejected if any entry fails, so nothing is changed unless every entry is valid.
+ *
+ * @param {RequestWithUser} req
+ * @param {Response} res
+ * @param {{ libraryItemId: string, episodeId: string }[]} entries
+ * @returns {Promise<{ libraryItem: import('../models/LibraryItem').LibraryItemExpanded, entries: { episode: import('../models/PodcastEpisode'), entry: Object }[] }[] | null>} groups in first-seen order, or null if a response was sent
+ */
+async function loadPodcastEpisodeBatch(req, res, entries) {
+  // Group entries by podcast, keeping first-seen order
+  /** @type {Map<string, Object[]>} */
+  const entriesByLibraryItemId = new Map()
+  const seenPairs = new Set()
+  for (const entry of entries) {
+    const pairKey = `${entry.libraryItemId}/${entry.episodeId}`
+    if (seenPairs.has(pairKey)) {
+      res.status(400).send('Duplicate episode in batch')
+      return null
+    }
+    seenPairs.add(pairKey)
+
+    if (!entriesByLibraryItemId.has(entry.libraryItemId)) entriesByLibraryItemId.set(entry.libraryItemId, [])
+    entriesByLibraryItemId.get(entry.libraryItemId).push(entry)
+  }
+
+  const libraryItemIds = [...entriesByLibraryItemId.keys()]
+  const libraryItems = await Database.libraryItemModel.findAllExpandedWhere({ id: libraryItemIds })
+  const libraryItemMap = new Map(libraryItems.map((li) => [li.id, li]))
+
+  const groups = []
+  for (const libraryItemId of libraryItemIds) {
+    const libraryItem = libraryItemMap.get(libraryItemId)
+    if (!libraryItem?.media) {
+      Logger.warn(`[PodcastController] Batch episodes: library item "${libraryItemId}" not found`)
+      res.status(404).send('Library item not found')
+      return null
+    }
+    if (!libraryItem.isPodcast) {
+      Logger.warn(`[PodcastController] Batch episodes: library item "${libraryItemId}" is not a podcast`)
+      res.status(400).send('Library item is not a podcast')
+      return null
+    }
+    if (!req.user.checkCanAccessLibraryItem(libraryItem)) {
+      Logger.warn(`[PodcastController] Batch episodes: user "${req.user.username}" cannot access library item "${libraryItemId}"`)
+      res.sendStatus(403)
+      return null
+    }
+
+    const episodeMap = new Map((libraryItem.media.podcastEpisodes || []).map((ep) => [ep.id, ep]))
+    const groupEntries = []
+    for (const entry of entriesByLibraryItemId.get(libraryItemId)) {
+      const episode = episodeMap.get(entry.episodeId)
+      if (!episode) {
+        Logger.warn(`[PodcastController] Batch episodes: episode "${entry.episodeId}" not found in library item "${libraryItemId}"`)
+        res.status(404).send('Episode not found')
+        return null
+      }
+      groupEntries.push({ episode, entry })
+    }
+    groups.push({ libraryItem, entries: groupEntries })
+  }
+  return groups
+}
+
+/**
+ * @param {*} entries
+ * @param {boolean} requireUpdates
+ * @returns {boolean}
+ */
+function isValidEpisodeBatchEntries(entries, requireUpdates) {
+  if (!Array.isArray(entries) || !entries.length) return false
+  return entries.every((e) => {
+    if (!e || typeof e !== 'object') return false
+    if (typeof e.libraryItemId !== 'string' || !e.libraryItemId) return false
+    if (typeof e.episodeId !== 'string' || !e.episodeId) return false
+    if (requireUpdates && (!e.updates || typeof e.updates !== 'object' || Array.isArray(e.updates))) return false
+    return true
+  })
+}
+
 class PodcastController {
   /**
    * POST /api/podcasts
@@ -417,43 +558,7 @@ class PodcastController {
       return res.status(404).send('Episode not found')
     }
 
-    const updatePayload = {}
-    const supportedStringKeys = ['title', 'subtitle', 'description', 'pubDate', 'episode', 'season', 'episodeType']
-    for (const key in req.body) {
-      if (supportedStringKeys.includes(key) && typeof req.body[key] === 'string') {
-        // Sanitize description HTML
-        if (key === 'description' && req.body[key]) {
-          const sanitizedDescription = htmlSanitizer.sanitize(req.body[key])
-          if (sanitizedDescription !== req.body[key]) {
-            Logger.debug(`[PodcastController] Sanitized description from "${req.body[key]}" to "${sanitizedDescription}"`)
-            req.body[key] = sanitizedDescription
-          }
-        } else if (key === 'subtitle' && req.body[key]) {
-          const sanitizedSubtitle = htmlSanitizer.sanitize(req.body[key])
-          if (sanitizedSubtitle !== req.body[key]) {
-            Logger.debug(`[PodcastController] Sanitized subtitle from "${req.body[key]}" to "${sanitizedSubtitle}"`)
-            req.body[key] = sanitizedSubtitle
-          }
-        }
-
-        updatePayload[key] = req.body[key]
-      } else if (key === 'enclosure') {
-        const enclosure = req.body.enclosure
-        if (enclosure === null) {
-          updatePayload.enclosureURL = null
-          updatePayload.enclosureSize = null
-          updatePayload.enclosureType = null
-        } else if (typeof enclosure === 'object' && typeof enclosure.url === 'string') {
-          updatePayload.enclosureURL = enclosure.url
-          updatePayload.enclosureType = typeof enclosure.type === 'string' ? enclosure.type : null
-          updatePayload.enclosureSize = enclosure.length !== undefined && enclosure.length !== null ? enclosure.length : null
-        }
-      } else if (key === 'chapters' && Array.isArray(req.body[key]) && req.body[key].every((ch) => typeof ch === 'object' && ch.title && ch.start)) {
-        updatePayload[key] = req.body[key]
-      } else if (key === 'publishedAt' && typeof req.body[key] === 'number') {
-        updatePayload[key] = req.body[key]
-      }
-    }
+    const updatePayload = buildEpisodeUpdatePayload(req.body)
 
     if (Object.keys(updatePayload).length) {
       episode.set(updatePayload)
@@ -549,6 +654,155 @@ class PodcastController {
 
     SocketAuthority.libraryItemEmitter('item_updated', req.libraryItem)
     res.json(req.libraryItem.toOldJSON())
+  }
+
+  /**
+   * POST: /api/podcasts/batch/episodes/update
+   * Update many episodes, possibly across several podcasts, in one request.
+   * Each podcast is loaded once and emits at most one item_updated event.
+   *
+   * Body: { episodes: [{ libraryItemId: string, episodeId: string, updates: Object }] }
+   * "updates" accepts exactly the same keys as PATCH /api/podcasts/:id/episode/:episodeId
+   *
+   * Response: { success: true, numEpisodesUpdated: number, libraryItems: LibraryItemExpanded[] }
+   * libraryItems contains every podcast referenced by the request (old JSON expanded)
+   *
+   * @param {RequestWithUser} req
+   * @param {Response} res
+   */
+  async batchUpdateEpisodes(req, res) {
+    // Same permission as PATCH /api/podcasts/:id/episode/:episodeId (PodcastController.middleware)
+    if (!req.user.canUpdate) {
+      Logger.warn(`[PodcastController] User "${req.user.username}" attempted to update without permission`)
+      return res.sendStatus(403)
+    }
+
+    const entries = req.body?.episodes
+    if (!isValidEpisodeBatchEntries(entries, true)) {
+      return res.status(400).send('Invalid request body')
+    }
+
+    const groups = await loadPodcastEpisodeBatch(req, res, entries)
+    if (!groups) return
+
+    let numEpisodesUpdated = 0
+    for (const { libraryItem, entries: groupEntries } of groups) {
+      let podcastUpdated = false
+      for (const { episode, entry } of groupEntries) {
+        const updatePayload = buildEpisodeUpdatePayload(entry.updates)
+        if (!Object.keys(updatePayload).length) continue
+
+        episode.set(updatePayload)
+        if (episode.changed()) {
+          Logger.info(`[PodcastController] Updated episode "${episode.title}" keys`, episode.changed())
+          await episode.save()
+          numEpisodesUpdated++
+          podcastUpdated = true
+        }
+      }
+
+      if (podcastUpdated) {
+        SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+      }
+    }
+
+    res.json({
+      success: true,
+      numEpisodesUpdated,
+      libraryItems: groups.map((g) => g.libraryItem.toOldJSONExpanded())
+    })
+  }
+
+  /**
+   * POST: /api/podcasts/batch/episodes/delete
+   * Remove many episodes, possibly across several podcasts, in one request.
+   * Each podcast is loaded and saved once and emits a single item_updated event.
+   *
+   * Body: { episodes: [{ libraryItemId: string, episodeId: string }], hard?: boolean }
+   * Optional query param ?hard=1 (same as DELETE /api/podcasts/:id/episode/:episodeId)
+   *
+   * Response: { success: true, numEpisodesDeleted: number, libraryItems: LibraryItem[] }
+   * libraryItems contains every podcast referenced by the request (old JSON, not expanded)
+   *
+   * @param {RequestWithUser} req
+   * @param {Response} res
+   */
+  async batchDeleteEpisodes(req, res) {
+    // Same permission as DELETE /api/podcasts/:id/episode/:episodeId (PodcastController.middleware)
+    if (!req.user.canDelete) {
+      Logger.warn(`[PodcastController] User "${req.user.username}" attempted to delete without permission`)
+      return res.sendStatus(403)
+    }
+
+    const entries = req.body?.episodes
+    if (!isValidEpisodeBatchEntries(entries, false)) {
+      return res.status(400).send('Invalid request body')
+    }
+    const hardDelete = req.query?.hard === '1' || req.body.hard === true
+
+    const groups = await loadPodcastEpisodeBatch(req, res, entries)
+    if (!groups) return
+
+    const allEpisodeIds = groups.flatMap((g) => g.entries.map(({ episode }) => episode.id))
+
+    // Remove episodes from playlists
+    await Database.playlistModel.removeMediaItemsFromPlaylists(allEpisodeIds)
+
+    // Remove media progress for these episodes
+    const mediaProgressRemoved = await Database.mediaProgressModel.destroy({
+      where: {
+        mediaItemId: allEpisodeIds
+      }
+    })
+    if (mediaProgressRemoved) {
+      Logger.info(`[PodcastController] Removed ${mediaProgressRemoved} media progress for ${allEpisodeIds.length} episodes`)
+    }
+
+    let numEpisodesDeleted = 0
+    for (const { libraryItem, entries: groupEntries } of groups) {
+      const episodeIdsToRemove = new Set(groupEntries.map(({ episode }) => episode.id))
+      const inosToRemove = new Set()
+
+      for (const { episode } of groupEntries) {
+        const audioFile = episode.audioFile
+        if (audioFile?.ino) inosToRemove.add(audioFile.ino)
+
+        if (hardDelete && audioFile?.metadata?.path) {
+          // TODO: this will trigger the watcher. should maybe handle this gracefully
+          await fs
+            .remove(audioFile.metadata.path)
+            .then(() => {
+              Logger.info(`[PodcastController] Hard deleted episode file at "${audioFile.metadata.path}"`)
+            })
+            .catch((error) => {
+              Logger.error(`[PodcastController] Failed to hard delete episode file at "${audioFile.metadata.path}"`, error)
+            })
+        }
+
+        await episode.destroy()
+        numEpisodesDeleted++
+      }
+
+      // Remove from the podcastEpisodes array
+      libraryItem.media.podcastEpisodes = libraryItem.media.podcastEpisodes.filter((ep) => !episodeIdsToRemove.has(ep.id))
+
+      // Remove library files
+      libraryItem.libraryFiles = libraryItem.libraryFiles.filter((file) => !inosToRemove.has(file.ino))
+      libraryItem.changed('libraryFiles', true)
+      await libraryItem.save()
+
+      // update number of episodes
+      libraryItem.media.numEpisodes = libraryItem.media.podcastEpisodes.length
+      await libraryItem.media.save()
+
+      SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+    }
+
+    res.json({
+      success: true,
+      numEpisodesDeleted,
+      libraryItems: groups.map((g) => g.libraryItem.toOldJSON())
+    })
   }
 
   /**
