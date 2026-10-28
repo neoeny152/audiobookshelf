@@ -483,6 +483,75 @@ describe('chapterSnap', () => {
       }
     })
 
+    describe('heading-lookback', () => {
+      // Late mark: true break 90-94.2, spoken heading 94.2-95, short pause after the heading 95-96.1, mark at 95.8
+      const breakPause = pause(90, 94.2)
+      const afterHeading = pause(95, 96.1)
+
+      it('moves a late start inside the short post-heading pause back to the long pause', () => {
+        const r = snap(95.8, [breakPause, afterHeading])
+        expect(r).to.include({ reason: REASONS.HEADING_LOOKBACK, proposedStart: 93.95, pause: breakPause })
+        expect(chapterSnap.confidenceFor(r)).to.equal('high')
+      })
+
+      it('also looks back from a nearest-longest pause', () => {
+        const q = pause(88, 93)
+        const p = pause(95, 98.5)
+        // both lengths reach BONUS_CAP, so the nearer pause wins the score
+        const r = snap(100, [q, p])
+        expect(r).to.include({ reason: REASONS.HEADING_LOOKBACK, proposedStart: 92.75, pause: q })
+        expect(r.lookbackFrom).to.include({ reason: REASONS.NEAREST_LONGEST_PAUSE, proposedStart: 98.25, pause: p })
+      })
+
+      it('does not move a correct start inside the long pause to an earlier, shorter pause', () => {
+        const r = snap(93, [pause(88, 89), pause(90.5, 94.2)])
+        expect(r).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 93 })
+        expect(r.pause.end).to.equal(94.2)
+      })
+
+      it('ignores a longer pause that ends more than headingLookbackSec before the chosen pause', () => {
+        expect(snap(95.8, [pause(87.8, 92), afterHeading]).reason).to.equal(REASONS.HEADING_LOOKBACK)
+        expect(snap(95.8, [pause(87.79, 91.99), afterHeading])).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8 })
+        expect(snap(95.8, [pause(85, 90.5), afterHeading], { options: { headingLookbackSec: 6 } }).reason).to.equal(REASONS.HEADING_LOOKBACK)
+      })
+
+      it('needs both HEADING_MIN_EXTRA more seconds and HEADING_RATIO times the length', () => {
+        // 1 s chosen pause: the +0.5 s rule decides (1.5 > 1.3)
+        const short = pause(95, 96)
+        expect(snap(95.5, [pause(92, 93.5), short]).reason).to.equal(REASONS.HEADING_LOOKBACK)
+        expect(snap(95.5, [pause(92.01, 93.5), short]).reason).to.equal(REASONS.INSIDE_PAUSE)
+        // 2 s chosen pause: the x1.3 rule decides (2.6 > 2.5)
+        const long = pause(95, 97)
+        expect(snap(95.5, [pause(90.9, 93.5), long]).reason).to.equal(REASONS.HEADING_LOOKBACK)
+        expect(snap(95.5, [pause(90.91, 93.5), long]).reason).to.equal(REASONS.INSIDE_PAUSE)
+      })
+
+      it('picks the longest qualifying pause', () => {
+        const r = snap(95.8, [pause(88, 91), pause(92.4, 93.2), pause(93.5, 94.4), afterHeading], { options: { headingLookbackSec: 6 } })
+        expect(r.pause.end).to.equal(91)
+      })
+
+      it('is off with headingLookbackSec 0', () => {
+        expect(snap(95.8, [breakPause, afterHeading], { options: { headingLookbackSec: 0 } })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
+      })
+
+      it('keeps the chosen pause when the earlier one is outside the neighbour bounds', () => {
+        const bounds = chapterSnap.boundsFor([0, 93, 95.8], 2, 1000)
+        expect(bounds.lo).to.equal(94)
+        expect(snap(95.8, [breakPause, afterHeading], { bounds })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
+      })
+
+      it('falls back to the chosen pause when the order pass rejects the look-back', () => {
+        // chapter 1 (at 80) moves to the break pause end, so chapter 2 cannot take it too
+        const starts = [0, 80, 95.8]
+        const proposals = starts.map((t, i) => chapterSnap.snapOne({ index: i, t, pauses: [breakPause, afterHeading], timeline: [track(0, 0, 1000)], options: opts(), bounds: chapterSnap.boundsFor(starts, i, 1000) }))
+        expect(proposals[2].reason).to.equal(REASONS.HEADING_LOOKBACK)
+        chapterSnap.resolveOrder(starts, proposals)
+        expect(proposals[1]).to.include({ reason: REASONS.NEAREST_LONGEST_PAUSE, proposedStart: 93.95 })
+        expect(proposals[2]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
+      })
+    })
+
     describe('file-start', () => {
       const timeline = [track(0, 0, 600), track(1, 600, 600), track(2, 1200, 600)]
       const bounds = { lo: 0, loOpen: true, hi: 1e9, hiOpen: false }
@@ -571,7 +640,7 @@ describe('chapterSnap', () => {
           if (p + len < T) pauses.push(pause(p, p + len, { endClipped: rand() < 0.1 }))
           p += len
         }
-        const options = opts({ windowSec: 2 + rand() * 58, leadSec: rand(), snapToFileStart: rand() < 0.5 })
+        const options = opts({ windowSec: 2 + rand() * 58, leadSec: rand(), headingLookbackSec: rand() < 0.2 ? 0 : rand() * 6, snapToFileStart: rand() < 0.5 })
         const timeline = [track(0, 0, T / 3), track(1, T / 3, T / 3), track(2, (2 * T) / 3, T / 3)]
         const { proposals, fallback } = runAll(starts, pauses, T, options, timeline)
 

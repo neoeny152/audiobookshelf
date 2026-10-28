@@ -6,6 +6,9 @@
  * - otherwise it moves to `leadSec` before the end of the pause that minimises
  *   |pause.end - t| - BONUS_WEIGHT * min(pause length, BONUS_CAP), among pauses that end within the window
  *   and keep the chapter between its neighbours' original starts
+ * - heading look-back: chapter marks often land 2-6 s late, just after the spoken "Chapter N", so either rule above
+ *   picks the short pause after the heading. A clearly longer pause (>= HEADING_RATIO x and >= HEADING_MIN_EXTRA s
+ *   longer) that ends at most `headingLookbackSec` before the chosen pause starts wins instead
  *
  * The caller (chapterSnapRunner) does the silence detection and hands parsed pauses to these functions.
  */
@@ -31,6 +34,10 @@ const SHORT_PAUSE = 0.9
 const HIGH_DELTA = 5
 const LOW_DELTA = 15
 const CLIP_EPS = 0.02
+/** An earlier pause beats the chosen one only when it is at least this many times as long... */
+const HEADING_RATIO = 1.3
+/** ...and at least this many seconds longer */
+const HEADING_MIN_EXTRA = 0.5
 const EPS = 1e-9
 
 const DEFAULT_OPTIONS = Object.freeze({
@@ -55,6 +62,7 @@ const REASONS = Object.freeze({
   INSIDE_PAUSE: 'inside-pause',
   FILE_START: 'file-start',
   NEAREST_LONGEST_PAUSE: 'nearest-longest-pause',
+  HEADING_LOOKBACK: 'heading-lookback',
   NO_PAUSE_IN_WINDOW: 'no-pause-in-window',
   ORDER_CONFLICT: 'order-conflict',
   NOT_REQUESTED: 'not-requested',
@@ -518,6 +526,53 @@ function pauseTarget(p, leadSec) {
 }
 
 /**
+ * Heading look-back: the longest pause that ends at most headingLookbackSec before `chosen` starts, is clearly longer
+ * than `chosen`, and keeps the chapter inside its bounds
+ *
+ * @param {BookPause} chosen
+ * @param {BookPause[]} pauses
+ * @param {SnapOptions} options
+ * @param {{lo: number, loOpen: boolean, hi: number, hiOpen: boolean}} bounds
+ * @returns {{pause: BookPause, target: number}|null}
+ */
+function headingPause(chosen, pauses, options, bounds) {
+  if (!(options.headingLookbackSec > 0)) return null
+  const chosenDur = chosen.end - chosen.start
+  const minDur = Math.max(chosenDur * HEADING_RATIO, chosenDur + HEADING_MIN_EXTRA)
+  let best = null
+  for (const p of pauses) {
+    if (p === chosen || p.end > chosen.start + EPS) continue
+    if (chosen.start - p.end > options.headingLookbackSec + EPS) continue
+    const duration = p.end - p.start
+    if (duration < minDur - EPS) continue
+    const target = pauseTarget(p, options.leadSec)
+    if (!inBounds(target, bounds)) continue
+    if (!best || duration > best.pause.end - best.pause.start) best = { pause: p, target }
+  }
+  return best
+}
+
+/**
+ * Swap the chosen pause for a heading look-back pause when there is one
+ *
+ * @param {SnapProposal} proposal - mutated
+ * @param {BookPause[]} pauses
+ * @param {SnapOptions} options
+ * @returns {SnapProposal}
+ */
+function applyHeadingLookback(proposal, pauses, options) {
+  const heading = headingPause(proposal.pause, pauses, options, proposal.bounds)
+  if (!heading) return proposal
+  const { proposedStart, reason, pause, alternatives } = proposal
+  proposal.lookbackFrom = { proposedStart, reason, pause, alternatives }
+  proposal.proposedStart = heading.target
+  proposal.reason = REASONS.HEADING_LOOKBACK
+  proposal.pause = heading.pause
+  proposal.alternatives = []
+  return proposal
+}
+
+/**
  * @typedef SnapProposal
  * @property {number} index
  * @property {number} originalStart
@@ -525,6 +580,7 @@ function pauseTarget(p, leadSec) {
  * @property {string} reason
  * @property {BookPause|null} pause
  * @property {{pause: BookPause, target: number, score: number}[]} alternatives - internal, not returned
+ * @property {{proposedStart: number, reason: string, pause: BookPause, alternatives: Object[]}|null} [lookbackFrom] - internal: the choice a heading look-back replaced, restored on an order conflict
  * @property {{lo: number, loOpen: boolean, hi: number, hiOpen: boolean}} bounds
  */
 
@@ -562,7 +618,7 @@ function snapOne({ index, t, pauses, timeline, options, bounds, skipReason = nul
   if (inside) {
     proposal.reason = REASONS.INSIDE_PAUSE
     proposal.pause = inside
-    return proposal
+    return applyHeadingLookback(proposal, pauses, options)
   }
 
   // d. multi-file books are often split at chapters: a file that begins up to 4 s before the start opens with the heading
@@ -591,7 +647,7 @@ function snapOne({ index, t, pauses, timeline, options, bounds, skipReason = nul
     proposal.reason = REASONS.NEAREST_LONGEST_PAUSE
     proposal.pause = best.pause
     proposal.alternatives = alternatives
-    return proposal
+    return applyHeadingLookback(proposal, pauses, options)
   }
 
   // f. nothing found
@@ -608,8 +664,9 @@ function orderOk(x, prevFinal, starts, i) {
 }
 
 /**
- * Forward order pass. A conflicting chapter tries its alternatives, else reverts to its original start (always valid,
- * because every moved previous start is bounded by this chapter's original start).
+ * Forward order pass. A conflicting heading look-back first falls back to the pause it replaced. A conflicting chapter
+ * then tries its alternatives, else reverts to its original start (always valid, because every moved previous start is
+ * bounded by this chapter's original start).
  * Then rounds to 3 decimals and asserts strictly increasing starts.
  *
  * @param {number[]} starts
@@ -621,6 +678,12 @@ function resolveOrder(starts, proposals) {
     const proposal = proposals[i]
     const prevFinal = proposals[i - 1].proposedStart
     if (orderOk(proposal.proposedStart, prevFinal, starts, i)) continue
+
+    if (proposal.lookbackFrom) {
+      Object.assign(proposal, proposal.lookbackFrom)
+      proposal.lookbackFrom = null
+      if (orderOk(proposal.proposedStart, prevFinal, starts, i)) continue
+    }
 
     const alt = proposal.alternatives.find((a) => orderOk(a.target, prevFinal, starts, i))
     if (alt) {
@@ -634,7 +697,7 @@ function resolveOrder(starts, proposals) {
   }
 
   // Rounding pass + assertion: any pair no longer strictly increasing reverts to the original
-  const isMoved = (proposal) => proposal.reason === REASONS.NEAREST_LONGEST_PAUSE || proposal.reason === REASONS.FILE_START
+  const isMoved = (proposal) => proposal.reason === REASONS.NEAREST_LONGEST_PAUSE || proposal.reason === REASONS.HEADING_LOOKBACK || proposal.reason === REASONS.FILE_START
   for (const proposal of proposals) proposal.proposedStart = round3(proposal.proposedStart)
   const revert = (j) => {
     if (proposals[j].proposedStart === round3(starts[j])) return
@@ -670,7 +733,7 @@ function resolveOrder(starts, proposals) {
 function confidenceFor(proposal) {
   const { reason, pause } = proposal
   if (reason === REASONS.FIRST_CHAPTER || reason === REASONS.FILE_START) return 'high'
-  if (!pause || (reason !== REASONS.INSIDE_PAUSE && reason !== REASONS.NEAREST_LONGEST_PAUSE)) return 'none'
+  if (!pause || (reason !== REASONS.INSIDE_PAUSE && reason !== REASONS.NEAREST_LONGEST_PAUSE && reason !== REASONS.HEADING_LOOKBACK)) return 'none'
 
   const duration = pause.end - pause.start
   const absDelta = Math.abs(proposal.proposedStart - proposal.originalStart)
@@ -681,7 +744,7 @@ function confidenceFor(proposal) {
     return 'medium'
   }
 
-  // nearest-longest-pause: the end edge places the start; a clipped start edge only matters while the length bonus is not capped
+  // nearest-longest-pause and heading-lookback: the end edge places the start; a clipped start edge only matters while the length bonus is not capped
   const clippedForScoring = pause.endClipped || (pause.startClipped && duration < BONUS_CAP)
   if (duration < SHORT_PAUSE || absDelta > LOW_DELTA + EPS || clippedForScoring) return 'low'
   if (duration >= LONG_PAUSE - EPS && absDelta <= HIGH_DELTA + EPS) return 'high'
@@ -804,6 +867,8 @@ module.exports = {
   WHOLE_FILE_SEC,
   BUDGET_SEC,
   LONG_PAUSE,
+  HEADING_RATIO,
+  HEADING_MIN_EXTRA,
   DEFAULT_OPTIONS,
   NUMERIC_OPTION_BOUNDS,
   REASONS,
@@ -824,6 +889,7 @@ module.exports = {
   inBounds,
   pauseScore,
   pauseTarget,
+  headingPause,
   snapOne,
   orderOk,
   resolveOrder,
