@@ -275,4 +275,82 @@ describe('chapterSnapRunner', () => {
       expect(result.chapters[1]).to.include({ reason: REASONS.NO_PAUSE_IN_WINDOW, proposedStart: 3574.5 })
     })
   })
+
+  describe('retry after the time limit', () => {
+    // File A (1030 s, longer than a whole-file segment) then file B. Chapter 1 at 1000 is covered by the A piece only,
+    // chapter 2 at 1020 by the A and the B piece. The deadline falls after the A piece.
+    const retryTimeline = chapterSnap.buildTimeline([
+      { duration: 1030, metadata: { path: '/books/r/a.mp3' } },
+      { duration: 1000, metadata: { path: '/books/r/b.mp3' } }
+    ])
+    const retryT = 2030
+    const original = [
+      { id: 'c0', title: 'Zero', start: 0 },
+      { id: 'c1', title: 'One', start: 1000 },
+      { id: 'c2', title: 'Two', start: 1020 }
+    ]
+
+    function linesForPauses(pauses, { path, startSec, durationSec }) {
+      const track = retryTimeline.find((t) => t.path === path)
+      const lines = []
+      for (const [s, e] of pauses) {
+        const ls = s - track.offset - startSec
+        const le = e - track.offset - startSec
+        if (le <= 0 || ls >= durationSec) continue
+        lines.push(`[silencedetect @ 0x1] silence_start: ${Math.max(0, ls).toFixed(4)}`)
+        lines.push(`[silencedetect @ 0x1] silence_end: ${Math.min(durationSec, le).toFixed(4)} | silence_duration: 1`)
+      }
+      return lines
+    }
+
+    async function firstCall() {
+      let clock = 0
+      return run({
+        timeline: retryTimeline,
+        T: retryT,
+        chapters: original,
+        pool: 1,
+        deadlineMs: 1000,
+        now: () => clock,
+        detect: async (params) => {
+          clock += 2000
+          return { lines: linesForPauses([[1015.25, 1018.25]], params) }
+        }
+      })
+    }
+
+    // The second analysis sees a pause the first one did not (different segment layout, clipping, noisy decode)
+    const secondDetect = async (params) => ({ lines: linesForPauses([[1001, 1002]], params) })
+
+    it('keeps starts strictly increasing when the retry sends the first proposedChapters', async () => {
+      const first = await firstCall()
+      expect(first.complete).to.equal(false)
+      expect(first.chapters.map((c) => c.reason)).to.deep.equal([REASONS.FIRST_CHAPTER, REASONS.NEAREST_LONGEST_PAUSE, REASONS.NOT_ANALYSED])
+      expect(first.chapters[1].proposedStart).to.equal(1018)
+      expect(first.warnings.some((w) => w.includes('proposedChapters'))).to.equal(true)
+
+      const retryIndexes = first.chapters.filter((c) => c.reason === REASONS.NOT_ANALYSED).map((c) => c.index)
+      const second = await run({
+        timeline: retryTimeline,
+        T: retryT,
+        chapters: chapterSnap.validateChapters(first.proposedChapters, retryT),
+        indexes: chapterSnap.validateIndexes(retryIndexes, 3),
+        detect: secondDetect
+      })
+      expect(second.complete).to.equal(true)
+      const starts = second.proposedChapters.map((c) => c.start)
+      expect(starts).to.deep.equal([0, 1018, 1020])
+      expect(second.proposedChapters.map((c) => c.id)).to.deep.equal(['c0', 'c1', 'c2'])
+      expect(second.chapters[1].reason).to.equal(REASONS.NOT_REQUESTED)
+      expect(second.chapters[2].reason).to.equal(REASONS.NO_PAUSE_IN_WINDOW)
+    })
+
+    it('shows why: a retry with the original starts could cross the neighbour moved by the first call', async () => {
+      const first = await firstCall()
+      const second = await run({ timeline: retryTimeline, T: retryT, chapters: original, indexes: new Set([2]), detect: secondDetect })
+      // Each response is valid on its own, but combining them would cross
+      expect(second.chapters[2].proposedStart).to.equal(1001.75)
+      expect(first.chapters[1].proposedStart).to.be.greaterThan(second.chapters[2].proposedStart)
+    })
+  })
 })

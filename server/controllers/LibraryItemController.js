@@ -962,6 +962,10 @@ class LibraryItemController {
   /**
    * POST: /api/items/:id/chapters/snap
    * Propose chapter starts snapped to pauses in the audio. Never saves anything.
+   * Body (all optional): { chapters, indexes, options }.
+   * When the response has complete: false, retry with chapters = that response's proposedChapters and
+   * indexes = the chapters marked not-analysed. Each chapter is bounded by its neighbours' starts in the request,
+   * so retrying with the original starts could cross a neighbour the first call moved.
    *
    * @param {LibraryItemControllerRequest} req
    * @param {Response} res

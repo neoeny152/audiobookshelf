@@ -148,7 +148,9 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
     throw snapError('ALL_FAILED', 'Silence detection failed')
   }
   if (skippedSegments) {
-    warnings.push(`Time limit reached: ${skippedSegments} of ${plan.segments.length} segments not analysed. Resend with "indexes" for the chapters marked not-analysed.`)
+    // The retry must send this response's proposedChapters: bounds come from the neighbours' starts in the request,
+    // so a retry with the original starts could cross a neighbour that this call already moved
+    warnings.push(`Time limit reached: ${skippedSegments} of ${plan.segments.length} segments not analysed. Resend with "chapters" set to this response's proposedChapters and "indexes" set to the chapters marked not-analysed; that response's proposedChapters is then the full list.`)
   }
 
   const pauses = chapterSnap.toBookPauses(okResults, timeline, options.minSilenceSec)
