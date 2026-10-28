@@ -277,6 +277,45 @@ describe('chapterbotClient', () => {
       expect(error.code).to.equal('too_large')
     })
 
+    it('turns a sink that fails before the response into an error instead of an unhandled event', async () => {
+      const jobId = '0123456789abcdef0123456789abcdef'
+      let respond
+      fake = await startFakeServer((req, res) => {
+        respond = () => {
+          res.writeHead(200, { 'Content-Type': 'application/epub+zip' })
+          res.end(Buffer.alloc(10))
+        }
+      })
+      configureFor(fake.url)
+      const sink = new Writable({ write: (c, e, cb) => cb() })
+      const pending = chapterbotClient.downloadJobResult(jobId, sink).catch((e) => e)
+      // like fs.createWriteStream failing to open its file while the request is in flight
+      sink.emit('error', Object.assign(new Error('permission denied /secret/path'), { code: 'EACCES' }))
+      const error = await pending
+      expect(error.code).to.equal('write_failed')
+      expect(error.message).to.include('EACCES')
+      if (respond) respond()
+    })
+
+    it('rejects a job result that ends short of its Content-Length', async () => {
+      const jobId = '0123456789abcdef0123456789abcdef'
+      fake = await startFakeServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/epub+zip', 'Content-Length': '100' })
+        res.write(Buffer.alloc(40))
+        setTimeout(() => res.socket.destroy(), 20)
+      })
+      configureFor(fake.url)
+      let ended = false
+      const sink = new Writable({ write: (c, e, cb) => cb() })
+      sink.on('finish', () => {
+        ended = true
+      })
+      const error = await chapterbotClient.downloadJobResult(jobId, sink).catch((e) => e)
+      expect(error).to.be.instanceOf(Error)
+      expect(error.code).to.equal('unreachable')
+      expect(ended).to.equal(false)
+    })
+
     it('advertises the features only after a recent successful health check, without blocking', async () => {
       let healthy = true
       fake = await startFakeServer((req, res) => sendJson(res, healthy ? 200 : 503, { ok: healthy, epubWorkers: healthy ? 1 : 0 }))

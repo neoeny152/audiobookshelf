@@ -243,6 +243,10 @@ function request(method, path, opts = {}) {
 
     if (signal?.aborted) return onAbort()
 
+    // Listen on the sink from the start: a file sink can fail (e.g. open() EACCES) before the response arrives,
+    // and an 'error' with no listener would crash the process
+    if (sink) sink.on('error', (error) => finish(new ChapterbotError('write_failed', `Writing chapterbot ${label} response failed: ${error.code || error.message}`)))
+
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), 'utf8')
     const headers = { Accept: sink ? 'application/epub+zip, application/json' : 'application/json' }
     if (payload) {
@@ -274,11 +278,14 @@ function request(method, path, opts = {}) {
           if (bytes > limit) return finish(new ChapterbotError('too_large', `Chapterbot ${label} response is larger than ${limit} bytes`))
           if (!sink.write(chunk)) res.pause()
         })
+        const expected = /^\d+$/.test(res.headers['content-length'] || '') ? Number(res.headers['content-length']) : null
         sink.on('drain', () => res.resume())
-        sink.on('error', (error) => finish(new ChapterbotError('write_failed', `Writing chapterbot ${label} response failed: ${error.code || error.message}`)))
         sink.on('finish', () => finish(null, { status, headers: res.headers, bytes }))
         res.on('end', () => {
-          if (!settled) sink.end()
+          if (settled) return
+          // never hand on a body cut short (e.g. the job deleted on the sidecar mid-download)
+          if (expected !== null && bytes !== expected) return finish(new ChapterbotError('unreachable', `Chapterbot ${label} response ended after ${bytes} of ${expected} bytes`))
+          sink.end()
         })
         res.on('error', () => finish(new ChapterbotError('unreachable', `Chapterbot ${label} response was interrupted`)))
         return
