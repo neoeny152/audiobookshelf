@@ -97,6 +97,7 @@ describe('Chapterbot EPUB endpoints', () => {
   let folderId
   let clientEmitter
   let scanItem
+  let watcher
 
   const chapters = [
     { id: 0, title: 'Opening Credits', start: 0, end: 500 },
@@ -190,6 +191,16 @@ describe('Chapterbot EPUB endpoints', () => {
     ChapterbotEpubManager.pollMs = 10
     ChapterbotEpubManager.tempDir = stagingDir
     ChapterbotEpubManager.scanItem = scanItem
+    watcher = {
+      ignoring: new Set(),
+      addIgnoreDir: sinon.spy((dir) => {
+        // the file must not be in the folder yet when the watcher is told to look away
+        watcher.filesAtIgnore = fs.readdirSync(dir)
+        watcher.ignoring.add(dir)
+      }),
+      removeIgnoreDir: sinon.spy((dir) => watcher.ignoring.delete(dir))
+    }
+    ChapterbotEpubManager.watcher = watcher
   })
 
   afterEach(async () => {
@@ -298,6 +309,13 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(fs.readFileSync(written).equals(EPUB_BYTES)).to.equal(true)
     expect(fs.readdirSync(stagingDir)).to.deep.equal([])
     expect(scanItem.calledOnceWith(bookItemId)).to.equal(true)
+
+    // the folder watcher looked away from the copy until after the rescan, so it cannot re-promote the EPUB
+    expect(watcher.addIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
+    expect(watcher.filesAtIgnore).to.deep.equal([])
+    expect(watcher.addIgnoreDir.calledBefore(scanItem)).to.equal(true)
+    expect(watcher.removeIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
+    expect(watcher.removeIgnoreDir.calledAfter(scanItem)).to.equal(true)
 
     const reloaded = await Database.libraryItemModel.getExpandedById(bookItemId)
     expect(reloaded.media.ebookFile).to.equal(null)
@@ -409,6 +427,18 @@ describe('Chapterbot EPUB endpoints', () => {
     // the open failed before the sidecar was asked for the result
     expect(sidecar.requests.some((r) => r.url === `/v1/jobs/${JOB_ID}/result`)).to.equal(false)
     expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_failed')).to.equal(true)
+    expect(watcher.addIgnoreDir.called).to.equal(false)
+    expect(watcher.removeIgnoreDir.called).to.equal(false)
+  })
+
+  it('lets the watcher back in when the copy into the library fails', async () => {
+    sinon.stub(fsExtra, 'copyFile').rejects(Object.assign(new Error('read-only'), { code: 'EROFS' }))
+    expect((await call('startEpubJob')).statusCode).to.equal(202)
+    sidecar.state = { ...sidecar.state, status: 'done' }
+    await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'failed')
+    expect(watcher.addIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
+    expect(watcher.removeIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
+    expect(scanItem.called).to.equal(false)
   })
 
   it('leaves a job that finished while being cancelled to the finish path', async () => {

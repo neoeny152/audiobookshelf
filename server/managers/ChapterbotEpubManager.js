@@ -67,6 +67,12 @@ class ChapterbotEpubManager {
     /** @type {string|null} where downloads are staged before the copy into the library (default: MetadataPath/cache/chapterbot) */
     this.tempDir = null
     this.now = Date.now
+    /** @type {{addIgnoreDir: Function, removeIgnoreDir: Function}|null} folder watcher (default: server/Watcher) */
+    this.watcher = null
+  }
+
+  getWatcher() {
+    return this.watcher || require('../Watcher')
   }
 
   get isConfigured() {
@@ -317,6 +323,27 @@ class ChapterbotEpubManager {
 
     const staging = this.stagingDir()
     const temp = Path.join(staging, `${record.jobId}.epub`)
+    // The folder watcher would rescan the item about 10 s after the file appears and, finding no primary ebook,
+    // promote this EPUB to one (stock scanner rule), undoing keepSupplementary(). Keep the watcher off this folder
+    // from the copy until our own rescan is done (released 5 s later, as for podcast downloads).
+    const watcher = this.getWatcher()
+    let ignoring = false
+    try {
+      return await this.saveAndScan(record, { dir, staging, temp, hadPrimaryEbook }, () => {
+        watcher.addIgnoreDir(dir)
+        ignoring = true
+      })
+    } finally {
+      if (ignoring) watcher.removeIgnoreDir(dir)
+    }
+  }
+
+  /**
+   * @param {Object} record
+   * @param {{dir: string, staging: string, temp: string, hadPrimaryEbook: boolean}} target
+   * @param {() => void} beforeCopy - called once the download is complete, right before the file goes into the library
+   */
+  async saveAndScan(record, { dir, staging, temp, hadPrimaryEbook }, beforeCopy) {
     let finalPath = null
     try {
       await fs.ensureDir(staging)
@@ -338,6 +365,7 @@ class ChapterbotEpubManager {
       // 'finish' resolved the download; wait for the file to be closed before copying it
       await closed
       const base = sanitizeFilename(`${record.title} (from audio)`) || 'Book (from audio)'
+      beforeCopy()
       finalPath = await this.placeFile(temp, dir, base)
     } catch (error) {
       Logger.error(`[ChapterbotEpubManager] Saving the EPUB of job ${record.jobId} for "${record.libraryItemId}" failed: ${error.message}`)
@@ -370,7 +398,8 @@ class ChapterbotEpubManager {
   /**
    * A rescan makes the first ebook of a book without one its primary ebook. This EPUB is a by-product of the audio,
    * so turn it back into a supplementary ebook (as PATCH /api/items/:id/ebook/:fileid/status does).
-   * A later rescan of the item, while it still has no primary ebook, may promote it again (stock scanner rule).
+   * The folder watcher is kept off the folder meanwhile (see finish()). A later library or item scan, while the book
+   * still has no primary ebook, may promote it again (stock scanner rule, unchanged here).
    */
   async keepSupplementary(libraryItemId, finalPath) {
     const libraryItem = await Database.libraryItemModel.getExpandedById(libraryItemId)
