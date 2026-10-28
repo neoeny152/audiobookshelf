@@ -59,6 +59,9 @@ describe('chapterSnap integration (real ffmpeg)', function () {
       ],
       ['-c:a', 'pcm_s16le']
     )
+    // Two files with a 0.95 s pause on the joint at book 9, each half shorter than the default minSilenceSec
+    generate(Path.join(dir, 'joint0.wav'), 9, [[8.55, 9]], ['-c:a', 'pcm_s16le'])
+    generate(Path.join(dir, 'joint1.wav'), 11, [[0, 0.5]], ['-c:a', 'pcm_s16le'])
     // Single files with pauses at 10-12 and 20-21.5
     generate(
       Path.join(dir, 'single.mp3'),
@@ -144,5 +147,26 @@ describe('chapterSnap integration (real ffmpeg)', function () {
     expect(second.pause.start).to.be.closeTo(15, TOLERANCE)
     expect(second.pause.end).to.be.closeTo(16.5, TOLERANCE)
     expect(second.proposedStart).to.be.closeTo(16.25, TOLERANCE)
+  })
+
+  it('finds a joint pause whose halves are each shorter than minSilenceSec', async () => {
+    const timeline = chapterSnap.buildTimeline([
+      { duration: 9, metadata: { path: Path.join(dir, 'joint0.wav') } },
+      { duration: 11, metadata: { path: Path.join(dir, 'joint1.wav') } }
+    ])
+    const result = await chapterSnapRunner.runSnap({
+      libraryItemId: 'it',
+      timeline,
+      T: 20,
+      chapters: chapterSnap.validateChapters([{ start: 0 }, { start: 9 }], 20),
+      options: chapterSnap.parseOptions({})
+    })
+    expect(result.complete).to.equal(true)
+    const chapter = result.chapters[1]
+    expect(chapter.reason).to.equal(chapterSnap.REASONS.INSIDE_PAUSE)
+    expect(chapter.proposedStart).to.equal(9)
+    expect(chapter.pause.start).to.be.closeTo(8.55, TOLERANCE)
+    expect(chapter.pause.end).to.be.closeTo(9.5, TOLERANCE)
+    expect(chapter.pause.crossesFileBoundary).to.equal(true)
   })
 })

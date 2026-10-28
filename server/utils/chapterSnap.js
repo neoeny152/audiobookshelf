@@ -18,6 +18,8 @@ const BONUS_CAP = 3
 const FILE_START_MAX = 4
 const MIN_GAP = 1.0
 const JOIN_TOL = 0.1
+/** Silence length detected at a file joint, where the pause may be split between two files */
+const JOINT_MIN_SILENCE = 0.1
 const PAD_BEFORE = BONUS_CAP + 0.5
 const PAD_AFTER = 1.0
 const MERGE_GAP = 2.0
@@ -257,6 +259,8 @@ function trackIndexAt(timeline, t) {
  * @property {number} localDur
  * @property {boolean} wholeFile
  * @property {boolean} reachesFileEnd
+ * @property {boolean} touchesJoint - starts at the head of a file after the first, or reaches the end of a file before the last
+ * @property {number} detectMinSilenceSec - silencedetect d for this segment; lower at a joint so both halves of a split pause are seen
  */
 
 /**
@@ -296,6 +300,10 @@ function planSegments(starts, indexes, timeline, T, options) {
   }
 
   // Split spans at track boundaries
+  const firstTrack = timeline.find((track) => track.duration > 0)
+  const lastTrack = [...timeline].reverse().find((track) => track.duration > 0)
+  const touchesJoint = (track, localStart, localEnd) => (track !== firstTrack && localStart <= CLIP_EPS) || (track !== lastTrack && localEnd >= track.duration - CLIP_EPS)
+  const jointMinSilence = Math.min(options.minSilenceSec, JOINT_MIN_SILENCE)
   const piecesByTrack = new Map()
   for (const [a, b] of spans) {
     for (const track of timeline) {
@@ -304,7 +312,8 @@ function planSegments(starts, indexes, timeline, T, options) {
       const localStart = clamp(a - track.offset, 0, track.duration)
       const localEnd = clamp(b - track.offset, 0, track.duration)
       const localDur = localEnd - localStart
-      if (localDur < options.minSilenceSec) continue
+      // A short piece at a joint can hold half of a pause split between two files, so it is kept down to the joint d
+      if (localDur < (touchesJoint(track, localStart, localEnd) ? jointMinSilence : options.minSilenceSec)) continue
       if (!piecesByTrack.has(track.index)) piecesByTrack.set(track.index, [])
       piecesByTrack.get(track.index).push({ localStart, localDur })
     }
@@ -318,13 +327,16 @@ function planSegments(starts, indexes, timeline, T, options) {
     const wholeFile = track.duration <= WHOLE_FILE_SEC
     if (wholeFile) pieces = [{ localStart: 0, localDur: track.duration }]
     for (const piece of pieces.sort((x, y) => x.localStart - y.localStart)) {
+      const atJoint = touchesJoint(track, piece.localStart, piece.localStart + piece.localDur)
       segments.push({
         id: segments.length,
         trackIndex,
         localStart: piece.localStart,
         localDur: piece.localDur,
         wholeFile,
-        reachesFileEnd: piece.localStart + piece.localDur >= track.duration - CLIP_EPS
+        reachesFileEnd: piece.localStart + piece.localDur >= track.duration - CLIP_EPS,
+        touchesJoint: atJoint,
+        detectMinSilenceSec: atJoint ? jointMinSilence : options.minSilenceSec
       })
     }
   }
@@ -409,19 +421,30 @@ function parseSilencedetect(lines, seg) {
 /**
  * Map local pauses to the book timeline, sort, and merge pauses that touch (padded overlaps, silence across a file joint).
  *
+ * Segments at a joint are detected with a d below minSilenceSec (see planSegments), so with `minSilenceSec` given:
+ * a raw pause shorter than minSilenceSec is kept only when it touches a file joint (it may be half of a split pause),
+ * and after merging every pause shorter than minSilenceSec is dropped.
+ *
  * @param {{seg: SnapSegment, pauses: LocalPause[]}[]} results
  * @param {TimelineTrack[]} timeline
+ * @param {number} [minSilenceSec] - omitted: no length filter
  * @returns {BookPause[]}
  */
-function toBookPauses(results, timeline) {
+function toBookPauses(results, timeline, minSilenceSec) {
+  const filterShort = typeof minSilenceSec === 'number' && Number.isFinite(minSilenceSec)
   const trackByIndex = new Map(timeline.map((track) => [track.index, track]))
+  const boundaries = timeline.filter((track) => track.offset > 0).map((track) => track.offset)
+  const atJoint = (x) => boundaries.some((b) => Math.abs(x - b) <= JOIN_TOL)
   const all = []
   for (const { seg, pauses } of results) {
     const track = trackByIndex.get(seg.trackIndex)
     if (!track) continue
     const base = track.offset + seg.localStart
     for (const p of pauses) {
-      all.push({ start: base + p.start, end: base + p.end, startClipped: !!p.startClipped, endClipped: !!p.endClipped })
+      const start = base + p.start
+      const end = base + p.end
+      if (filterShort && end - start < minSilenceSec - EPS && !atJoint(start) && !atJoint(end)) continue
+      all.push({ start, end, startClipped: !!p.startClipped, endClipped: !!p.endClipped })
     }
   }
   all.sort((a, b) => a.start - b.start || a.end - b.end)
@@ -442,7 +465,6 @@ function toBookPauses(results, timeline) {
     }
   }
 
-  const boundaries = timeline.filter((track) => track.offset > 0).map((track) => track.offset)
   const lastTrack = timeline[timeline.length - 1]
   const bookEnd = lastTrack ? lastTrack.offset + lastTrack.duration : 0
   for (const p of merged) {
@@ -451,7 +473,7 @@ function toBookPauses(results, timeline) {
     if (p.start <= CLIP_EPS || boundaries.some((b) => Math.abs(p.start - b) <= CLIP_EPS)) p.startClipped = false
     if (p.end >= bookEnd - CLIP_EPS) p.endClipped = false
   }
-  return merged
+  return filterShort ? merged.filter((p) => p.end - p.start >= minSilenceSec - EPS) : merged
 }
 
 /**
@@ -769,6 +791,7 @@ module.exports = {
   FILE_START_MAX,
   MIN_GAP,
   JOIN_TOL,
+  JOINT_MIN_SILENCE,
   PAD_BEFORE,
   PAD_AFTER,
   MERGE_GAP,

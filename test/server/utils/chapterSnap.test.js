@@ -253,8 +253,33 @@ describe('chapterSnap', () => {
         const t = timeline[seg.trackIndex]
         expect(seg.localStart).to.be.at.least(0)
         expect(seg.localStart + seg.localDur).to.be.at.most(t.duration + 1e-9)
-        expect(seg.localDur).to.be.at.least(0.7)
+        expect(seg.localDur).to.be.at.least(seg.detectMinSilenceSec)
+        expect(seg.detectMinSilenceSec).to.equal(seg.touchesJoint ? chapterSnap.JOINT_MIN_SILENCE : 0.7)
       }
+    })
+
+    it('keeps a short piece at a file joint and detects joint segments with a low d', () => {
+      // The window of a chapter at 3574.5 reaches only 0.5 s into part 1, less than minSilenceSec
+      const timeline = [track(0, 0, 3600), track(1, 3600, 3600), track(2, 7200, 3600)]
+      const plan = chapterSnap.planSegments([0, 3574.5], null, timeline, 10800, opts())
+      expect(plan.segments).to.have.length(2)
+      const [tail, head] = plan.segments
+      expect(tail).to.include({ trackIndex: 0, reachesFileEnd: true, touchesJoint: true, detectMinSilenceSec: chapterSnap.JOINT_MIN_SILENCE })
+      expect(head).to.include({ trackIndex: 1, localStart: 0, touchesJoint: true, detectMinSilenceSec: chapterSnap.JOINT_MIN_SILENCE })
+      expect(head.localDur).to.be.closeTo(0.5, 1e-9)
+      expect(plan.chapterSegments[1]).to.deep.equal([0, 1])
+
+      // A piece away from any joint keeps the requested d
+      const inner = chapterSnap.planSegments([0, 5000], null, timeline, 10800, opts())
+      expect(inner.segments[0]).to.include({ touchesJoint: false, detectMinSilenceSec: 0.7 })
+
+      // The first file's head and the last file's tail are not joints
+      const edges = chapterSnap.planSegments([0, 10790], null, timeline, 10800, opts())
+      expect(edges.segments[0]).to.include({ trackIndex: 2, reachesFileEnd: true, touchesJoint: false, detectMinSilenceSec: 0.7 })
+
+      // A requested d below the joint d is used as is
+      const lowD = chapterSnap.planSegments([0, 3574.5], null, timeline, 10800, opts({ minSilenceSec: 0.05 }))
+      expect(lowD.segments[0].detectMinSilenceSec).to.equal(0.05)
     })
 
     it('rejects plans over the budget', () => {
@@ -327,6 +352,33 @@ describe('chapterSnap', () => {
       const result = chapterSnap.snapOne({ index: 1, t: 600.0, pauses, timeline, options: opts(), bounds: chapterSnap.boundsFor([0, 600, 1100], 1, 1200) })
       expect(result.reason).to.equal(REASONS.INSIDE_PAUSE)
       expect(result.proposedStart).to.equal(600)
+    })
+
+    it('joins two halves each shorter than minSilenceSec into one pause at the joint', () => {
+      // Part 0 ends with 0.45 s of silence, part 1 starts with 0.5 s: a real 0.95 s pause on the joint at 3600
+      const timeline = [track(0, 0, 3600), track(1, 3600, 3600)]
+      const tail = { seg: { trackIndex: 0, localStart: 3571.5, localDur: 28.5, reachesFileEnd: true }, pauses: [pause(28.05, 28.5)] }
+      const head = { seg: { trackIndex: 1, localStart: 0, localDur: 26, reachesFileEnd: false }, pauses: [pause(0, 0.5), pause(9.5, 12)] }
+      const pauses = chapterSnap.toBookPauses([tail, head], timeline, 0.7)
+      expect(pauses).to.have.length(2)
+      expect(pauses[0].start).to.be.closeTo(3599.55, 1e-9)
+      expect(pauses[0].end).to.be.closeTo(3600.5, 1e-9)
+      expect(pauses[0].crossesFileBoundary).to.equal(true)
+
+      const result = chapterSnap.snapOne({ index: 1, t: 3600, pauses, timeline, options: opts(), bounds: chapterSnap.boundsFor([0, 3600, 5000], 1, 7200) })
+      expect(result.reason).to.equal(REASONS.INSIDE_PAUSE)
+      expect(result.proposedStart).to.equal(3600)
+      expect(chapterSnap.confidenceFor(result)).to.equal('medium')
+    })
+
+    it('drops short pauses away from a joint and short joint halves that join nothing', () => {
+      const timeline = [track(0, 0, 3600), track(1, 3600, 3600)]
+      const tail = { seg: { trackIndex: 0, localStart: 3500, localDur: 100, reachesFileEnd: true }, pauses: [pause(50, 50.4), pause(60, 61), pause(99.6, 100)] }
+      const head = { seg: { trackIndex: 1, localStart: 0, localDur: 30, reachesFileEnd: false }, pauses: [pause(5, 5.3)] }
+      const pauses = chapterSnap.toBookPauses([tail, head], timeline, 0.7)
+      expect(pauses.map((p) => [p.start, p.end])).to.deep.equal([[3560, 3561]])
+      // Without minSilenceSec nothing is filtered
+      expect(chapterSnap.toBookPauses([tail, head], timeline)).to.have.length(4)
     })
   })
 

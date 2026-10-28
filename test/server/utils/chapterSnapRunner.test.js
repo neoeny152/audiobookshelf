@@ -210,4 +210,69 @@ describe('chapterSnapRunner', () => {
     expect(result.chapters[1].speech).to.deep.equal({ text: 'Chapter one' })
     expect(result.chapters[2]).to.include({ proposedStart: 1502.75, confidence: 'high', speech: null })
   })
+
+  describe('multi-file joints', () => {
+    // Two 3600 s files split at a chapter: part 0 ends with 0.45 s of silence, part 1 starts with 0.5 s,
+    // and part 1 has a 2.5 s mid-sentence pause ending at book 3612
+    const jointTimeline = chapterSnap.buildTimeline([0, 1].map((i) => ({ duration: 3600, metadata: { path: `/books/j/part${i}.mp3` } })))
+    const filePauses = {
+      '/books/j/part0.mp3': [[3599.55, 3600]],
+      '/books/j/part1.mp3': [
+        [0, 0.5],
+        [9.5, 12]
+      ]
+    }
+
+    /**
+     * Fake ffmpeg that, like silencedetect, only reports silences at least d long, clipped to the window
+     */
+    function detectWithD({ path, startSec, durationSec, minSilenceSec }) {
+      const lines = []
+      for (const [s, e] of filePauses[path]) {
+        const ls = Math.max(0, s - startSec)
+        const le = Math.min(durationSec, e - startSec)
+        if (le - ls < minSilenceSec || le <= 0 || ls >= durationSec) continue
+        lines.push(`[silencedetect @ 0x1] silence_start: ${ls.toFixed(4)}`)
+        lines.push(`[silencedetect @ 0x1] silence_end: ${le.toFixed(4)} | silence_duration: ${(le - ls).toFixed(4)}`)
+      }
+      return { lines }
+    }
+
+    it('finds a pause split into two halves shorter than minSilenceSec', async () => {
+      const calls = []
+      const result = await run({
+        timeline: jointTimeline,
+        T: 7200,
+        chapters: [
+          { id: 0, start: 0 },
+          { id: 1, start: 3600 }
+        ],
+        detect: async (params) => {
+          calls.push(params.minSilenceSec)
+          return detectWithD(params)
+        }
+      })
+      expect(calls).to.deep.equal([chapterSnap.JOINT_MIN_SILENCE, chapterSnap.JOINT_MIN_SILENCE])
+      expect(result.chapters[1]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 3600, changed: false, confidence: 'medium' })
+      expect(result.chapters[1].pause).to.include({ start: 3599.55, end: 3600.5, duration: 0.95, crossesFileBoundary: true })
+      expect(result.stats.pausesFound).to.equal(2)
+    })
+
+    it('decodes a 0.5 s head piece of the next file and still finds the joint pause', async () => {
+      const result = await run({
+        timeline: jointTimeline,
+        T: 7200,
+        chapters: [
+          { id: 0, start: 0 },
+          { id: 1, start: 3574.5 }
+        ],
+        detect: async (params) => detectWithD(params)
+      })
+      expect(result.stats.segments).to.equal(2)
+      expect(result.stats.ffmpegCalls).to.equal(2)
+      expect(result.stats.pausesFound).to.equal(1)
+      // The joint pause ends 26 s after the start, outside the 25 s window, so the chapter stays
+      expect(result.chapters[1]).to.include({ reason: REASONS.NO_PAUSE_IN_WINDOW, proposedStart: 3574.5 })
+    })
+  })
 })

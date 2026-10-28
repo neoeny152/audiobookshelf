@@ -79,7 +79,7 @@ async function runPool({ segments, timeline, options, detect, signal, deadlineMs
           startSec: seg.localStart,
           durationSec: seg.localDur,
           noiseDb: options.noiseDb,
-          minSilenceSec: options.minSilenceSec,
+          minSilenceSec: seg.detectMinSilenceSec ?? options.minSilenceSec,
           timeoutSec,
           signal
         })
@@ -151,7 +151,7 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
     warnings.push(`Time limit reached: ${skippedSegments} of ${plan.segments.length} segments not analysed. Resend with "indexes" for the chapters marked not-analysed.`)
   }
 
-  const pauses = chapterSnap.toBookPauses(okResults, timeline)
+  const pauses = chapterSnap.toBookPauses(okResults, timeline, options.minSilenceSec)
 
   const proposals = starts.map((t, i) => {
     let skipReason = null
