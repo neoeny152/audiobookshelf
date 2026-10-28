@@ -520,3 +520,80 @@ async function mergeAudioFiles(audioTracks, duration, itemCachePath, outputFileP
 }
 
 module.exports.mergeAudioFiles = mergeAudioFiles
+
+/**
+ * Run ffmpeg silencedetect over part of one audio file and collect the silence lines from stderr.
+ * Times in the returned lines are relative to `startSec` (input seek).
+ *
+ * Only numbers that were already validated and clamped go into the filter string. The path is passed
+ * as one argv element (no shell) with a `file:` prefix so names like `concat:` or `http:` are never read as protocols.
+ *
+ * @param {Object} params
+ * @param {string} params.path - audio file path from the database
+ * @param {number} params.startSec - seconds into the file
+ * @param {number} params.durationSec
+ * @param {number} params.noiseDb
+ * @param {number} params.minSilenceSec
+ * @param {number} [params.timeoutSec=30]
+ * @param {AbortSignal} [params.signal]
+ * @param {import('../libs/fluentFfmpeg/index').FfmpegCommand} [ffmpeg]
+ * @returns {Promise<{lines: string[]}>} rejects with FFMPEG_CANCELED on abort
+ */
+function detectSilences({ path, startSec, durationSec, noiseDb, minSilenceSec, timeoutSec = 30, signal = null } = {}, ffmpeg = Ffmpeg({ timeout: timeoutSec })) {
+  return new Promise((resolve, reject) => {
+    if (typeof path !== 'string' || !path) return reject(new Error('detectSilences: invalid path'))
+    for (const [name, value] of Object.entries({ startSec, durationSec, noiseDb, minSilenceSec })) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) return reject(new Error(`detectSilences: ${name} must be a finite number`))
+    }
+    if (signal?.aborted) return reject(new Error('FFMPEG_CANCELED'))
+
+    const lines = []
+    let canceled = false
+    let settled = false
+    const onAbort = () => {
+      canceled = true
+      ffmpeg.kill('SIGKILL')
+    }
+    const finish = (fn, value) => {
+      if (settled) return
+      settled = true
+      signal?.removeEventListener('abort', onAbort)
+      fn(value)
+    }
+
+    ffmpeg
+      .input('file:' + path)
+      .inputOptions(['-ss', Math.max(0, startSec).toFixed(3)])
+      .outputOptions(['-t', durationSec.toFixed(3), '-vn', '-sn', '-dn', '-hide_banner', '-nostats'])
+      .audioFilters(`silencedetect=noise=${noiseDb.toFixed(1)}dB:d=${minSilenceSec.toFixed(2)}`)
+      .format('null')
+      .output('-')
+
+    // Must be attached before run(): fluent-ffmpeg only wires per-line stderr events when a listener exists at spawn
+    ffmpeg
+      .on('start', (cmd) => {
+        Logger.debug(`[ffmpegHelpers] Detect silences ffmpeg command: ${cmd}`)
+      })
+      .on('stderr', (line) => {
+        if (/silence_(start|end)/.test(line)) lines.push(line)
+      })
+      .on('end', () => {
+        if (canceled) finish(reject, new Error('FFMPEG_CANCELED'))
+        else finish(resolve, { lines })
+      })
+      .on('error', (err, stdout, stderr) => {
+        if (canceled || signal?.aborted) {
+          finish(reject, new Error('FFMPEG_CANCELED'))
+          return
+        }
+        const tail = typeof stderr === 'string' ? stderr.slice(-2048) : ''
+        Logger.error(`[ffmpegHelpers] Detect silences error ${err?.message || err}${tail ? `\n${tail}` : ''}`)
+        finish(reject, err instanceof Error ? err : new Error(String(err)))
+      })
+
+    signal?.addEventListener('abort', onAbort, { once: true })
+    ffmpeg.run()
+  })
+}
+
+module.exports.detectSilences = detectSilences

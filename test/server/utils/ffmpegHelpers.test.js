@@ -4,7 +4,9 @@ const fileUtils = require('../../../server/utils/fileUtils')
 const fs = require('../../../server/libs/fsExtra')
 const EventEmitter = require('events')
 
-const { generateFFMetadata, addCoverAndMetadataToFile } = require('../../../server/utils/ffmpegHelpers')
+const { generateFFMetadata, addCoverAndMetadataToFile, detectSilences } = require('../../../server/utils/ffmpegHelpers')
+const Ffmpeg = require('../../../server/libs/fluentFfmpeg')
+const Logger = require('../../../server/Logger')
 
 global.isWin = process.platform === 'win32'
 
@@ -245,5 +247,115 @@ describe('addCoverAndMetadataToFile', () => {
 
     // Restore the stub
     sinon.restore()
+  })
+})
+
+describe('detectSilences', () => {
+  const params = { path: '/books/Black Ice/concat:part 01.mp3', startSec: 1234.5, durationSec: 58.5, noiseDb: -38, minSilenceSec: 0.7 }
+
+  /**
+   * Real fluent-ffmpeg command with run() replaced, so the argv it would spawn can be checked
+   */
+  function createCommand(onRun) {
+    const command = Ffmpeg()
+    command.kill = sinon.spy()
+    command.run = sinon.spy(() => {
+      command.argsAtRun = command._getArguments()
+      command.stderrListenersAtRun = command.listenerCount('stderr')
+      onRun(command)
+    })
+    return command
+  }
+
+  beforeEach(() => {
+    sinon.stub(Logger, 'error')
+    sinon.stub(Logger, 'debug')
+  })
+
+  afterEach(() => {
+    sinon.restore()
+  })
+
+  it('builds separate argv elements with a file: input and a numeric filter', async () => {
+    const command = createCommand((cmd) => cmd.emit('end'))
+    await detectSilences(params, command)
+
+    const args = command.argsAtRun
+    const ssIndex = args.indexOf('-ss')
+    expect(ssIndex).to.be.greaterThan(-1)
+    expect(args[ssIndex + 1]).to.equal('1234.500')
+    expect(args[ssIndex + 2]).to.equal('-i')
+    expect(args[ssIndex + 3]).to.equal('file:/books/Black Ice/concat:part 01.mp3')
+    const tIndex = args.indexOf('-t')
+    expect(args[tIndex + 1]).to.equal('58.500')
+    expect(args).to.include.members(['-vn', '-sn', '-dn', '-hide_banner', '-nostats'])
+    expect(args).to.include('silencedetect=noise=-38.0dB:d=0.70')
+    const fIndex = args.indexOf('-f')
+    expect(args[fIndex + 1]).to.equal('null')
+    expect(args[args.length - 1]).to.equal('-')
+    // the path is a single element and appears nowhere else
+    expect(args.filter((a) => a.includes('Black Ice'))).to.have.length(1)
+    expect(command.stderrListenersAtRun).to.equal(1)
+  })
+
+  it('collects only silence lines', async () => {
+    const command = createCommand((cmd) => {
+      cmd.emit('stderr', "Input #0, mp3, from 'file:/books/a.mp3':")
+      cmd.emit('stderr', '[silencedetect @ 0x1] silence_start: 12.3456')
+      cmd.emit('stderr', 'size=N/A time=00:00:30.00 bitrate=N/A speed= 600x')
+      cmd.emit('stderr', '[silencedetect @ 0x1] silence_end: 14.5678 | silence_duration: 2.2222')
+      cmd.emit('end')
+    })
+    const result = await detectSilences(params, command)
+    expect(result).to.deep.equal({ lines: ['[silencedetect @ 0x1] silence_start: 12.3456', '[silencedetect @ 0x1] silence_end: 14.5678 | silence_duration: 2.2222'] })
+  })
+
+  it('rejects on an ffmpeg error and on a timeout', async () => {
+    const failing = createCommand((cmd) => cmd.emit('error', new Error('ffmpeg exited with code 1: No such file'), '', 'x'.repeat(5000)))
+    try {
+      await detectSilences(params, failing)
+      expect.fail('expected a rejection')
+    } catch (error) {
+      expect(error.message).to.include('exited with code 1')
+    }
+    expect(Logger.error.firstCall.args[0].length).to.be.below(2048 + 200)
+
+    const timedOut = createCommand((cmd) => cmd.emit('error', new Error('process ran into a timeout (30s)')))
+    try {
+      await detectSilences(params, timedOut)
+      expect.fail('expected a rejection')
+    } catch (error) {
+      expect(error.message).to.include('timeout')
+    }
+  })
+
+  it('kills with SIGKILL on abort and rejects with FFMPEG_CANCELED', async () => {
+    const ac = new AbortController()
+    const command = createCommand(() => {})
+    command.kill = sinon.spy(() => command.emit('error', new Error('ffmpeg was killed with signal SIGKILL')))
+    const promise = detectSilences({ ...params, signal: ac.signal }, command)
+    ac.abort()
+    try {
+      await promise
+      expect.fail('expected a rejection')
+    } catch (error) {
+      expect(error.message).to.equal('FFMPEG_CANCELED')
+    }
+    expect(command.kill.calledOnceWith('SIGKILL')).to.be.true
+  })
+
+  it('rejects without spawning when already aborted or given bad numbers', async () => {
+    const ac = new AbortController()
+    ac.abort()
+    const command = createCommand((cmd) => cmd.emit('end'))
+    await detectSilences({ ...params, signal: ac.signal }, command).then(
+      () => expect.fail('expected a rejection'),
+      (error) => expect(error.message).to.equal('FFMPEG_CANCELED')
+    )
+    await detectSilences({ ...params, noiseDb: '-38dB; rm -rf /' }, command).then(
+      () => expect.fail('expected a rejection'),
+      (error) => expect(error.message).to.include('noiseDb')
+    )
+    expect(command.run.called).to.be.false
   })
 })
