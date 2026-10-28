@@ -111,13 +111,18 @@ class ToolsController {
    */
   async batchEmbedMetadata(req, res) {
     const libraryItemIds = req.body.libraryItemIds || []
-    if (!libraryItemIds.length) {
+    if (!Array.isArray(libraryItemIds) || !libraryItemIds.length) {
       return res.status(400).send('Invalid request payload')
     }
 
+    // Load all items in one query, then validate in request order so the first failing id decides the response as before
+    const validIds = [...new Set(libraryItemIds.filter((id) => typeof id === 'string' && id))]
+    const foundItems = validIds.length ? await Database.libraryItemModel.findAllExpandedWhere({ id: validIds }) : []
+    const libraryItemMap = new Map(foundItems.filter((li) => li.media).map((li) => [li.id, li]))
+
     const libraryItems = []
     for (const libraryItemId of libraryItemIds) {
-      const libraryItem = await Database.libraryItemModel.getExpandedById(libraryItemId)
+      const libraryItem = typeof libraryItemId === 'string' ? libraryItemMap.get(libraryItemId) : null
       if (!libraryItem) {
         Logger.error(`[ToolsController] Batch embed metadata library item (${libraryItemId}) not found`)
         return res.sendStatus(404)
