@@ -173,6 +173,28 @@ describe('PodcastController - batch episode endpoints', () => {
       expect(b1.podcastId).to.equal(podB.libraryItem.mediaId)
     })
 
+    it('ignores chapters arrays containing null entries instead of throwing', async () => {
+      const res = fakeRes()
+      const validChapters = [{ id: 0, start: 1, end: 10, title: 'Ch 1' }]
+      const body = {
+        episodes: [
+          { libraryItemId: podA.libraryItem.id, episodeId: podA.episodes[0].id, updates: { chapters: [null] } },
+          { libraryItemId: podA.libraryItem.id, episodeId: podA.episodes[1].id, updates: { chapters: [...validChapters, null], title: 'Still Updated' } },
+          { libraryItemId: podB.libraryItem.id, episodeId: podB.episodes[0].id, updates: { chapters: validChapters } }
+        ]
+      }
+      await PodcastController.batchUpdateEpisodes({ user: editor, body, query: {} }, res)
+      expect(statusOf(res)).to.equal(200)
+      expect(res.json.firstCall.args[0].numEpisodesUpdated).to.equal(2)
+      const a1 = await Database.podcastEpisodeModel.findByPk(podA.episodes[0].id)
+      const a2 = await Database.podcastEpisodeModel.findByPk(podA.episodes[1].id)
+      const b1 = await Database.podcastEpisodeModel.findByPk(podB.episodes[0].id)
+      expect(a1.chapters || []).to.deep.equal([])
+      expect(a2.title).to.equal('Still Updated')
+      expect(a2.chapters || []).to.deep.equal([])
+      expect(b1.chapters).to.deep.equal(validChapters)
+    })
+
     it('rejects users without update permission (403), even with delete permission', async () => {
       for (const user of [noPerms, deleteOnly]) {
         const res = fakeRes()
@@ -411,6 +433,16 @@ describe('PodcastController - batch episode endpoints', () => {
       expect(ep.subtitle).to.not.include('script')
       expect(ep.publishedAt).to.equal(123)
       expect(SocketAuthority.libraryItemEmitter.calledOnceWith('item_updated')).to.be.true
+    })
+
+    it('ignores a chapters array containing null instead of throwing', async () => {
+      const libraryItem = await Database.libraryItemModel.getExpandedById(podA.libraryItem.id)
+      const res = fakeRes()
+      await PodcastController.updateEpisode({ user: editor, libraryItem, params: { episodeId: podA.episodes[0].id }, body: { chapters: [null] } }, res)
+      expect(statusOf(res)).to.equal(200)
+      expect(SocketAuthority.libraryItemEmitter.called).to.be.false
+      const ep = await Database.podcastEpisodeModel.findByPk(podA.episodes[0].id)
+      expect(ep.chapters || []).to.deep.equal([])
     })
   })
 })

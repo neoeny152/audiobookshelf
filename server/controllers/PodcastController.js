@@ -70,7 +70,7 @@ function buildEpisodeUpdatePayload(body) {
         updatePayload.enclosureType = typeof enclosure.type === 'string' ? enclosure.type : null
         updatePayload.enclosureSize = enclosure.length !== undefined && enclosure.length !== null ? enclosure.length : null
       }
-    } else if (key === 'chapters' && Array.isArray(body[key]) && body[key].every((ch) => typeof ch === 'object' && ch.title && ch.start)) {
+    } else if (key === 'chapters' && Array.isArray(body[key]) && body[key].every((ch) => ch && typeof ch === 'object' && ch.title && ch.start)) {
       updatePayload[key] = body[key]
     } else if (key === 'publishedAt' && typeof body[key] === 'number') {
       updatePayload[key] = body[key]
