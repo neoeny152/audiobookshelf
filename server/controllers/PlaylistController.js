@@ -404,18 +404,31 @@ class PlaylistController {
       return res.status(400).send('Invalid request body items')
     }
 
+    const libraryItemMap = new Map(libraryItems.map((li) => [li.id, li]))
+    /** @type {Map<string, Map<string, import('../models/PodcastEpisode')>>} */
+    const episodeMapsByLibraryItemId = new Map()
+    const getEpisode = (libraryItem, episodeId) => {
+      if (!episodeMapsByLibraryItemId.has(libraryItem.id)) {
+        episodeMapsByLibraryItemId.set(libraryItem.id, new Map((libraryItem.media.podcastEpisodes || []).map((pe) => [pe.id, pe])))
+      }
+      return episodeMapsByLibraryItemId.get(libraryItem.id).get(episodeId)
+    }
+
     req.playlist.playlistMediaItems = await req.playlist.getMediaItemsExpandedWithLibraryItem()
 
     const mediaItemsToAdd = []
     const jsonExpanded = req.playlist.toOldJSONExpanded()
 
+    // Media item ids already in the playlist before this request
+    const existingMediaItemIds = new Set(req.playlist.playlistMediaItems.map((pmi) => pmi.mediaItemId))
+
     // Setup array of playlistMediaItem records to add
     let order = req.playlist.playlistMediaItems.length + 1
     for (const item of req.body.items) {
-      const libraryItem = libraryItems.find((li) => li.id === item.libraryItemId)
+      const libraryItem = libraryItemMap.get(item.libraryItemId)
 
       const mediaItemId = item.episodeId || libraryItem.media.id
-      if (req.playlist.playlistMediaItems.some((pmi) => pmi.mediaItemId === mediaItemId)) {
+      if (existingMediaItemIds.has(mediaItemId)) {
         // Already exists in playlist
         continue
       } else {
@@ -428,7 +441,7 @@ class PlaylistController {
 
         // Add the new item to to the old json expanded to prevent having to fully reload the playlist media items
         if (item.episodeId) {
-          const episode = libraryItem.media.podcastEpisodes.find((ep) => ep.id === item.episodeId)
+          const episode = getEpisode(libraryItem, item.episodeId)
           jsonExpanded.items.push({
             episodeId: item.episodeId,
             episode: episode.toOldJSONExpanded(libraryItem.id),
