@@ -189,11 +189,14 @@ class LibraryScanner {
 
     if (this.shouldCancelScan(libraryScan)) return true
 
-    const existingLibraryItems = await Database.libraryItemModel.findAll({
+    let existingLibraryItems = await Database.libraryItemModel.findAll({
       where: {
         libraryId: libraryScan.libraryId
       }
     })
+
+    // Remove exact duplicate item records left by earlier concurrent scans (keeps the oldest, never touches files)
+    existingLibraryItems = await this.removeExactDuplicateLibraryItems(existingLibraryItems, libraryScan)
 
     if (this.shouldCancelScan(libraryScan)) return true
 
@@ -316,6 +319,54 @@ class LibraryScanner {
 
     libraryScan.addLog(LogLevel.INFO, `Scan completed. ${libraryScan.resultStats}`)
     return false
+  }
+
+  /**
+   * Find library items that share the exact same path and inode (duplicates created by concurrent scans).
+   * The oldest record is kept. Newer records are removed from the database only when nothing references them
+   * (progress, bookmarks, playlists, collections, feeds). Files on disk are never touched.
+   * Duplicates that cannot be removed safely are logged and left out of the scan so they are not marked missing.
+   *
+   * @param {import('../models/LibraryItem')[]} libraryItems
+   * @param {import('./LibraryScan')} libraryScan
+   * @returns {Promise<import('../models/LibraryItem')[]>} library items to continue scanning with
+   */
+  async removeExactDuplicateLibraryItems(libraryItems, libraryScan) {
+    /** @type {Map<string, import('../models/LibraryItem')[]>} */
+    const groups = new Map()
+    for (const libraryItem of libraryItems) {
+      if (!libraryItem.path || !libraryItem.ino) continue
+      const key = `${libraryItem.path} ${libraryItem.ino}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(libraryItem)
+    }
+
+    const idsToSkip = new Set()
+    for (const group of groups.values()) {
+      if (group.length < 2) continue
+
+      group.sort((a, b) => getTime(a.createdAt) - getTime(b.createdAt) || getTime(a.addedAt) - getTime(b.addedAt) || String(a.id).localeCompare(String(b.id)))
+      const [keep, ...duplicates] = group
+      for (const duplicate of duplicates) {
+        idsToSkip.add(duplicate.id)
+
+        const references = await getLibraryItemReferences(duplicate)
+        if (references.length) {
+          libraryScan.addLog(LogLevel.WARN, `Duplicate library item "${duplicate.id}" of "${keep.id}" at path "${duplicate.path}" has ${references.join(', ')} - not removing, resolve manually`)
+          continue
+        }
+
+        libraryScan.addLog(LogLevel.WARN, `Removing duplicate library item record "${duplicate.id}" at path "${duplicate.path}" (inode ${duplicate.ino}), keeping oldest "${keep.id}"`)
+        await Database.libraryItemModel.removeById(duplicate.id)
+        SocketAuthority.emitter('item_removed', {
+          id: duplicate.id,
+          libraryId: duplicate.libraryId
+        })
+      }
+    }
+
+    if (!idsToSkip.size) return libraryItems
+    return libraryItems.filter((li) => !idsToSkip.has(li.id))
   }
 
   shouldCancelScan(libraryScan) {
@@ -669,6 +720,53 @@ class LibraryScanner {
   }
 }
 module.exports = new LibraryScanner()
+
+/**
+ * @param {Date|number|string} value
+ * @returns {number}
+ */
+function getTime(value) {
+  const time = value ? new Date(value).valueOf() : NaN
+  return isNaN(time) ? 0 : time
+}
+
+/**
+ * Describe anything still referencing a library item or its media
+ *
+ * @param {import('../models/LibraryItem')} libraryItem
+ * @returns {Promise<string[]>}
+ */
+async function getLibraryItemReferences(libraryItem) {
+  const references = []
+
+  let mediaItemIds = [libraryItem.mediaId]
+  if (libraryItem.mediaType === 'podcast') {
+    const episodes = await Database.podcastEpisodeModel.findAll({ attributes: ['id'], where: { podcastId: libraryItem.mediaId } })
+    mediaItemIds = episodes.map((ep) => ep.id)
+  }
+
+  if (mediaItemIds.length) {
+    const numProgress = await Database.mediaProgressModel.count({ where: { mediaItemId: mediaItemIds } })
+    if (numProgress) references.push(`${numProgress} media progress`)
+
+    const numPlaylistItems = await Database.playlistMediaItemModel.count({ where: { mediaItemId: mediaItemIds } })
+    if (numPlaylistItems) references.push(`${numPlaylistItems} playlist entries`)
+  }
+
+  if (libraryItem.mediaType === 'book') {
+    const numCollectionBooks = await Database.collectionBookModel.count({ where: { bookId: libraryItem.mediaId } })
+    if (numCollectionBooks) references.push(`${numCollectionBooks} collection entries`)
+  }
+
+  const numFeeds = await Database.feedModel.count({ where: { entityId: libraryItem.id } })
+  if (numFeeds) references.push(`${numFeeds} rss feeds`)
+
+  const users = await Database.userModel.findAll({ attributes: ['id', 'bookmarks'] })
+  const numBookmarks = users.reduce((total, user) => total + (user.bookmarks || []).filter((b) => b.libraryItemId === libraryItem.id).length, 0)
+  if (numBookmarks) references.push(`${numBookmarks} bookmarks`)
+
+  return references
+}
 
 function ItemToFileInoMatch(libraryItem1, libraryItem2) {
   return libraryItem1.isFile && libraryItem2.libraryFiles.some((lf) => lf.ino === libraryItem1.ino)

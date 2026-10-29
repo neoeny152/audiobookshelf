@@ -65,6 +65,24 @@ describe('LibraryScanner duplicate library items', () => {
     })
   }
 
+  async function createItemRecord(ino, createdAt) {
+    const book = await Database.bookModel.create({ title: 'Book 2', audioFiles: [], tags: [], narrators: [], genres: [], chapters: [] })
+    const item = await Database.libraryItemModel.create({
+      path: itemPath,
+      relPath: 'Matt Dinniman/Dungeon Crawler Carl/Book 2',
+      ino,
+      isFile: false,
+      libraryFiles: [],
+      mediaId: book.id,
+      mediaType: 'book',
+      libraryId: library.id,
+      libraryFolderId: folder.id
+    })
+    // Force distinct creation times like the observed records added 40-80 ms apart
+    await Database.sequelize.query('UPDATE libraryItems SET createdAt = :createdAt WHERE id = :id', { replacements: { createdAt, id: item.id } })
+    return item
+  }
+
   function countItemsAtPath() {
     return Database.libraryItemModel.count({ where: { libraryId: library.id, path: itemPath } })
   }
@@ -144,5 +162,36 @@ describe('LibraryScanner duplicate library items', () => {
     const again = await LibraryItemScanner.scanNewLibraryItem(scanData, library.settings, libraryScan)
     expect(again).to.equal(null)
     expect(await countItemsAtPath()).to.equal(1)
+  })
+
+  it('full scan removes newer exact duplicate records, keeps the oldest and leaves files alone', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.080 +00:00')
+
+    await LibraryScanner.scan(library)
+
+    const remaining = await Database.libraryItemModel.findAll({ where: { libraryId: library.id, path: itemPath } })
+    expect(remaining.map((li) => li.id)).to.deep.equal([oldest.id])
+    expect(!!remaining[0].isMissing).to.equal(false)
+    await delay(20) // media is destroyed in a non-awaited afterDestroy hook
+    expect(await Database.bookModel.findByPk(newer.mediaId)).to.equal(null)
+    expect(BookScanner.scanNewBookLibraryItem.called).to.be.false
+    expect(SocketAuthority.emitter.calledWith('item_removed', { id: newer.id, libraryId: library.id })).to.be.true
+    expect(await fsp.readFile(Path.posix.join(itemPath, 'track.mp3'), 'utf8')).to.equal('not really audio')
+  })
+
+  it('full scan keeps a newer duplicate that has listening progress and does not mark it missing', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    const user = await Database.userModel.create({ username: 'reader', type: 'user', isActive: true })
+    await Database.mediaProgressModel.create({ userId: user.id, mediaItemId: newer.mediaId, mediaItemType: 'book', currentTime: 100, duration: 1000 })
+
+    await LibraryScanner.scan(library)
+
+    const remaining = await Database.libraryItemModel.findAll({ where: { libraryId: library.id, path: itemPath }, order: [['createdAt', 'ASC']] })
+    expect(remaining.map((li) => li.id)).to.deep.equal([oldest.id, newer.id])
+    expect(remaining.every((li) => !li.isMissing)).to.be.true
   })
 })
