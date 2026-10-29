@@ -16,7 +16,9 @@
  *   1. Removes exact duplicates of (userId, mediaItemId). Keep rule: the row with the newest
  *      updatedAt is kept; on an updatedAt tie the row with the smallest id is kept. This is the
  *      same rule Database.cleanDatabase already applies on every startup, so no row is removed
- *      here that the server would not already have removed.
+ *      here that the server would not already have removed. A NULL updatedAt (not possible through
+ *      the model, only through manual edits) counts as the oldest, so such duplicates are removed
+ *      too and the index can still be created.
  *   2. Adds the UNIQUE index media_progresses_user_item_unique on (userId, mediaItemId).
  *
  * Idempotent: running it again finds no duplicates and skips the existing index.
@@ -39,9 +41,13 @@ WHERE EXISTS (
   WHERE mp2.userId = mp1.userId
   AND mp2.mediaItemId = mp1.mediaItemId
   AND (
-    mp2.updatedAt > mp1.updatedAt
-    OR (mp2.updatedAt = mp1.updatedAt AND mp2.id < mp1.id)
+    COALESCE(mp2.updatedAt, '') > COALESCE(mp1.updatedAt, '')
+    OR (COALESCE(mp2.updatedAt, '') = COALESCE(mp1.updatedAt, '') AND mp2.id < mp1.id)
   )
+)`
+
+const remainingDuplicateGroupsSelect = `SELECT COUNT(*) AS count FROM (
+  SELECT 1 FROM mediaProgresses GROUP BY userId, mediaItemId HAVING COUNT(*) > 1
 )`
 
 /**
@@ -87,6 +93,12 @@ async function up({ context: { queryInterface, logger } }) {
     await transaction.commit()
   } catch (error) {
     await transaction.rollback()
+    try {
+      const [[{ count }]] = await queryInterface.sequelize.query(remainingDuplicateGroupsSelect)
+      logger.error(`${loggerPrefix} failed to add unique index ${indexName}; ${count} (userId, mediaItemId) pairs in ${tableName} still have more than one row (nothing was removed)`)
+    } catch {
+      logger.error(`${loggerPrefix} failed to add unique index ${indexName} (nothing was removed)`)
+    }
     throw error
   }
 

@@ -81,6 +81,22 @@ describe('Migration v2.37.3-media-progress-unique-user-item', () => {
       expect(indexes.filter((i) => i.name === indexName)).to.have.length(1)
     })
 
+    it('treats a NULL updatedAt as the oldest row so the index can still be created', async () => {
+      await queryInterface.dropTable('mediaProgresses')
+      await sequelize.query('CREATE TABLE mediaProgresses (id VARCHAR(255) PRIMARY KEY, userId VARCHAR(255) NOT NULL, mediaItemId VARCHAR(255) NOT NULL, currentTime FLOAT, updatedAt DATETIME)')
+      await sequelize.query(`INSERT INTO mediaProgresses (id, userId, mediaItemId, currentTime, updatedAt) VALUES
+        ('n1', 'user1', 'book1', 1, NULL),
+        ('n2', 'user1', 'book1', 2, '2025-01-01 00:00:00.000 +00:00'),
+        ('n3', 'user1', 'book2', 3, NULL),
+        ('n4', 'user1', 'book2', 4, NULL)`)
+
+      await up({ context: { queryInterface, logger: Logger } })
+
+      expect(await ids()).to.deep.equal(['n2', 'n3'])
+      const indexes = await queryInterface.showIndex('mediaProgresses')
+      expect(indexes.some((i) => i.name === indexName)).to.be.true
+    })
+
     it('does nothing when the table does not exist yet', async () => {
       await queryInterface.dropTable('mediaProgresses')
       await up({ context: { queryInterface, logger: Logger } })
