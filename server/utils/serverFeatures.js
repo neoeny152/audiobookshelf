@@ -11,12 +11,14 @@ const { version } = require('../../package.json')
  *
  * - batchEpisodes: POST /api/podcasts/batch/episodes/update and /api/podcasts/batch/episodes/delete
  * - libraryDownloadPost: POST /api/libraries/:id/download with ids in the request body
+ * - readAlong: GET /api/items/:id/ebook/:fileid/readalong, sentence timings of an EPUB made from the item's audio
+ *   (404 when that EPUB has none; see utils/readAlong.js). Always listed: serving stored data needs no sidecar.
  *
  * Optional features, only listed while they work (see utils/chapterbotClient.js advertisedFeatures):
  * - chapterbotVerify: POST /api/items/:id/chapters/snap accepts options.verify = true (Whisper speech check)
  * - chapterbotEpub: POST /api/items/:id/epub, GET and DELETE /api/items/:id/epub/:jobId (EPUB from audio)
  */
-const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost'])
+const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong'])
 const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub'])
 
 /**

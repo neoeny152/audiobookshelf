@@ -316,6 +316,45 @@ describe('chapterbotClient', () => {
       expect(ended).to.equal(false)
     })
 
+    it('fetches the read-along JSON of a job, null on 404, and enforces its size limit', async () => {
+      const jobId = '0123456789abcdef0123456789abcdef'
+      let answer = { status: 200, body: { kind: 'abs-readalong', version: 1 } }
+      fake = await startFakeServer((req, res) => {
+        if (typeof answer.body === 'string') {
+          res.writeHead(answer.status, { 'Content-Type': 'application/json' })
+          return res.end(answer.body)
+        }
+        sendJson(res, answer.status, answer.body)
+      })
+      configureFor(fake.url)
+      expect(await chapterbotClient.downloadJobReadAlong(jobId)).to.deep.equal({ kind: 'abs-readalong', version: 1 })
+      expect(fake.requests[0].url).to.equal(`/v1/jobs/${jobId}/readalong`)
+      expect(fake.requests[0].headers.authorization).to.equal(`Bearer ${TOKEN}`)
+
+      answer = { status: 404, body: { detail: { code: 'not_found', message: 'no read-along data' } } }
+      expect(await chapterbotClient.downloadJobReadAlong(jobId)).to.equal(null)
+
+      answer = { status: 409, body: { detail: { code: 'not_done' } } }
+      let error = await chapterbotClient.downloadJobReadAlong(jobId).catch((e) => e)
+      expect([error.code, error.status]).to.deep.equal(['http_error', 409])
+
+      answer = { status: 200, body: 'not json' }
+      error = await chapterbotClient.downloadJobReadAlong(jobId).catch((e) => e)
+      expect(error.code).to.equal('bad_response')
+
+      answer = { status: 200, body: [1, 2] }
+      error = await chapterbotClient.downloadJobReadAlong(jobId).catch((e) => e)
+      expect(error.code).to.equal('bad_response')
+
+      answer = { status: 200, body: { pad: 'x'.repeat(500) } }
+      error = await chapterbotClient.downloadJobReadAlong(jobId, { maxBytes: 100 }).catch((e) => e)
+      expect(error.code).to.equal('too_large')
+      expectNoToken(error.message)
+
+      error = await chapterbotClient.downloadJobReadAlong('../etc').catch((e) => e)
+      expect(error.code).to.equal('bad_request')
+    })
+
     it('advertises the features only after a recent successful health check, without blocking', async () => {
       let healthy = true
       fake = await startFakeServer((req, res) => sendJson(res, healthy ? 200 : 503, { ok: healthy, epubWorkers: healthy ? 1 : 0 }))

@@ -5,7 +5,8 @@ const Database = require('../Database')
 const SocketAuthority = require('../SocketAuthority')
 const chapterbotClient = require('../utils/chapterbotClient')
 const chapterSnap = require('../utils/chapterSnap')
-const { sanitizeFilename, filePathToPOSIX } = require('../utils/fileUtils')
+const readAlong = require('../utils/readAlong')
+const { sanitizeFilename, filePathToPOSIX, getIno } = require('../utils/fileUtils')
 
 /**
  * EPUB from audio through the chapterbot sidecar (POST /api/items/:id/epub).
@@ -385,6 +386,8 @@ class ChapterbotEpubManager {
       Logger.error(`[ChapterbotEpubManager] Rescan of "${record.libraryItemId}" after EPUB job ${record.jobId} failed`, error)
     }
 
+    await this.saveReadAlong(record, finalPath)
+
     // the sidecar keeps a finished job's files until it is deleted
     this.client.deleteJob(record.jobId).catch((error) => Logger.warn(`[ChapterbotEpubManager] Deleting finished EPUB job ${record.jobId} on chapterbot failed: ${error.message}`))
 
@@ -393,6 +396,30 @@ class ChapterbotEpubManager {
     record.progress = 1
     record.finishedAt = this.now()
     this.emit(record, 'chapterbot_epub_done')
+  }
+
+  /**
+   * Fetch the read-along data built with the EPUB and store it under the item's metadata folder, keyed by the
+   * placed EPUB's ino (see utils/readAlong.js). Never fails the job: the EPUB works without it.
+   *
+   * @param {Object} record
+   * @param {string} finalPath - the EPUB in the library item folder
+   */
+  async saveReadAlong(record, finalPath) {
+    try {
+      const data = await this.client.downloadJobReadAlong(record.jobId)
+      if (!data) {
+        Logger.warn(`[ChapterbotEpubManager] EPUB job ${record.jobId} has no read-along data (sidecar older than the feature), saved the EPUB without it`)
+        return
+      }
+      const normalized = readAlong.validate(data)
+      const ino = await getIno(finalPath)
+      if (!ino) throw new Error('the placed EPUB could not be read')
+      await readAlong.save(record.libraryItemId, ino, Path.basename(finalPath), normalized)
+      Logger.info(`[ChapterbotEpubManager] Saved read-along data (${normalized.sentences.length} sentences) for "${finalPath}"`)
+    } catch (error) {
+      Logger.warn(`[ChapterbotEpubManager] Saving the read-along data of EPUB job ${record.jobId} failed: ${error.message}`)
+    }
   }
 
   /**

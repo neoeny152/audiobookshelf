@@ -21,7 +21,7 @@ describe('serverFeatures', () => {
       language: 'en-us',
       authMethods: ['local'],
       authFormData: { authLoginCustomMessage: null },
-      serverFeatures: ['batchEpisodes', 'libraryDownloadPost']
+      serverFeatures: ['batchEpisodes', 'libraryDownloadPost', 'readAlong']
     })
   })
 
@@ -43,8 +43,8 @@ describe('serverFeatures', () => {
   })
 
   it('adds only known optional features that are currently available', () => {
-    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost'])
-    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'chapterbotVerify', 'chapterbotEpub'])
+    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong'])
+    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'chapterbotVerify', 'chapterbotEpub'])
   })
 
   it('every advertised feature has its routes registered', () => {
@@ -53,6 +53,7 @@ describe('serverFeatures', () => {
     const featureRoutes = {
       batchEpisodes: ['post /podcasts/batch/episodes/update', 'post /podcasts/batch/episodes/delete'],
       libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download'],
+      readAlong: ['get /items/:id/ebook/:fileid/readalong'],
       chapterbotVerify: ['post /items/:id/chapters/snap'],
       chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId']
     }

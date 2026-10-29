@@ -6,6 +6,7 @@ const os = require('os')
 const Path = require('path')
 const fs = require('fs')
 const EventEmitter = require('events')
+const express = require('express')
 
 const Database = require('../../../server/Database')
 const ApiRouter = require('../../../server/routers/ApiRouter')
@@ -21,6 +22,30 @@ const fsExtra = require('../../../server/libs/fsExtra')
 
 const TOKEN = 'epub-test-token-0123456789'
 const JOB_ID = '0123456789abcdef0123456789abcdef'
+const READ_ALONG = Object.freeze({
+  kind: 'abs-readalong',
+  version: 1,
+  identifier: 'urn:uuid:5b1c0000-0000-5000-8000-000000000000',
+  modified: '2026-10-28T12:34:56Z',
+  epubFile: 'book.epub',
+  timeline: 'book',
+  audioDuration: 4000,
+  model: 'small.en',
+  sections: [{ href: 'OEBPS/ch001.xhtml', title: 'Chapter 1' }],
+  sentences: [
+    {
+      id: 's1',
+      sec: 0,
+      start: 501.2,
+      end: 503.9,
+      w: [
+        [501.2, 501.5],
+        [501.5, 503.9]
+      ]
+    },
+    { id: 's2', sec: 0, start: 504.1, end: 507 }
+  ]
+})
 const EPUB_BYTES = Buffer.from('PK\u0003\u0004 fake epub body')
 
 function until(cond, timeoutMs = 3000) {
@@ -45,6 +70,8 @@ async function startSidecar() {
     createStatus: 202,
     deleteAnswer: { status: 'cancelled' },
     deleteDelayMs: 0,
+    /** GET readalong: an object is sent as JSON, a string as is, null answers 404 (a sidecar without the feature) */
+    readAlong: READ_ALONG,
     /** when set, GET result waits until sidecar.releaseResult() */
     holdResult: false,
     releaseResult: null
@@ -73,6 +100,14 @@ async function startSidecar() {
         sidecar.releaseResult = send
         return
       }
+      if (req.method === 'GET' && req.url === `/v1/jobs/${JOB_ID}/readalong`) {
+        if (sidecar.readAlong === null) return json(404, { detail: { code: 'not_found', message: 'no read-along data' } })
+        if (typeof sidecar.readAlong === 'string') {
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          return res.end(sidecar.readAlong)
+        }
+        return json(200, sidecar.readAlong)
+      }
       if (req.method === 'DELETE' && req.url === `/v1/jobs/${JOB_ID}`) {
         const answer = { id: JOB_ID, ...sidecar.deleteAnswer }
         if (!sidecar.deleteDelayMs) return json(200, answer)
@@ -98,6 +133,7 @@ describe('Chapterbot EPUB endpoints', () => {
   let clientEmitter
   let scanItem
   let watcher
+  let metadataDir
 
   const chapters = [
     { id: 0, title: 'Opening Credits', start: 0, end: 500 },
@@ -128,13 +164,15 @@ describe('Chapterbot EPUB endpoints', () => {
       res.statusCode = code
       return res
     })
+    res.send = sinon.spy(() => res)
+    res.sendFile = sinon.spy((path, opts, cb) => cb())
     return res
   }
 
-  async function call(handler, { item, reqUser = user(), params = {} } = {}) {
+  async function call(handler, { item, reqUser = user(), params = {}, libraryFile } = {}) {
     const libraryItem = item || (await Database.libraryItemModel.getExpandedById(bookItemId))
     const res = fakeResponse()
-    await LibraryItemController[handler].bind(apiRouter)({ user: reqUser, libraryItem, params: { id: libraryItem.id, ...params }, body: {} }, res)
+    await LibraryItemController[handler].bind(apiRouter)({ user: reqUser, libraryItem, libraryFile, params: { id: libraryItem.id, ...params }, body: {} }, res)
     return res
   }
 
@@ -162,6 +200,8 @@ describe('Chapterbot EPUB endpoints', () => {
 
     itemDir = fs.mkdtempSync(Path.join(os.tmpdir(), 'abs-epub-item-'))
     stagingDir = fs.mkdtempSync(Path.join(os.tmpdir(), 'abs-epub-staging-'))
+    metadataDir = fs.mkdtempSync(Path.join(os.tmpdir(), 'abs-epub-metadata-'))
+    global.MetadataPath = metadataDir
 
     const library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book' })
     const folder = await Database.libraryFolderModel.create({ path: '/books', libraryId: library.id })
@@ -177,7 +217,9 @@ describe('Chapterbot EPUB endpoints', () => {
       const li = await Database.libraryItemModel.getExpandedById(libraryItemId)
       const name = fs.readdirSync(itemDir).find((f) => f.endsWith('.epub') && !li.libraryFiles.some((lf) => lf.metadata.filename === f))
       if (!name) return
-      const lf = { ino: `epub-${name}`, isSupplementary: false, fileType: 'ebook', metadata: { filename: name, ext: '.epub', path: filePathToPOSIX(Path.join(itemDir, name)), relPath: name } }
+      // the real scanner keys library files by their inode (utils/fileUtils getIno)
+      const ino = String(fs.statSync(Path.join(itemDir, name), { bigint: true }).ino)
+      const lf = { ino, isSupplementary: false, fileType: 'ebook', metadata: { filename: name, ext: '.epub', path: filePathToPOSIX(Path.join(itemDir, name)), relPath: name } }
       li.libraryFiles = [...li.libraryFiles, lf]
       li.changed('libraryFiles', true)
       await li.save()
@@ -210,6 +252,7 @@ describe('Chapterbot EPUB endpoints', () => {
     await sidecar.close()
     fs.rmSync(itemDir, { recursive: true, force: true })
     fs.rmSync(stagingDir, { recursive: true, force: true })
+    fs.rmSync(metadataDir, { recursive: true, force: true })
     await Database.sequelize.sync({ force: true })
   })
 
@@ -218,6 +261,7 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(routes).to.include('post /items/:id/epub bound startEpubJob')
     expect(routes).to.include('get /items/:id/epub/:jobId bound getEpubJob')
     expect(routes).to.include('delete /items/:id/epub/:jobId bound cancelEpubJob')
+    expect(routes).to.include('get /items/:id/ebook/:fileid/readalong bound getEbookReadAlong')
   })
 
   describe('authorization', () => {
@@ -467,5 +511,134 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(res.statusCode).to.equal(502)
     expect(JSON.stringify(res.json.firstCall.args[0])).to.not.include(TOKEN)
     expect(ChapterbotEpubManager.jobs.size).to.equal(0)
+  })
+
+  describe('read-along', () => {
+    const EPUB_NAME = 'Black Ice (from audio).epub'
+
+    async function runJob() {
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+    }
+
+    async function placedEpub() {
+      const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const ino = li.libraryFiles.find((f) => f.metadata.filename === EPUB_NAME).ino
+      return { li, lf: li.getLibraryFileWithIno(ino) }
+    }
+
+    const storedPath = (ino) => Path.join(metadataDir, 'items', bookItemId, 'readalong', `${ino}.json`)
+
+    it('stores the read-along data next to the item metadata, keyed by the EPUB ino, before the sidecar job is deleted', async () => {
+      await runJob()
+      const { li, lf } = await placedEpub()
+      expect(JSON.parse(fs.readFileSync(storedPath(lf.ino), 'utf8'))).to.deep.equal({ epubPath: EPUB_NAME, ...READ_ALONG })
+      // nothing extra in the library folder (the watcher and scanner never see the data)
+      expect(fs.readdirSync(itemDir)).to.deep.equal([EPUB_NAME])
+
+      await until(() => sidecar.requests.some((r) => r.method === 'DELETE'))
+      const calls = sidecar.requests.map((r) => `${r.method} ${r.url}`)
+      expect(calls.indexOf(`GET /v1/jobs/${JOB_ID}/readalong`)).to.be.greaterThan(calls.indexOf(`GET /v1/jobs/${JOB_ID}/result`))
+      expect(calls.indexOf(`GET /v1/jobs/${JOB_ID}/readalong`)).to.be.lessThan(calls.indexOf(`DELETE /v1/jobs/${JOB_ID}`))
+      expect(sidecar.requests.every((r) => r.auth === `Bearer ${TOKEN}`)).to.equal(true)
+
+      const res = await call('getEbookReadAlong', { item: li, libraryFile: lf, params: { fileid: lf.ino } })
+      expect(res.sendFile.calledOnce).to.equal(true)
+      const [path, opts] = res.sendFile.firstCall.args
+      expect(path).to.equal(storedPath(lf.ino))
+      expect(opts.headers).to.deep.equal({ 'Content-Type': 'application/json', 'Cache-Control': 'private, no-cache' })
+      // the job record and its events are unchanged
+      expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+    })
+
+    it('saves the EPUB without read-along data when the sidecar has none (older sidecar)', async () => {
+      sidecar.readAlong = null
+      await runJob()
+      expect(fs.existsSync(Path.join(itemDir, EPUB_NAME))).to.equal(true)
+      expect(fs.existsSync(Path.join(metadataDir, 'items', bookItemId, 'readalong'))).to.equal(false)
+      expect(Logger.warn.calledWithMatch(/no read-along data/)).to.equal(true)
+      expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+
+      const { li, lf } = await placedEpub()
+      const res = await call('getEbookReadAlong', { item: li, libraryFile: lf, params: { fileid: lf.ino } })
+      expect(res.sendStatus.calledOnceWith(404)).to.equal(true)
+      expect(res.sendFile.called).to.equal(false)
+    })
+
+    for (const [label, body] of [
+      ['invalid read-along data', JSON.stringify({ ...READ_ALONG, version: 2 })],
+      ['a body that is not JSON', 'not json']
+    ]) {
+      it(`finishes the job but stores nothing for ${label}`, async () => {
+        sidecar.readAlong = body
+        await runJob()
+        expect(ChapterbotEpubManager.jobs.get(bookItemId).error).to.equal(null)
+        expect(fs.existsSync(Path.join(itemDir, EPUB_NAME))).to.equal(true)
+        expect(fs.existsSync(Path.join(metadataDir, 'items', bookItemId, 'readalong'))).to.equal(false)
+        expect(Logger.warn.calledWithMatch(/Saving the read-along data of EPUB job/)).to.equal(true)
+        expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+      })
+    }
+
+    it('finds the data again after the EPUB ino changed (copy or restore)', async () => {
+      await runJob()
+      const { li, lf } = await placedEpub()
+      li.libraryFiles = li.libraryFiles.map((f) => (f.ino === lf.ino ? { ...f, ino: '987654321' } : f))
+      li.changed('libraryFiles', true)
+      await li.save()
+      const moved = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const res = await call('getEbookReadAlong', { item: moved, libraryFile: moved.getLibraryFileWithIno('987654321'), params: { fileid: '987654321' } })
+      expect(res.sendFile.firstCall.args[0]).to.equal(storedPath('987654321'))
+      expect(fs.existsSync(storedPath(lf.ino))).to.equal(false)
+    })
+
+    it('answers 400 for a library file that is not an EPUB', async () => {
+      const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const cases = [
+        { ino: 'ino0', fileType: 'audio', isEBookFile: false, metadata: { ext: '.mp3' } },
+        { ino: 'pdf', fileType: 'ebook', isEBookFile: true, metadata: { ext: '.pdf' } }
+      ]
+      for (const libraryFile of cases) {
+        const res = await call('getEbookReadAlong', { item: li, libraryFile, params: { fileid: libraryFile.ino } })
+        expect(res.statusCode, libraryFile.metadata.ext).to.equal(400)
+        expect(res.sendFile.called).to.equal(false)
+      }
+    })
+
+    it('is served over HTTP to any user with access to the item, next to the ebook download', async () => {
+      await runJob()
+      const { lf } = await placedEpub()
+      let reqUser = user({ canUpdate: false })
+      const app = express()
+      app.use((req, res, next) => {
+        req.user = reqUser
+        next()
+      })
+      app.use('/api', apiRouter.router)
+      const server = await new Promise((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s))
+      })
+      const base = `http://127.0.0.1:${server.address().port}/api/items/${bookItemId}/ebook`
+      try {
+        let res = await fetch(`${base}/${lf.ino}/readalong`)
+        expect(res.status).to.equal(200)
+        expect(res.headers.get('content-type')).to.match(/^application\/json/)
+        expect(res.headers.get('cache-control')).to.equal('private, no-cache')
+        expect(await res.json()).to.deep.equal({ epubPath: EPUB_NAME, ...READ_ALONG })
+
+        // the ebook route still serves the EPUB itself
+        res = await fetch(`${base}/${lf.ino}`)
+        expect(res.status).to.equal(200)
+        expect(Buffer.from(await res.arrayBuffer()).equals(EPUB_BYTES)).to.equal(true)
+
+        expect((await fetch(`${base}/no-such-file/readalong`)).status).to.equal(404)
+
+        reqUser = user({ checkCanAccessLibraryItem: () => false })
+        expect((await fetch(`${base}/${lf.ino}/readalong`)).status).to.equal(403)
+      } finally {
+        await new Promise((resolve) => server.close(resolve))
+      }
+    })
   })
 })

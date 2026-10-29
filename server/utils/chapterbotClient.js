@@ -545,6 +545,21 @@ async function downloadJobResult(jobId, sink, { maxBytes = 500 * 1024 * 1024, ti
 }
 
 /**
+ * GET /v1/jobs/{id}/readalong: the read-along JSON built with a finished EPUB job's result
+ *
+ * @param {string} jobId
+ * @param {{maxBytes?: number, timeoutMs?: number}} [opts]
+ * @returns {Promise<Object|null>} null when the job has no read-along data (404: a sidecar older than the feature)
+ */
+async function downloadJobReadAlong(jobId, { maxBytes = 32 * 1024 * 1024, timeoutMs = 2 * 60000 } = {}) {
+  const { status, json } = await request('GET', `/v1/jobs/${checkJobId(jobId)}/readalong`, { maxBytes, timeoutMs, anyStatus: true })
+  if (status === 404) return null
+  if (status < 200 || status >= 300) throw new ChapterbotError('http_error', `Chapterbot GET /v1/jobs/{id}/readalong returned ${status}`, { status })
+  if (!json || typeof json !== 'object' || Array.isArray(json)) throw new ChapterbotError('bad_response', 'Chapterbot returned invalid read-along data')
+  return json
+}
+
+/**
  * DELETE /v1/jobs/{id}: cancels a queued/running job, deletes a finished one
  *
  * @param {string} jobId
@@ -585,6 +600,7 @@ module.exports = {
   createEpubJob,
   getJob,
   downloadJobResult,
+  downloadJobReadAlong,
   deleteJob,
   getInfo,
   HEALTH_TIMEOUT_MS,

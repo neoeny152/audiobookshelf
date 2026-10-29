@@ -12,6 +12,7 @@ const chapterSnap = require('../utils/chapterSnap')
 const chapterSnapRunner = require('../utils/chapterSnapRunner')
 const chapterbotClient = require('../utils/chapterbotClient')
 const chapterbotSpeech = require('../utils/chapterbotSpeech')
+const readAlong = require('../utils/readAlong')
 const { reqSupportsWebp, clampPositiveInt } = require('../utils/index')
 const { ScanResult, AudioMimeType } = require('../utils/constants')
 const { getAudioMimeTypeFromExtname, encodeUriPath } = require('../utils/fileUtils')
@@ -1347,6 +1348,30 @@ class LibraryItemController {
       Logger.info(`[LibraryItemController] Downloaded ebook file "${ebookFilePath}"`)
     } catch (error) {
       Logger.error(`[LibraryItemController] Failed to download ebook file "${ebookFilePath}"`, error)
+      LibraryItemController.handleDownloadError(error, res)
+    }
+  }
+
+  /**
+   * GET api/items/:id/ebook/:fileid/readalong
+   * Read-along data (sentence timings) of an EPUB made from the item's audio, see utils/readAlong.js.
+   * Same access as the ebook download. 404 when the EPUB has none (the client then hides read-along).
+   *
+   * @param {LibraryItemControllerRequestWithFile} req
+   * @param {Response} res
+   */
+  async getEbookReadAlong(req, res) {
+    const libraryFile = req.libraryFile
+    if (!libraryFile?.isEBookFile || (libraryFile.metadata?.ext || '').toLowerCase() !== '.epub') {
+      Logger.error(`[LibraryItemController] Invalid EPUB file id "${req.params.fileid}" for read-along`)
+      return res.status(400).send('Invalid ebook file id')
+    }
+    const path = await readAlong.find(req.libraryItem, libraryFile)
+    if (!path) return res.sendStatus(404)
+    try {
+      await new Promise((resolve, reject) => res.sendFile(path, { dotfiles: 'allow', headers: { 'Content-Type': 'application/json', 'Cache-Control': 'private, no-cache' } }, (error) => (error ? reject(error) : resolve())))
+    } catch (error) {
+      Logger.error(`[LibraryItemController] Failed to send read-along data "${path}"`, error)
       LibraryItemController.handleDownloadError(error, res)
     }
   }
