@@ -334,6 +334,8 @@ class PlaybackSessionManager {
     }
     const newPlaybackSession = new PlaybackSession()
     newPlaybackSession.setData(libraryItem, user.id, mediaPlayer, deviceInfo, userStartTime, episodeId)
+    // Progress updated after this point by another session or device is newer than this session (#5627)
+    newPlaybackSession.lastProgressUpdatedAt = Math.max(Date.now(), userProgress?.updatedAt?.valueOf() || 0)
 
     let audioTracks = []
     if (shouldDirectPlay) {
@@ -388,17 +390,26 @@ class PlaybackSessionManager {
     session.addListeningTime(syncData.timeListened)
     Logger.debug(`[PlaybackSessionManager] syncSession "${session.id}" (Device: ${session.deviceDescription}) | Total Time Listened: ${session.timeListening}`)
 
+    const mediaItemId = session.episodeId || libraryItem.media.id
+    if (await this.isStaleProgressSync(user, session, mediaItemId, syncData.currentTime)) {
+      // Keep the listening time of this session but do not rewind newer progress (#5627)
+      this.saveSession(session)
+      return true
+    }
+
     const updateResponse = await user.createUpdateMediaProgressFromPayload({
       libraryItemId: libraryItem.id,
       episodeId: session.episodeId,
-      // duration no longer required (v2.15.1) but used if available
-      duration: syncData.duration || session.duration || 0,
+      // duration no longer required (v2.15.1). The server's duration wins over the client's so a client
+      // cannot mark the item finished by sending a short duration (#5471)
+      duration: session.duration || syncData.duration || 0,
       currentTime: syncData.currentTime,
       progress: session.progress,
       markAsFinishedTimeRemaining: library.librarySettings.markAsFinishedTimeRemaining,
       markAsFinishedPercentComplete: library.librarySettings.markAsFinishedPercentComplete
     })
     if (updateResponse.mediaProgress) {
+      session.lastProgressUpdatedAt = updateResponse.mediaProgress.updatedAt?.valueOf() || Date.now()
       SocketAuthority.clientEmitter(user.id, 'user_item_progress_updated', {
         id: updateResponse.mediaProgress.id,
         sessionId: session.id,
@@ -408,6 +419,40 @@ class PlaybackSessionManager {
     }
     this.saveSession(session)
 
+    return true
+  }
+
+  /**
+   * A sync from an open session is stale when the media progress was updated somewhere else
+   * (another session, device or the progress API) after this session last saw or wrote it, and
+   * writing it would move progress backwards or un-finish the item. Example: a phone resumes an
+   * old session after another device moved ahead (#5627).
+   * Moving forward is still allowed and makes this session current again.
+   *
+   * @param {import('../models/User')} user
+   * @param {PlaybackSession} session
+   * @param {string} mediaItemId
+   * @param {number} currentTime
+   * @returns {Promise<boolean>}
+   */
+  async isStaleProgressSync(user, session, mediaItemId, currentTime) {
+    if (!session.lastProgressUpdatedAt) return false
+
+    const mediaProgress = await Database.mediaProgressModel.findOne({
+      where: { userId: user.id, mediaItemId },
+      attributes: ['id', 'updatedAt', 'currentTime', 'isFinished']
+    })
+    if (!mediaProgress?.updatedAt) return false
+
+    const progressUpdatedAt = mediaProgress.updatedAt.valueOf()
+    if (progressUpdatedAt <= session.lastProgressUpdatedAt) return false
+
+    const incomingTime = Number(currentTime)
+    if (!mediaProgress.isFinished && !isNaN(incomingTime) && incomingTime >= (mediaProgress.currentTime || 0)) return false
+
+    Logger.info(
+      `[PlaybackSessionManager] syncSession "${session.id}" (Device: ${session.deviceDescription}) not updating progress for "${session.displayTitle}" because it was updated more recently by another session (${progressUpdatedAt} > ${session.lastProgressUpdatedAt}) (incoming currentTime: ${currentTime}) (current currentTime: ${mediaProgress.currentTime}${mediaProgress.isFinished ? ', finished' : ''})`
+    )
     return true
   }
 

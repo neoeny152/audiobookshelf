@@ -37,6 +37,9 @@ class PlaybackSession {
 
     // Not saved in DB
     this.lastSave = 0
+    // updatedAt (ms) of the media progress as last seen or written by this session.
+    // A newer media progress came from somewhere else (#5627)
+    this.lastProgressUpdatedAt = 0
     this.audioTracks = []
     this.stream = null
     // Used for share sessions
