@@ -410,9 +410,11 @@ describe('chapterSnapRunner', () => {
   })
 
   describe('long single-file book (no drift)', () => {
-    // Recorded from a full linear `ffmpeg -i book.m4b -af silencedetect=noise=-38dB:d=0.7` of a real 9.4 h single-file
-    // m4b (AAC 44.1 kHz, start_time 0). Windowed input-seek runs (-ss before -i, as the snap does) at 4 min, 3 h 57 min
-    // and 9 h 22 min reported the same pauses to the microsecond once the seek point was added back.
+    // Pause list recorded from a full linear `ffmpeg -i book.m4b -af silencedetect=noise=-38dB:d=0.7` of a real 9.4 h
+    // single-file m4b (AAC 44.1 kHz, start_time 0). Windowed input-seek runs on that file at 4 min, 3 h 57 min and 9 h 22 min
+    // agreed with it to the microsecond once the seek point was added back. That was a one-off manual check: this test
+    // uses a fake ffmpeg, so it only locks the runner's own mapping (seek point added back, leadSec applied). It cannot
+    // catch a seek or timestamp error inside real ffmpeg.
     const LONG_T = 33804.051156
     const longTimeline = chapterSnap.buildTimeline([{ duration: LONG_T, metadata: { path: '/books/long/book.m4b' } }])
     const realPauses = [
@@ -453,8 +455,11 @@ describe('chapterSnapRunner', () => {
       [33766.545465, 33770.081905],
       [33797.546009, 33802.766871]
     ]
-    // Fake ffmpeg with input seeking: timestamps restart at 0 at the seek point, a pause cut by the window is clipped
-    const seekDetect = async ({ startSec, durationSec }) => {
+    // Fake ffmpeg with input seeking: timestamps restart at 0 at the seek point, a pause cut by the window is clipped.
+    // detectSilences passes -ss as toFixed(3), so the fake seeks to that rounded point while the runner adds back the
+    // unrounded localStart (an error of at most 0.5 ms, inside the 1 ms tolerance below).
+    const seekDetect = async ({ startSec: requestedSec, durationSec }) => {
+      const startSec = Number(Math.max(0, requestedSec).toFixed(3))
       const lines = []
       for (const [s, e] of realPauses) {
         const ls = Math.max(0, s - startSec)
@@ -467,8 +472,8 @@ describe('chapterSnapRunner', () => {
     }
 
     it('places every start the same distance before its pause end at the start, middle and end of the book', async () => {
-      // QA input: published chapter marks + 3 s
-      const starts = [0, 280.62, 14267.15, 33773.16]
+      // QA input: published chapter marks + 3 s (the middle one has a sub-millisecond part so -ss rounding is exercised)
+      const starts = [0, 280.62, 14267.1504, 33773.16]
       const result = await run({
         timeline: longTimeline,
         T: LONG_T,
@@ -485,7 +490,7 @@ describe('chapterSnapRunner', () => {
         const chapter = result.chapters[k + 1]
         expect(chapter.pause.start, `chapter ${k + 1} pause start`).to.be.closeTo(s, 0.001)
         expect(chapter.pause.end, `chapter ${k + 1} pause end`).to.be.closeTo(e, 0.001)
-        // No position-dependent offset: always leadSec before the pause end, wherever the window was seeked to
+        // The runner's seek-offset mapping adds no position-dependent offset: always leadSec before the pause end
         expect(chapter.proposedStart, `chapter ${k + 1} start`).to.be.closeTo(e - chapterSnap.DEFAULT_OPTIONS.leadSec, 0.001)
       })
     })
