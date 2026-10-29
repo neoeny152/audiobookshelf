@@ -487,6 +487,22 @@ class AudioFileScanner {
   }
 
   /**
+   * Multi-file books without embedded chapters: decide whether each file's title tag
+   * can be used as its chapter title (#5639)
+   *
+   * @param {string} bookTitle
+   * @param {AudioFile[]} audioFiles
+   * @returns {boolean}
+   */
+  shouldUseMetaTagTitlesAsChapterTitles(bookTitle, audioFiles) {
+    const tagTitles = audioFiles.map((af) => af.metaTags?.tagTitle)
+    if (!tagTitles.length || tagTitles.some((tagTitle) => !tagTitle)) return false
+    if (new Set(tagTitles).size !== tagTitles.length) return false
+    if (tagTitles.every((tagTitle) => tagTitle === bookTitle)) return false
+    return true
+  }
+
+  /**
    * @param {string} bookTitle
    * @param {AudioFile[]} audioFiles
    * @param {import('./LibraryScan')} libraryScan
@@ -545,10 +561,11 @@ class AudioFileScanner {
     } else if (audioFiles.length > 1) {
       // In some cases the ID3 title tag for each file is the chapter title, the criteria to determine if this will be used
       // 1. Every audio file has an ID3 title tag set
-      // 2. None of the title tags are the same as the book title
-      // 3. Every ID3 title tag is unique
-      const metaTagTitlesFound = [...new Set(audioFiles.map((af) => af.metaTags?.tagTitle).filter((tagTitle) => !!tagTitle && tagTitle !== bookTitle))]
-      const useMetaTagAsTitle = metaTagTitlesFound.length === audioFiles.length
+      // 2. Every ID3 title tag is unique
+      // 3. Not every title tag is the same as the book title
+      // A single track titled like the book (e.g. an intro or the first chapter) must not
+      // force the whole book back to file names (#5639)
+      const useMetaTagAsTitle = this.shouldUseMetaTagTitlesAsChapterTitles(bookTitle, audioFiles)
 
       // Build chapters from audio files
       let currChapterId = 0
