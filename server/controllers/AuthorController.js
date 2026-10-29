@@ -114,16 +114,20 @@ class AuthorController {
     }
 
     // Check if author name matches another author in the same library and merge the authors
+    // Case-insensitive: renaming "max" to "MAX" while "Max" exists merges them (#4033 #5278)
     let existingAuthor = null
-    if (authorNameUpdate) {
+    if (authorNameUpdate && typeof payload.name === 'string') {
       existingAuthor = await Database.authorModel.findOne({
-        where: {
-          id: {
-            [sequelize.Op.not]: req.author.id
-          },
-          name: payload.name,
-          libraryId: req.author.libraryId
-        }
+        where: [
+          sequelize.where(sequelize.fn('lower', sequelize.col('name')), payload.name.toLowerCase()),
+          {
+            id: {
+              [sequelize.Op.not]: req.author.id
+            },
+            libraryId: req.author.libraryId
+          }
+        ],
+        order: [['createdAt', 'ASC']]
       })
     }
     if (existingAuthor) {
@@ -189,6 +193,7 @@ class AuthorController {
     if (hasUpdated) {
       let numBooksForAuthor = 0
       if (authorNameUpdate) {
+        Database.renameAuthorInFilterData(req.author.libraryId, req.author.id, req.author.name)
         const allItemsWithAuthor = await Database.authorModel.getAllLibraryItemsForAuthor(req.author.id)
 
         numBooksForAuthor = allItemsWithAuthor.length

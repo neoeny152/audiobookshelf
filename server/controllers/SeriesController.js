@@ -2,6 +2,7 @@ const { Request, Response, NextFunction } = require('express')
 const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
+const sequelize = require('sequelize')
 
 const RssFeedManager = require('../managers/RssFeedManager')
 
@@ -80,7 +81,20 @@ class SeriesController {
     }
     req.series.set(payload)
     if (req.series.changed()) {
-      await req.series.save()
+      const nameChanged = req.series.changed('name')
+      try {
+        await req.series.save()
+      } catch (error) {
+        // Name taken by another series in this library (unique per library): was an unhandled crash
+        if (error instanceof sequelize.UniqueConstraintError) {
+          Logger.warn(`[SeriesController] Cannot rename series "${req.series.previous('name')}" to "${payload.name}": name already used in this library`)
+          return res.status(400).send('A series with this name already exists in the library')
+        }
+        throw error
+      }
+      if (nameChanged) {
+        Database.renameSeriesInFilterData(req.series.libraryId, req.series.id, req.series.name)
+      }
       SocketAuthority.emitter('series_updated', req.series.toOldJSON())
     }
     res.json(req.series.toOldJSON())

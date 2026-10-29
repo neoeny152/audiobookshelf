@@ -1,4 +1,4 @@
-const { DataTypes, Model } = require('sequelize')
+const { DataTypes, Model, Op, where, fn, col } = require('sequelize')
 const Logger = require('../Logger')
 const { getTitlePrefixAtEnd, getTitleIgnorePrefix } = require('../utils')
 const { dedupeNames, dedupeSeries } = require('../utils/nameMatching')
@@ -6,6 +6,21 @@ const parseNameString = require('../utils/parsers/parseNameString')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 const libraryItemsBookFilters = require('../utils/queries/libraryItemsBookFilters')
 const SocketAuthority = require('../SocketAuthority')
+
+/**
+ * True when another author/series in the same library already has this name (any case)
+ *
+ * @param {typeof Model} model author or series model
+ * @param {{ id: string, libraryId: string }} record
+ * @param {string} name
+ * @returns {Promise<boolean>}
+ */
+async function hasOtherWithSameName(model, record, name) {
+  const count = await model.count({
+    where: [where(fn('lower', col('name')), name.toLowerCase()), { libraryId: record.libraryId, id: { [Op.not]: record.id } }]
+  })
+  return count > 0
+}
 
 /**
  * @typedef EBookFileObject
@@ -455,7 +470,7 @@ class Book extends Model {
    *
    * @param {string[]} authors
    * @param {string} libraryId
-   * @returns {Promise<{authorsRemoved: import('./Author')[], authorsAdded: import('./Author')[]}>}
+   * @returns {Promise<{authorsRemoved: import('./Author')[], authorsAdded: import('./Author')[], authorsRenamed: import('./Author')[]}>}
    */
   async updateAuthorsFromRequest(authors, libraryId) {
     if (!Array.isArray(authors)) return null
@@ -485,6 +500,25 @@ class Book extends Model {
       Logger.debug(`[Book] "${this.title}" Removed author "${author.name}"`)
       this.authors = this.authors.filter((au) => au.id !== author.id)
     }
+    // Case-only change ("max" -> "Max"): the lookups are case-insensitive, so this used to be a no-op (#4934).
+    // Rename the author when this book is its only book; otherwise keep it and rename on the author page.
+    const authorsRenamed = []
+    for (const authorName of authors) {
+      const author = this.authors.find((au) => au.name !== authorName && au.name.toLowerCase() === authorName.toLowerCase())
+      if (!author) continue
+      const numBooks = await bookAuthorModel.getCountForAuthor(author.id)
+      if (numBooks !== 1 || (await hasOtherWithSameName(authorModel, author, authorName))) {
+        Logger.debug(`[Book] "${this.title}" Not renaming author "${author.name}" to "${authorName}": author has ${numBooks} books or the name is used by another author`)
+        continue
+      }
+      author.name = authorName
+      author.lastFirst = authorModel.getLastFirst(authorName)
+      await author.save()
+      SocketAuthority.emitter('author_updated', author.toOldJSONExpanded(numBooks))
+      Logger.debug(`[Book] "${this.title}" Renamed author to "${authorName}"`)
+      authorsRenamed.push(author)
+    }
+
     const authorsAdded = []
     for (const authorName of newAuthorNames) {
       const { author, created } = await authorModel.findOrCreateByNameAndLibrary(authorName, libraryId)
@@ -503,7 +537,8 @@ class Book extends Model {
 
     return {
       authorsRemoved,
-      authorsAdded
+      authorsAdded,
+      authorsRenamed
     }
   }
 
@@ -513,7 +548,7 @@ class Book extends Model {
    *
    * @param {{ name: string, sequence: string }[]} seriesObjects
    * @param {string} libraryId
-   * @returns {Promise<{seriesRemoved: import('./Series')[], seriesAdded: import('./Series')[], hasUpdates: boolean}>}
+   * @returns {Promise<{seriesRemoved: import('./Series')[], seriesAdded: import('./Series')[], seriesRenamed: import('./Series')[], hasUpdates: boolean}>}
    */
   async updateSeriesFromRequest(seriesObjects, libraryId) {
     if (!Array.isArray(seriesObjects) || seriesObjects.some((se) => !se.name || typeof se.name !== 'string')) return null
@@ -533,11 +568,28 @@ class Book extends Model {
     const seriesNamesCleaned = seriesObjects.map((se) => se.name.toLowerCase())
     const seriesRemoved = this.series.filter((se) => !seriesNamesCleaned.includes(se.name.toLowerCase()))
     const seriesAdded = []
+    const seriesRenamed = []
     let hasUpdates = false
     for (const seriesObj of seriesObjects) {
       const seriesObjSequence = typeof seriesObj.sequence === 'string' ? seriesObj.sequence : null
 
       const existingSeries = this.series.find((se) => se.name.toLowerCase() === seriesObj.name.toLowerCase())
+      if (existingSeries && existingSeries.name !== seriesObj.name) {
+        // Case-only change ("harry potter" -> "Harry Potter") used to be a no-op (#4934).
+        // Rename the series when this book is its only book; otherwise keep it and rename on the series page.
+        const numBooks = await bookSeriesModel.count({ where: { seriesId: existingSeries.id } })
+        if (numBooks === 1 && !(await hasOtherWithSameName(seriesModel, existingSeries, seriesObj.name))) {
+          existingSeries.name = seriesObj.name
+          existingSeries.nameIgnorePrefix = getTitleIgnorePrefix(seriesObj.name)
+          await existingSeries.save()
+          SocketAuthority.emitter('series_updated', existingSeries.toOldJSON())
+          seriesRenamed.push(existingSeries)
+          hasUpdates = true
+          Logger.debug(`[Book] "${this.title}" Renamed series to "${seriesObj.name}"`)
+        } else {
+          Logger.debug(`[Book] "${this.title}" Not renaming series "${existingSeries.name}" to "${seriesObj.name}": series has ${numBooks} books`)
+        }
+      }
       if (existingSeries) {
         if (existingSeries.bookSeries.sequence !== seriesObjSequence) {
           existingSeries.bookSeries.sequence = seriesObjSequence
@@ -571,6 +623,7 @@ class Book extends Model {
     return {
       seriesRemoved,
       seriesAdded,
+      seriesRenamed,
       hasUpdates
     }
   }

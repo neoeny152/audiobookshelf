@@ -577,6 +577,28 @@ class Database {
     })
   }
 
+  /**
+   * Keep the cached name in sync after a rename, so scans match the new name
+   * @param {string} libraryId
+   * @param {string} seriesId
+   * @param {string} seriesName
+   */
+  renameSeriesInFilterData(libraryId, seriesId, seriesName) {
+    const series = this.libraryFilterData[libraryId]?.series.find((se) => se.id === seriesId)
+    if (series) series.name = seriesName
+  }
+
+  /**
+   * Keep the cached name in sync after a rename, so scans match the new name
+   * @param {string} libraryId
+   * @param {string} authorId
+   * @param {string} authorName
+   */
+  renameAuthorInFilterData(libraryId, authorId, authorName) {
+    const author = this.libraryFilterData[libraryId]?.authors.find((au) => au.id === authorId)
+    if (author) author.name = authorName
+  }
+
   removeAuthorFromFilterData(libraryId, authorId) {
     if (!this.libraryFilterData[libraryId]) return
     this.libraryFilterData[libraryId].authors = this.libraryFilterData[libraryId].authors.filter((au) => au.id !== authorId)
@@ -648,7 +670,9 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.authorModel.getByNameAndLibrary(authorName, libraryId))?.id || null
     }
-    return this.libraryFilterData[libraryId].authors.find((au) => au.name === authorName)?.id || null
+    // Case-insensitive like the DB lookup (lower(name)), or a warm cache creates "max" next to "Max" (#4255 #4033)
+    const key = authorName.toLowerCase()
+    return this.libraryFilterData[libraryId].authors.find((au) => au.name?.toLowerCase() === key)?.id || null
   }
 
   /**
@@ -662,7 +686,9 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.seriesModel.getByNameAndLibrary(seriesName, libraryId))?.id || null
     }
-    return this.libraryFilterData[libraryId].series.find((se) => se.name === seriesName)?.id || null
+    // Case-insensitive like the DB lookup (lower(name)), or a warm cache creates "harry potter" next to "Harry Potter" (#4255)
+    const key = seriesName.toLowerCase()
+    return this.libraryFilterData[libraryId].series.find((se) => se.name?.toLowerCase() === key)?.id || null
   }
 
   /**

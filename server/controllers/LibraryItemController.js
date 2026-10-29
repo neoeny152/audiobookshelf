@@ -248,6 +248,9 @@ class LibraryItemController {
           Database.addSeriesToFilterData(req.libraryItem.libraryId, se.name, se.id)
         })
       }
+      seriesUpdateData?.seriesRenamed?.forEach((se) => {
+        Database.renameSeriesInFilterData(req.libraryItem.libraryId, se.id, se.name)
+      })
       if (seriesUpdateData?.hasUpdates) {
         hasUpdates = true
       }
@@ -266,6 +269,12 @@ class LibraryItemController {
         // Add authors to filter data
         authorUpdateData.authorsAdded.forEach((au) => {
           Database.addAuthorToFilterData(req.libraryItem.libraryId, au.name, au.id)
+        })
+        hasUpdates = true
+      }
+      if (authorUpdateData?.authorsRenamed?.length) {
+        authorUpdateData.authorsRenamed.forEach((au) => {
+          Database.renameAuthorInFilterData(req.libraryItem.libraryId, au.id, au.name)
         })
         hasUpdates = true
       }
@@ -694,6 +703,9 @@ class LibraryItemController {
             Database.addSeriesToFilterData(libraryItem.libraryId, se.name, se.id)
           })
         }
+        seriesUpdateData?.seriesRenamed?.forEach((se) => {
+          Database.renameSeriesInFilterData(libraryItem.libraryId, se.id, se.name)
+        })
         if (seriesUpdateData?.hasUpdates) {
           hasUpdates = true
         }
@@ -709,6 +721,12 @@ class LibraryItemController {
         if (authorUpdateData?.authorsAdded.length) {
           authorUpdateData.authorsAdded.forEach((au) => {
             Database.addAuthorToFilterData(libraryItem.libraryId, au.name, au.id)
+          })
+          hasUpdates = true
+        }
+        if (authorUpdateData?.authorsRenamed?.length) {
+          authorUpdateData.authorsRenamed.forEach((au) => {
+            Database.renameAuthorInFilterData(libraryItem.libraryId, au.id, au.name)
           })
           hasUpdates = true
         }
