@@ -235,6 +235,16 @@ class CoverManager {
     }
     await fs.ensureDir(coverDirPath)
 
+    // The file name depends on the probed codec, so check both names first: never write a
+    // second cover file next to an existing one, and skip the extra probe when we bail
+    for (const existingFilename of ['cover.jpg', 'cover.png']) {
+      const existingCoverPath = Path.join(coverDirPath, existingFilename)
+      if (await fs.pathExists(existingCoverPath)) {
+        Logger.warn(`[CoverManager] Extract embedded cover art but cover already exists for "${existingCoverPath}" - bail`)
+        return null
+      }
+    }
+
     // Find the stream that holds the cover. The first video stream can be a chapter image
     // or timed thumbnail (#3697, #4867). The stream index is not stored on the audio file,
     // so probe again here (only runs when the item has no cover yet).
@@ -251,12 +261,6 @@ class CoverManager {
 
     const coverFilename = coverCodec === 'png' ? 'cover.png' : 'cover.jpg'
     const coverFilePath = Path.join(coverDirPath, coverFilename)
-
-    const coverAlreadyExists = await fs.pathExists(coverFilePath)
-    if (coverAlreadyExists) {
-      Logger.warn(`[CoverManager] Extract embedded cover art but cover already exists for "${coverFilePath}" - bail`)
-      return null
-    }
 
     const success = await ffmpegHelpers.extractCoverArt(audioFileWithCover.metadata.path, coverFilePath, coverStreamIndex)
     if (success) {

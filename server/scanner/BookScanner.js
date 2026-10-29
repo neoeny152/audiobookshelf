@@ -140,8 +140,10 @@ class BookScanner {
       media.changed('audioFiles', true)
     }
 
-    // Duration only counts included audio files (#5311). Checked on every rescan so a
-    // duration saved with excluded tracks counted is corrected by the next scan.
+    // Duration only counts included audio files (#5311). Checked whenever an existing item is
+    // rescanned (forced library rescan, single item rescan, or the item's files changed), so a
+    // duration saved with excluded tracks counted is corrected then. A normal library scan
+    // skips unchanged items and leaves their stored duration as it is.
     const includedDuration = Database.bookModel.getDurationFromAudioFiles(media.audioFiles)
     if (Math.abs((Number(media.duration) || 0) - includedDuration) > 0.001) {
       libraryScan.addLog(LogLevel.DEBUG, `Updating duration for "${media.title}" from ${media.duration} to ${includedDuration}`)

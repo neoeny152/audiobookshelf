@@ -134,5 +134,20 @@ describe('embedded cover art stream selection (#3697, #4867)', () => {
       expect(coverPath).to.equal(null)
       expect(Logger.error.calledOnce).to.be.true
     })
+
+    it('does not probe or write a second cover file when a cover file already exists', async () => {
+      // An old cover.jpg next to a png attached picture must not get a stray cover.png beside it
+      await fs.writeFile(Path.join(tmpDir, 'cover.jpg'), 'old')
+      const rawProbe = sinon.stub(prober, 'rawProbe').resolves({ streams: libationStreams() })
+      const extract = sinon.stub(ffmpegHelpers, 'extractCoverArt').callsFake(async (input, output) => output)
+
+      const audioFiles = [{ embeddedCoverArt: 'png', metadata: { path: '/books/Book/book.m4b' } }]
+      const coverPath = await CoverManager.saveEmbeddedCoverArt(audioFiles, 'li_1', tmpDir)
+
+      expect(coverPath).to.equal(null)
+      expect(rawProbe.called).to.be.false
+      expect(extract.called).to.be.false
+      expect(await fs.pathExists(Path.join(tmpDir, 'cover.png'))).to.be.false
+    })
   })
 })
