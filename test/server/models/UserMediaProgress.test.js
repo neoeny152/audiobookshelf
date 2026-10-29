@@ -71,4 +71,23 @@ describe('User.createUpdateMediaProgressFromPayload - duplicate rows (#3845)', (
     expect(all[0].currentTime).to.equal(300)
     expect(user.mediaProgresses.filter((mp) => mp.mediaItemId === item.mediaId)).to.have.length(1)
   })
+
+  it('runs skipIf under the same lock as the write, after writes queued before it (#5627)', async () => {
+    const [userA, userB] = [await loadUser('u1'), await loadUser('u1')]
+    const storedTime = async () => (await rows())[0]?.currentTime ?? 0
+
+    // Session B moves progress to 600; session A's stale check must see that write, not run before it
+    const [resultB, resultA] = await Promise.all([userB.createUpdateMediaProgressFromPayload({ libraryItemId: item.id, duration: 1000, currentTime: 600 }), userA.createUpdateMediaProgressFromPayload({ libraryItemId: item.id, duration: 1000, currentTime: 100 }, { skipIf: async () => (await storedTime()) > 100 })])
+
+    expect(resultB.mediaProgress).to.exist
+    expect(resultA).to.deep.equal({ skipped: true })
+    expect(await storedTime()).to.equal(600)
+  })
+
+  it('writes when skipIf returns false', async () => {
+    const user = await loadUser('u1')
+    const result = await user.createUpdateMediaProgressFromPayload({ libraryItemId: item.id, duration: 1000, currentTime: 100 }, { skipIf: () => false })
+    expect(result.mediaProgress).to.exist
+    expect((await rows())[0].currentTime).to.equal(100)
+  })
 })

@@ -40,6 +40,10 @@ class PlaybackSession {
     // updatedAt (ms) of the media progress as last seen or written by this session.
     // A newer media progress came from somewhere else (#5627)
     this.lastProgressUpdatedAt = 0
+    // currentTime/isFinished of that media progress (null: no progress existed). Only a change of these
+    // counts as "moved elsewhere", not e.g. hiding from continue listening (#5627)
+    this.lastProgressCurrentTime = null
+    this.lastProgressIsFinished = false
     this.audioTracks = []
     this.stream = null
     // Used for share sessions

@@ -747,13 +747,18 @@ class User extends Model {
    * TODO: Uses old model and should account for the different between ebook/audiobook progress
    *
    * @param {ProgressUpdatePayload} progressPayload
-   * @returns {Promise<{ mediaProgress: import('./MediaProgress'), error: [string], statusCode: [number] }>}
+   * @param {{ skipIf?: () => Promise<boolean>|boolean }} [options] skipIf runs under the same lock as the write,
+   *   so a check like the stale-session guard (#5627) cannot race another write
+   * @returns {Promise<{ mediaProgress: import('./MediaProgress'), error: [string], statusCode: [number], skipped: [boolean] }>}
    */
-  async createUpdateMediaProgressFromPayload(progressPayload) {
+  async createUpdateMediaProgressFromPayload(progressPayload, options = {}) {
     // Serialize writes for the same user + item so concurrent requests (e.g. Plappa calling
     // /api/session/local and /api/me/progress/batch/update at once) cannot both create a row (#3845)
     const lockKey = `${this.id}:${progressPayload?.episodeId || progressPayload?.libraryItemId}`
-    return withMediaProgressLock(lockKey, () => this._createUpdateMediaProgressFromPayload(progressPayload))
+    return withMediaProgressLock(lockKey, async () => {
+      if (options.skipIf && (await options.skipIf())) return { skipped: true }
+      return this._createUpdateMediaProgressFromPayload(progressPayload)
+    })
   }
 
   /**
