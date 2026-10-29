@@ -6,6 +6,9 @@ const express = require('express')
 const SessionController = require('../../../server/controllers/SessionController')
 const MeController = require('../../../server/controllers/MeController')
 const { createJsonBodyParser, isLocalSessionSyncPath } = require('../../../server/utils/jsonBodyParser')
+// Loaded at file load (no hook timeout): it pulls in every controller. Handlers are bound in the
+// constructor, so the stubs below still apply.
+const ApiRouter = require('../../../server/routers/ApiRouter')
 
 function request(server, method, path, body, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -52,7 +55,6 @@ describe('JSON body limits (#4755)', () => {
     sinon.stub(MeController, 'batchUpdateMediaProgress').callsFake(respond)
 
     // Real ApiRouter route definitions, mounted the way Server.js mounts them
-    const ApiRouter = require('../../../server/routers/ApiRouter')
     const apiRouter = new ApiRouter({ auth: { authRateLimiter: (req, res, next) => next() }, apiCacheManager: { middleware: (req, res, next) => next() } })
     const fakeAuth = (req, res, next) => {
       if (req.headers.authorization !== 'Bearer ok') return res.sendStatus(401)
