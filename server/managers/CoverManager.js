@@ -6,7 +6,8 @@ const imageType = require('../libs/imageType')
 
 const globals = require('../utils/globals')
 const { downloadImageFile, filePathToPOSIX, checkPathIsFile } = require('../utils/fileUtils')
-const { extractCoverArt } = require('../utils/ffmpegHelpers')
+const ffmpegHelpers = require('../utils/ffmpegHelpers')
+const prober = require('../utils/prober')
 const parseEbookMetadata = require('../utils/parsers/parseEbookMetadata')
 
 const CacheManager = require('../managers/CacheManager')
@@ -234,7 +235,21 @@ class CoverManager {
     }
     await fs.ensureDir(coverDirPath)
 
-    const coverFilename = audioFileWithCover.embeddedCoverArt === 'png' ? 'cover.png' : 'cover.jpg'
+    // Find the stream that holds the cover. The first video stream can be a chapter image
+    // or timed thumbnail (#3697, #4867). The stream index is not stored on the audio file,
+    // so probe again here (only runs when the item has no cover yet).
+    let coverCodec = audioFileWithCover.embeddedCoverArt
+    let coverStreamIndex = null
+    const rawProbeData = await prober.rawProbe(audioFileWithCover.metadata.path)
+    const coverStream = rawProbeData?.error ? null : prober.getCoverArtStream(rawProbeData?.streams)
+    if (coverStream) {
+      coverStreamIndex = coverStream.index
+      coverCodec = coverStream.codec_name || coverCodec
+    } else {
+      Logger.warn(`[CoverManager] Could not probe cover art stream of "${audioFileWithCover.metadata.path}" - using first video stream`)
+    }
+
+    const coverFilename = coverCodec === 'png' ? 'cover.png' : 'cover.jpg'
     const coverFilePath = Path.join(coverDirPath, coverFilename)
 
     const coverAlreadyExists = await fs.pathExists(coverFilePath)
@@ -243,11 +258,12 @@ class CoverManager {
       return null
     }
 
-    const success = await extractCoverArt(audioFileWithCover.metadata.path, coverFilePath)
+    const success = await ffmpegHelpers.extractCoverArt(audioFileWithCover.metadata.path, coverFilePath, coverStreamIndex)
     if (success) {
       await CacheManager.purgeCoverCache(libraryItemId)
       return coverFilePath
     }
+    Logger.error(`[CoverManager] Failed to extract embedded cover art from "${audioFileWithCover.metadata.path}" (stream ${coverStreamIndex ?? 'v:0'})`)
     return null
   }
 

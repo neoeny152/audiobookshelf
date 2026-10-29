@@ -48,14 +48,24 @@ async function writeConcatFile(tracks, outputPath, startTime = 0) {
 }
 module.exports.writeConcatFile = writeConcatFile
 
-async function extractCoverArt(filepath, outputpath) {
+/**
+ * Extract the embedded cover art of an audio file
+ *
+ * @param {string} filepath
+ * @param {string} outputpath
+ * @param {number} [streamIndex] absolute index of the cover art stream (see prober.getCoverArtStream); first video stream if not set
+ * @param {import('../libs/fluentFfmpeg/index').FfmpegCommand} [ffmpeg] - The FFmpeg instance to use (for tests)
+ * @returns {Promise<string|false>} outputpath on success
+ */
+async function extractCoverArt(filepath, outputpath, streamIndex = null, ffmpeg = null) {
   var dirname = Path.dirname(outputpath)
   await fs.ensureDir(dirname)
 
+  const mapArg = Number.isInteger(streamIndex) && streamIndex >= 0 ? `-map 0:${streamIndex}` : '-map 0:v:0'
+
   return new Promise((resolve) => {
-    /** @type {import('../libs/fluentFfmpeg/index').FfmpegCommand} */
-    var ffmpeg = Ffmpeg(filepath)
-    ffmpeg.addOption(['-map 0:v:0', '-frames:v 1'])
+    if (!ffmpeg) ffmpeg = Ffmpeg(filepath)
+    ffmpeg.addOption([mapArg, '-frames:v 1'])
     ffmpeg.output(outputpath)
 
     ffmpeg.on('start', (cmd) => {

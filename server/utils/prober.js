@@ -235,6 +235,33 @@ function getDefaultAudioStream(audioStreams) {
   return defaultStream
 }
 
+/**
+ * Pick the video stream that holds the cover art (#3697, #4867).
+ * Some m4b files (Libation, OpenAudible) have a chapter-image or timed-thumbnail
+ * video stream before the attached picture, so the first video stream is not
+ * always the cover. Prefer streams with disposition attached_pic, then the
+ * largest picture; on a tie keep the earlier stream.
+ *
+ * @param {Object[]} streams raw ffprobe streams
+ * @returns {Object|null} raw ffprobe stream
+ */
+function getCoverArtStream(streams) {
+  const videoStreams = (streams || []).filter((s) => s?.codec_type === 'video')
+  if (!videoStreams.length) return null
+
+  const isAttachedPic = (s) => s.disposition?.attached_pic === 1 || s.disposition?.attached_pic === '1'
+  const attachedPics = videoStreams.filter(isAttachedPic)
+  const candidates = attachedPics.length ? attachedPics : videoStreams
+
+  const area = (s) => {
+    const width = Number(s.width)
+    const height = Number(s.height)
+    return !isNaN(width) && !isNaN(height) ? width * height : 0
+  }
+  return candidates.reduce((best, s) => (area(s) > area(best) ? s : best), candidates[0])
+}
+module.exports.getCoverArtStream = getCoverArtStream
+
 function parseProbeData(data, verbose = false) {
   try {
     const { format, streams, chapters } = data
@@ -255,7 +282,8 @@ function parseProbeData(data, verbose = false) {
     }
 
     const cleaned_streams = streams.map((s) => parseMediaStreamInfo(s, streams, cleanedData.bit_rate))
-    cleanedData.video_stream = cleaned_streams.find((s) => s.type === 'video')
+    const coverArtStream = getCoverArtStream(streams)
+    cleanedData.video_stream = (coverArtStream && cleaned_streams.find((s) => s.type === 'video' && s.index === coverArtStream.index)) || cleaned_streams.find((s) => s.type === 'video')
     const audioStreams = cleaned_streams.filter((s) => s.type === 'audio')
     cleanedData.audio_stream = getDefaultAudioStream(audioStreams)
 
@@ -321,6 +349,7 @@ function probe(filepath, verbose = false) {
     })
 }
 module.exports.probe = probe
+module.exports.parseProbeData = parseProbeData
 
 /**
  * Ffprobe for audio file path
