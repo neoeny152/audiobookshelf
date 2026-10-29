@@ -268,4 +268,52 @@ describe('LibraryScanner duplicate library items', () => {
     expect(items.map((li) => !!li.isMissing)).to.deep.equal([false, false])
     expect(await Database.mediaProgressModel.count({ where: { mediaItemId: newer.mediaId } })).to.equal(1)
   })
+
+  it('watcher updates for other libraries are not held up while one library is being scanned', async () => {
+    const otherLibraryRecord = await Database.libraryModel.create({ name: 'Other', mediaType: 'book', settings: Database.libraryModel.getDefaultLibrarySettingsForMediaType('book') })
+    const otherFolder = await Database.libraryFolderModel.create({ path: Path.posix.join(tmpDir, 'other'), libraryId: otherLibraryRecord.id })
+
+    const scannedLibraryIds = []
+    sinon.stub(LibraryScanner, 'scanFolderUpdates').callsFake(async (lib) => {
+      scannedLibraryIds.push(lib.id)
+      return {}
+    })
+
+    const makeUpdate = (libraryId, folderId, folderPath, name) => ({
+      path: Path.posix.join(folderPath, `Author/${name}/track.mp3`),
+      relPath: `/Author/${name}/track.mp3`,
+      folderId,
+      libraryId,
+      type: 'added'
+    })
+    const makeTask = () => ({ startedAt: Date.now(), data: {}, setFinished: sinon.stub() })
+
+    // Simulate a long full scan holding this library
+    let finishFullScan
+    const fullScan = LibraryScanner.runWithLibraryLock(library.id, () => new Promise((resolve) => (finishFullScan = resolve)))
+
+    const busyTask = makeTask()
+    const busyUpdate = LibraryScanner.scanFilesChanged([makeUpdate(library.id, folder.id, tmpDir, 'A')], busyTask)
+    const otherTask = makeTask()
+    const otherUpdate = LibraryScanner.scanFilesChanged([makeUpdate(otherLibraryRecord.id, otherFolder.id, otherFolder.path, 'B')], otherTask)
+    const laterBusyTask = makeTask()
+    const laterBusyUpdate = LibraryScanner.scanFilesChanged([makeUpdate(library.id, folder.id, tmpDir, 'C')], laterBusyTask)
+
+    await otherUpdate
+    await delay(20)
+    expect(scannedLibraryIds).to.deep.equal([otherLibraryRecord.id])
+    expect(otherTask.setFinished.calledOnce).to.be.true
+    expect(busyTask.setFinished.called).to.be.false
+    expect(laterBusyTask.setFinished.called).to.be.false
+
+    finishFullScan()
+    await Promise.all([fullScan, busyUpdate, laterBusyUpdate])
+    // Queued watcher calls are started without being awaited by the caller
+    for (let i = 0; i < 50 && !laterBusyTask.setFinished.called; i++) await delay(10)
+    expect(scannedLibraryIds).to.deep.equal([otherLibraryRecord.id, library.id, library.id])
+    expect(busyTask.setFinished.calledOnce).to.be.true
+    expect(laterBusyTask.setFinished.calledOnce).to.be.true
+    expect(LibraryScanner.scanningFilesChanged).to.be.false
+    expect(LibraryScanner.libraryLocks.size).to.equal(0)
+  })
 })

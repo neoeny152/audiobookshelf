@@ -522,6 +522,8 @@ class LibraryScanner {
 
     // files grouped by folder
     const folderGroups = this.getFileUpdatesGrouped(fileUpdates)
+    /** @type {Promise<void>[]} folder scans waiting for their library to be free */
+    const waitingFolderScans = []
 
     for (const folderId in folderGroups) {
       const libraryId = folderGroups[folderId].libraryId
@@ -547,29 +549,31 @@ class LibraryScanner {
         Logger.info(`[LibraryScanner] No important changes to scan for in folder "${folderId}"`)
         continue
       }
-      // Wait for a running full scan of this library to finish so both do not add the same item
-      const folderScanResults = await this.runWithLibraryLock(library.id, () => this.scanFolderUpdates(library, folder, fileUpdateGroup))
-      Logger.debug(`[LibraryScanner] Folder scan results`, folderScanResults)
-
-      // Tally results to share with client
-      let resetFilterData = false
-      Object.values(folderScanResults).forEach((scanResult) => {
-        if (scanResult === ScanResult.ADDED) {
-          resetFilterData = true
-          results.added++
-        } else if (scanResult === ScanResult.REMOVED) {
-          resetFilterData = true
-          results.removed++
-        } else if (scanResult === ScanResult.UPDATED) {
-          resetFilterData = true
-          results.updated++
-        }
-      })
-
-      // If something was updated then reset numIssues filter data for library
-      if (resetFilterData) {
-        await Database.resetLibraryIssuesFilterData(libraryId)
+      // Runs after any full scan or earlier watcher update of this library so both do not add the same item.
+      // The lock queue is joined right away, so updates for one library keep their order.
+      const libraryBusy = this.libraryLocks.has(library.id)
+      const folderScan = this.runWithLibraryLock(library.id, () => this.scanFolderUpdates(library, folder, fileUpdateGroup)).then((folderScanResults) => this.tallyFolderScanResults(libraryId, folderScanResults, results))
+      if (libraryBusy) {
+        // Do not hold up watcher updates of other libraries while this library is busy (a full scan can take hours)
+        Logger.info(`[LibraryScanner] Library "${library.name}" is being scanned - folder "${folderId}" updates will run after it`)
+        waitingFolderScans.push(
+          folderScan.catch((error) => {
+            Logger.error(`[LibraryScanner] Failed to scan file updates in folder "${folderId}"`, error)
+          })
+        )
+      } else {
+        await folderScan
       }
+    }
+
+    // Let the next queued watcher updates start, then finish this task once the busy libraries are done
+    this.scanningFilesChanged = false
+    if (this.pendingFileUpdatesToScan.length) {
+      Logger.debug(`[LibraryScanner] File updates finished scanning with more updates in queue (${this.pendingFileUpdatesToScan.length})`)
+      this.scanFilesChanged(...this.pendingFileUpdatesToScan.shift())
+    }
+    if (waitingFolderScans.length) {
+      await Promise.all(waitingFolderScans)
     }
 
     // Complete task and send results to client
@@ -587,12 +591,35 @@ class LibraryScanner {
     }
     pendingTask.setFinished(null, true)
     TaskManager.taskFinished(pendingTask)
+  }
 
-    this.scanningFilesChanged = false
+  /**
+   * Add folder scan results to the watcher task totals
+   *
+   * @param {string} libraryId
+   * @param {Record<string,number>} folderScanResults
+   * @param {{added:number, updated:number, removed:number}} results
+   */
+  async tallyFolderScanResults(libraryId, folderScanResults, results) {
+    Logger.debug(`[LibraryScanner] Folder scan results`, folderScanResults)
 
-    if (this.pendingFileUpdatesToScan.length) {
-      Logger.debug(`[LibraryScanner] File updates finished scanning with more updates in queue (${this.pendingFileUpdatesToScan.length})`)
-      this.scanFilesChanged(...this.pendingFileUpdatesToScan.shift())
+    let resetFilterData = false
+    Object.values(folderScanResults).forEach((scanResult) => {
+      if (scanResult === ScanResult.ADDED) {
+        resetFilterData = true
+        results.added++
+      } else if (scanResult === ScanResult.REMOVED) {
+        resetFilterData = true
+        results.removed++
+      } else if (scanResult === ScanResult.UPDATED) {
+        resetFilterData = true
+        results.updated++
+      }
+    })
+
+    // If something was updated then reset numIssues filter data for library
+    if (resetFilterData) {
+      await Database.resetLibraryIssuesFilterData(libraryId)
     }
   }
 
