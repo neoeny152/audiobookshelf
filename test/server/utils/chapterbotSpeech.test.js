@@ -95,6 +95,36 @@ describe('chapterbotSpeech', () => {
       expect(tokenMatch('ab', 'eb')).to.equal(false)
       expect(tokenMatch('', 'eva')).to.equal(false)
     })
+
+    it('does not take a common word that sounds alike for the title word', () => {
+      const pairs = [
+        ['right', 'night'],
+        ['rather', 'father'],
+        ['later', 'water'],
+        ['there', 'where'],
+        ['horse', 'house'],
+        ['bother', 'mother'],
+        ['better', 'letter'],
+        ['live', 'love'],
+        ['last', 'lost'],
+        ['tame', 'time'],
+        ['ruin', 'rain'],
+        ['fare', 'fire'],
+        ['hype', 'hope'],
+        ['ran', 'run'],
+        ['tim', 'tom'],
+        ['port', 'part'],
+        ['ever', 'over'],
+        ['and', 'end']
+      ]
+      for (const [heard, want] of pairs) expect(tokenMatch(heard, want), `${heard} / ${want}`).to.equal(false)
+    })
+
+    it('allows the plural or possessive of a spelling variant', () => {
+      expect(tokenMatch('clares', 'claire')).to.equal(true)
+      expect(tokenMatch('quaser', 'quasar')).to.equal(true)
+      expect(tokenMatch('kwasar', 'quasar')).to.equal(false)
+    })
   })
 
   describe('assessSpeech (verify-report.ps1 rules)', () => {
@@ -247,6 +277,41 @@ describe('chapterbotSpeech', () => {
         expected: { heading: false, late: false, early: true }
       },
       {
+        name: 'a single-word title is not heard in a common word that sounds alike (Night / Right)',
+        title: 'Night',
+        before: 'and then she slept.',
+        after: 'Right, so where were we?',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a single-word title is not heard in a common word that sounds alike (Father / rather)',
+        title: 'Father',
+        before: 'and then she slept.',
+        after: 'I would rather not say.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a title with a stop word is not heard in a common word that sounds alike (The Letter / Better)',
+        title: 'The Letter',
+        before: 'and then she slept.',
+        after: 'Better late than never.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a near miss on the heading word does not make the start LATE (Part / port)',
+        title: 'Part Two',
+        before: 'and so it went. Port two.',
+        after: 'The rain fell',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a near miss on the heading word does not count as the start of the heading (Part / port)',
+        title: 'Part One',
+        before: 'and so it went. Part one.',
+        after: 'Port one is open.',
+        expected: { heading: false, late: true, early: false }
+      },
+      {
         name: 'front matter not read out is not expected (Dedication)',
         title: 'Dedication',
         before: 'This is Macmillan Audio.',
@@ -308,9 +373,9 @@ describe('chapterbotSpeech', () => {
     })
 
     it('reports speech.expected = false only for front and back matter titles', () => {
-      const unspoken = ['Dedication', 'Epigraph', 'Foreword', 'Preface', 'Acknowledgments', 'Acknowledgements', 'Opening Credits', 'End Credits', 'Introduction', 'Copyright', 'About the Author', 'Also by Julie Clark', 'Praise for The Last Flight', '2. Dedication', 'CREDITS']
+      const unspoken = ['Dedication', 'Epigraph', 'Foreword', 'Preface', 'Acknowledgments', 'Acknowledgements', 'Opening Credits', 'End Credits', 'Introduction', 'Copyright', 'About the Author', 'Also by Julie Clark', 'Praise for The Last Flight', '2. Dedication', 'CREDITS', '01 - Dedication', '1 Opening Credits', 'Track 02 - Credits', 'Forward', 'Contents']
       for (const title of unspoken) expect(isHeadingExpected(title), title).to.equal(false)
-      const spoken = ['Claire', 'Eva', 'Prologue', 'Epilogue', 'Chapter 1', 'Part 2', 'The End of the Affair', 'Credit Where Due', 'Ending', '', null]
+      const spoken = ['Claire', 'Eva', 'Prologue', 'Epilogue', 'Chapter 1', 'Part 2', 'The End of the Affair', 'Credit Where Due', 'Ending', 'Forward March', 'Contents Under Pressure', '1984', '', null]
       for (const title of spoken) expect(isHeadingExpected(title), String(title)).to.equal(true)
       expect(assessSpeech('Opening Credits', '', 'This is Macmillan Audio.').expected).to.equal(false)
       expect(assessSpeech('Claire', '', 'Clare.').expected).to.equal(true)

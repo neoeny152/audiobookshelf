@@ -14,9 +14,11 @@
  *   chapter). Clients may offer it as the chapter title.
  * LATE and EARLY only apply to titles that start with chapter/prologue/epilogue/interlude/part, as in the script.
  *
- * Title words are matched against the transcript word by word and tolerant to spelling (Whisper writes "Clare" for
- * "Claire", "Ava" for "Eva"): see tokenMatch. Numbers always match exactly. LATE, EARLY and heading use the same
- * matcher.
+ * Two deliberate differences from the script, which compares substrings of the joined tokens:
+ * - title words are matched against the transcript as whole words ("Chapter 1" is not heard in "chapter 12")
+ * - title words are tolerant to spelling (Whisper writes "Clare" for "Claire", "Ava" for "Eva"): see tokenMatch.
+ *   Numbers always match exactly, and so does the heading word of a heading title ("chapter", "part"): only the
+ *   words after it (the name in "Interlude Quasar") are tolerant. LATE, EARLY and heading use the same matcher.
  * - expected (not in the script, additive): false for front and back matter titles (Dedication, Epigraph, Opening
  *   Credits, About the Author, ...) that narrators often do not read out, so a heading not heard there is no reason
  *   to look at the start. Clients that predate it treat every chapter as expected.
@@ -251,12 +253,39 @@ function editDistance(a, b) {
 const FUZZY_MIN_SIMILARITY = 0.8
 const FUZZY_MIN_LENGTH = 5
 const VOWEL_RE = /^[aeiouy]$/
+/**
+ * Common short words that start with a vowel; never taken as a vowel-swapped spelling of a short title word
+ * ("Over" is not heard in "Ever since", "End Game" not in "And game on").
+ */
+const FUZZY_NEVER_SHORT = new Set(
+  'add aid ail all and any are arm art ask ate awe aye eat ebb egg eke elf elk elm end era ere eve ewe eye ill imp inn ion ire its oak oar oat odd off oil old one opt orb ore our out owe own urn use able ache acre aged ages ahead aims airs also ally ants away awry each earl ears ease east easy eats echo edge else ends even ever evil exit eyes idea idle inch info into iron isle item oath obey odds oily okay once ones only onto open oral ours outs oven over owed owes owns undo unit upon urge used user uses'.split(' ')
+)
 
 /**
- * Whether a transcript word is the title word, allowing for how Whisper spells names: exact for numbers (any digit)
- * and words of one or two letters; for three or four letters, one vowel swapped ("Eva" / "Ava"); from five letters,
- * a normalised edit distance similarity of at least FUZZY_MIN_SIMILARITY ("Claire" / "Clare", "Katherine" /
- * "Catherine").
+ * The consonants of a word, as a fingerprint that spelling variants of a name share and near-miss common words do
+ * not: vowels (and y) dropped, k read as c, doubled letters single ("Claire" / "Clare" -> "clr", "Katherine" /
+ * "Catherine" -> "cthrn"; "Night" -> "nght" but "Right" -> "rght").
+ *
+ * @param {string} w
+ * @returns {string}
+ */
+function consonantSkeleton(w) {
+  return w
+    .replace(/k/g, 'c')
+    .replace(/[aeiouy]/g, '')
+    .replace(/(.)\1+/g, '$1')
+}
+
+/**
+ * Whether a transcript word is the title word, allowing for how Whisper spells names but not for a different common
+ * word that sounds alike:
+ * - exact for numbers (any digit) and words of one or two letters
+ * - a plural or possessive of the title word ("Claire's" -> "claires", "chapters")
+ * - three or four letters: only the first letter may differ, and only as one vowel for another ("Eva" / "Ava"), and
+ *   not into a common word (FUZZY_NEVER_SHORT); "Run" / "ran", "Tom" / "Tim", "Part" / "port" stay apart
+ * - five letters or more: the same consonants (consonantSkeleton) and a normalised edit distance similarity of at
+ *   least FUZZY_MIN_SIMILARITY ("Claire" / "Clare", "Katherine" / "Catherine"); "Night" / "right", "Father" /
+ *   "rather", "Letter" / "better" stay apart
  *
  * @param {string} heard - token from the transcript
  * @param {string} want - token from the title
@@ -265,32 +294,32 @@ const VOWEL_RE = /^[aeiouy]$/
 function tokenMatch(heard, want) {
   if (heard === want) return true
   if (!heard || !want || /\d/.test(heard) || /\d/.test(want)) return false
+  if (want.length >= 3 && heard === `${want}s`) return true
   const longer = Math.max(heard.length, want.length)
   if (longer < 3) return false
   if (longer < FUZZY_MIN_LENGTH) {
-    if (heard.length !== want.length) return false
-    let diff = 0
-    for (let k = 0; k < want.length; k++) {
-      if (heard[k] === want[k]) continue
-      if (!VOWEL_RE.test(heard[k]) || !VOWEL_RE.test(want[k])) return false
-      diff++
-    }
-    return diff <= 1
+    if (heard.length !== want.length || FUZZY_NEVER_SHORT.has(heard)) return false
+    return heard.slice(1) === want.slice(1) && VOWEL_RE.test(heard[0]) && VOWEL_RE.test(want[0])
   }
-  return 1 - editDistance(heard, want) / longer >= FUZZY_MIN_SIMILARITY
+  // the plural or possessive of a spelling variant ("Clare's" for "Claire")
+  const h = heard.endsWith('s') && !want.endsWith('s') ? heard.slice(0, -1) : heard
+  if (consonantSkeleton(h) !== consonantSkeleton(want)) return false
+  return 1 - editDistance(h, want) / Math.max(h.length, want.length) >= FUZZY_MIN_SIMILARITY
 }
 
 /**
- * Index of the first place in `hay` where the `needle` tokens follow one another (tokenMatch each), or -1.
+ * Index of the first place in `hay` where the `needle` tokens follow one another (tokenMatch each), or -1. With
+ * exactFirst the first needle token has to match exactly (a heading word such as "chapter" or "part").
  *
  * @param {string[]} hay
  * @param {string[]} needle
+ * @param {boolean} [exactFirst]
  * @returns {number}
  */
-function findTokens(hay, needle) {
+function findTokens(hay, needle, exactFirst = false) {
   if (!needle.length) return -1
   for (let i = 0; i + needle.length <= hay.length; i++) {
-    if (needle.every((t, k) => tokenMatch(hay[i + k], t))) return i
+    if (needle.every((t, k) => (k === 0 && exactFirst ? hay[i] === t : tokenMatch(hay[i + k], t)))) return i
   }
   return -1
 }
@@ -304,7 +333,6 @@ const UNSPOKEN_TITLE_STARTS = Object.freeze(
     'dedication',
     'epigraph',
     'foreword',
-    'forward',
     'preface',
     'acknowledgments',
     'acknowledgements',
@@ -325,7 +353,6 @@ const UNSPOKEN_TITLE_STARTS = Object.freeze(
     'praise for',
     'title page',
     'table of contents',
-    'contents',
     'front matter',
     'back matter',
     'publishers note',
@@ -334,16 +361,23 @@ const UNSPOKEN_TITLE_STARTS = Object.freeze(
   ].map((t) => t.split(' '))
 )
 
+/** Front matter names that are also ordinary words ("Forward March", "Contents Under Pressure"): the whole title only */
+const UNSPOKEN_WHOLE_TITLES = new Set(['forward', 'contents'])
+
+/** A track or list index in front of a title: "3. ", "01 - ", "1 ", "Track 02 - " */
+const TITLE_INDEX_RE = /^\s*(?:track\s*)?\d+(?:\s*[.:)\-–—]+\s*|\s+)(?=\S)/i
+
 /**
  * Whether a chapter with this title is expected to have its heading read out: false for front and back matter
- * (see UNSPOKEN_TITLE_STARTS).
+ * (see UNSPOKEN_TITLE_STARTS and UNSPOKEN_WHOLE_TITLES), also behind a track index ("01 - Dedication").
  *
  * @param {string} title
  * @returns {boolean}
  */
 function isHeadingExpected(title) {
-  const tt = tokens(String(title || '').replace(/^\s*\d+\.\s*/, ''))
+  const tt = tokens(String(title || '').replace(TITLE_INDEX_RE, ''))
   if (!tt.length) return true
+  if (tt.length === 1 && UNSPOKEN_WHOLE_TITLES.has(tt[0])) return false
   return !UNSPOKEN_TITLE_STARTS.some((start) => start.length <= tt.length && start.every((w, k) => tt[k] === w))
 }
 
@@ -378,18 +412,20 @@ function assessSpeech(title, before, after) {
   const afterTok = tokens(aw.slice(0, 25).join(' '))
 
   // the transcript words before the heading (a short lead-in like "Heat 2 of 7." is part of the heading)
-  const at = findTokens(afterTok, tt)
+  // the heading word itself ("chapter", "part") is matched exactly; only the words after it are spelling tolerant
   const isHeadingTitle = tt.length > 0 && HEADING_WORD_RE.test(tt[0])
-  const startsWithHeading = tt.length > 0 && headTok.length > 0 && (headTok[0].startsWith(tt[0]) || tokenMatch(headTok[0], tt[0]))
+  const at = findTokens(afterTok, tt, isHeadingTitle)
+  const startsWithHeading = tt.length > 0 && headTok.length > 0 && headTok[0].startsWith(tt[0])
 
-  const late = isHeadingTitle && findTokens(tailTok, tt) >= 0 && !startsWithHeading
+  const late = isHeadingTitle && findTokens(tailTok, tt, true) >= 0 && !startsWithHeading
   const early = isHeadingTitle && !startsWithHeading && at >= 0 && at > 5
 
   // heading (not in the script): the title's words, with the same stop words dropped from the transcript as from
   // the title, so "The Ashes of Rome" (key "ashes rome") matches a spoken "The Ashes of Rome"
   const keyAt = findTokens(
     afterTok.filter((t) => !TITLE_STOP.has(t)),
-    tt
+    tt,
+    isHeadingTitle
   )
   const heading = keyAt >= 0 && keyAt <= 5 && !early
 
