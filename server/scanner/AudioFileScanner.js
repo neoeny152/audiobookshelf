@@ -497,9 +497,9 @@ class AudioFileScanner {
   shouldUseMetaTagTitlesAsChapterTitles(bookTitle, audioFiles) {
     const tagTitles = audioFiles.map((af) => af.metaTags?.tagTitle)
     if (!tagTitles.length || tagTitles.some((tagTitle) => !tagTitle)) return false
-    if (new Set(tagTitles).size !== tagTitles.length) return false
-    if (tagTitles.every((tagTitle) => tagTitle === bookTitle)) return false
-    return true
+    // Unique titles also rule out "every title equals the book title" (PR #5649) for the
+    // multi-file books this is used for, so a single track titled like the book is allowed
+    return new Set(tagTitles).size === tagTitles.length
   }
 
   /**
@@ -509,6 +509,11 @@ class AudioFileScanner {
    * @returns {import('../models/Book').ChapterObject[]}
    */
   getBookChaptersFromAudioFiles(bookTitle, audioFiles, libraryScan) {
+    // Excluded audio files are not played and not counted in the book duration (#5311),
+    // so chapters are built from the included files only and stay inside the duration
+    audioFiles = (audioFiles || []).filter((af) => af && !af.exclude)
+    if (!audioFiles.length) return []
+
     // If overdrive media markers are present then use those instead
     const overdriveChapters = parseOverdriveMediaMarkersAsChapters(audioFiles)
     if (overdriveChapters?.length) {
@@ -561,8 +566,7 @@ class AudioFileScanner {
     } else if (audioFiles.length > 1) {
       // In some cases the ID3 title tag for each file is the chapter title, the criteria to determine if this will be used
       // 1. Every audio file has an ID3 title tag set
-      // 2. Every ID3 title tag is unique
-      // 3. Not every title tag is the same as the book title
+      // 2. Every ID3 title tag is unique (so with 2+ files they cannot all equal the book title)
       // A single track titled like the book (e.g. an intro or the first chapter) must not
       // force the whole book back to file names (#5639)
       const useMetaTagAsTitle = this.shouldUseMetaTagTitlesAsChapterTitles(bookTitle, audioFiles)
