@@ -13,6 +13,7 @@ const TaskManager = require('../managers/TaskManager')
 const LibraryItemScanner = require('./LibraryItemScanner')
 const LibraryScan = require('./LibraryScan')
 const LibraryItemScanData = require('./LibraryItemScanData')
+const inoMatchGuard = require('./inoMatchGuard')
 const Task = require('../objects/Task')
 
 class LibraryScanner {
@@ -208,7 +209,7 @@ class LibraryScanner {
       let libraryItemData = libraryItemDataFound.find((lid) => lid.path === existingLibraryItem.path)
       if (!libraryItemData) {
         // Fallback to finding matching library item with matching inode value
-        libraryItemData = libraryItemDataFound.find((lid) => ItemToItemInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(existingLibraryItem, lid))
+        libraryItemData = await this.findGuardedInoMatchItemData(existingLibraryItem, existingLibraryItems, libraryItemDataFound, libraryScan)
         if (libraryItemData) {
           libraryScan.addLog(LogLevel.INFO, `Library item with path "${existingLibraryItem.path}" was not found, but library item inode "${existingLibraryItem.ino}" was found at path "${libraryItemData.path}"`)
         }
@@ -322,6 +323,32 @@ class LibraryScanner {
 
     libraryScan.addLog(LogLevel.INFO, `Scan completed. ${libraryScan.resultStats}`)
     return false
+  }
+
+  /**
+   * Full scan fallback when no scanned item data has the existing item's path: find item data whose inode
+   * matches the existing item, and accept it only when the inode match guard passes
+   * (old path gone, no other item at the new path, at least one overlapping file). #1447 #4943
+   *
+   * @param {import('../models/LibraryItem')} existingLibraryItem
+   * @param {import('../models/LibraryItem')[]} existingLibraryItems all items of the library (after duplicate cleanup)
+   * @param {LibraryItemScanData[]} libraryItemDataFound item data not yet matched
+   * @param {LibraryScan} libraryScan
+   * @returns {Promise<LibraryItemScanData|null>}
+   */
+  async findGuardedInoMatchItemData(existingLibraryItem, existingLibraryItems, libraryItemDataFound, libraryScan) {
+    const candidates = libraryItemDataFound.filter((lid) => ItemToItemInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(lid, existingLibraryItem) || ItemToFileInoMatch(existingLibraryItem, lid))
+    for (const lid of candidates) {
+      const result = await inoMatchGuard.checkInoMatch({
+        libraryItem: existingLibraryItem,
+        targetPath: lid.path,
+        targetFiles: (lid.libraryFiles || []).map(inoMatchGuard.libraryFileToCandidate),
+        otherItemAtTargetPath: existingLibraryItems.some((li) => li.id !== existingLibraryItem.id && li.path === lid.path)
+      })
+      if (result.ok) return lid
+      libraryScan.addLog(LogLevel.WARN, `Library item "${existingLibraryItem.path}" (inode ${existingLibraryItem.ino}) has an inode match at "${lid.path}" that was not used: ${result.reason}`)
+    }
+    return null
   }
 
   /**
@@ -730,7 +757,7 @@ class LibraryScanner {
       let updatedLibraryItemDetails = {}
       if (!existingLibraryItem) {
         const isSingleMedia = isSingleMediaFile(fileUpdateGroup, itemDir)
-        existingLibraryItem = (await findLibraryItemByItemToItemInoMatch(library.id, fullPath)) || (await findLibraryItemByItemToFileInoMatch(library.id, fullPath, isSingleMedia)) || (await findLibraryItemByFileToItemInoMatch(library.id, fullPath, isSingleMedia, fileUpdateGroup[itemDir]))
+        existingLibraryItem = await findLibraryItemByGuardedInoMatch(library.id, fullPath, isSingleMedia, fileUpdateGroup[itemDir])
         if (existingLibraryItem) {
           // Update library item paths for scan
           existingLibraryItem.path = fullPath
@@ -863,11 +890,11 @@ function getOpenPlaybackSessionCount(libraryItemId) {
 }
 
 function ItemToFileInoMatch(libraryItem1, libraryItem2) {
-  return libraryItem1.isFile && libraryItem2.libraryFiles.some((lf) => lf.ino === libraryItem1.ino)
+  return !!libraryItem1.ino && libraryItem1.isFile && (libraryItem2.libraryFiles || []).some((lf) => lf.ino === libraryItem1.ino)
 }
 
 function ItemToItemInoMatch(libraryItem1, libraryItem2) {
-  return libraryItem1.ino === libraryItem2.ino
+  return !!libraryItem1.ino && libraryItem1.ino === libraryItem2.ino
 }
 
 function hasAudioFiles(fileUpdateGroup, itemDir) {
@@ -878,24 +905,45 @@ function isSingleMediaFile(fileUpdateGroup, itemDir) {
   return itemDir === fileUpdateGroup[itemDir]
 }
 
-async function findLibraryItemByItemToItemInoMatch(libraryId, fullPath) {
+const INO_MATCH_ATTRIBUTES = ['id', 'path', 'ino', 'isFile', 'libraryFiles']
+
+/**
+ * Items whose own inode is the inode of the updated path (folder renamed or moved)
+ *
+ * @param {string} libraryId
+ * @param {string} fullPath
+ * @returns {Promise<import('../models/LibraryItem')[]>}
+ */
+async function findLibraryItemsByItemToItemInoMatch(libraryId, fullPath) {
   const ino = await fileUtils.getIno(fullPath)
-  if (!ino) return null
-  const existingLibraryItem = await Database.libraryItemModel.findOneExpanded({
-    libraryId: libraryId,
-    ino: ino
+  if (!ino) return []
+  const libraryItems = await Database.libraryItemModel.findAll({
+    attributes: INO_MATCH_ATTRIBUTES,
+    where: {
+      libraryId: libraryId,
+      ino: ino
+    }
   })
-  if (existingLibraryItem) Logger.debug(`[LibraryScanner] Found library item with matching inode "${ino}" at path "${existingLibraryItem.path}"`)
-  return existingLibraryItem
+  if (libraryItems.length) Logger.debug(`[LibraryScanner] Found ${libraryItems.length} library item(s) with matching inode "${ino}" for path "${fullPath}"`)
+  return libraryItems
 }
 
-async function findLibraryItemByItemToFileInoMatch(libraryId, fullPath, isSingleMedia) {
-  if (!isSingleMedia) return null
+/**
+ * Items with a library file whose inode is the inode of the updated single media file (file moved out of an item folder)
+ *
+ * @param {string} libraryId
+ * @param {string} fullPath
+ * @param {boolean} isSingleMedia
+ * @returns {Promise<import('../models/LibraryItem')[]>}
+ */
+async function findLibraryItemsByItemToFileInoMatch(libraryId, fullPath, isSingleMedia) {
+  if (!isSingleMedia) return []
   // check if it was moved from another folder by comparing the ino to the library files
   const ino = await fileUtils.getIno(fullPath)
-  if (!ino) return null
-  const existingLibraryItem = await Database.libraryItemModel.findOneExpanded(
-    [
+  if (!ino) return []
+  const libraryItems = await Database.libraryItemModel.findAll({
+    attributes: INO_MATCH_ATTRIBUTES,
+    where: [
       {
         libraryId: libraryId
       },
@@ -903,29 +951,84 @@ async function findLibraryItemByItemToFileInoMatch(libraryId, fullPath, isSingle
         [sequelize.Op.gt]: 0
       })
     ],
-    {
+    replacements: {
       inode: ino
     }
-  )
-  if (existingLibraryItem) Logger.debug(`[LibraryScanner] Found library item with a library file matching inode "${ino}" at path "${existingLibraryItem.path}"`)
-  return existingLibraryItem
+  })
+  if (libraryItems.length) Logger.debug(`[LibraryScanner] Found ${libraryItems.length} library item(s) with a library file matching inode "${ino}" for path "${fullPath}"`)
+  return libraryItems
 }
 
-async function findLibraryItemByFileToItemInoMatch(libraryId, fullPath, isSingleMedia, itemFiles) {
-  if (isSingleMedia) return null
+/**
+ * Single file items whose inode is the inode of one of the updated files (file moved from the root folder into a folder)
+ *
+ * @param {string} libraryId
+ * @param {string} fullPath
+ * @param {boolean} isSingleMedia
+ * @param {string[]} itemFiles
+ * @returns {Promise<import('../models/LibraryItem')[]>}
+ */
+async function findLibraryItemsByFileToItemInoMatch(libraryId, fullPath, isSingleMedia, itemFiles) {
+  if (isSingleMedia) return []
   // check if it was moved from the root folder by comparing the ino to the ino of the scanned files
   let itemFileInos = []
-  for (const itemFile of itemFiles) {
+  for (const itemFile of itemFiles || []) {
     const ino = await fileUtils.getIno(Path.posix.join(fullPath, itemFile))
     if (ino) itemFileInos.push(ino)
   }
-  if (!itemFileInos.length) return null
-  const existingLibraryItem = await Database.libraryItemModel.findOneExpanded({
-    libraryId: libraryId,
-    ino: {
-      [sequelize.Op.in]: itemFileInos
+  if (!itemFileInos.length) return []
+  const libraryItems = await Database.libraryItemModel.findAll({
+    attributes: INO_MATCH_ATTRIBUTES,
+    where: {
+      libraryId: libraryId,
+      ino: {
+        [sequelize.Op.in]: itemFileInos
+      }
     }
   })
-  if (existingLibraryItem) Logger.debug(`[LibraryScanner] Found library item with inode matching one of "${itemFileInos.join(',')}" at path "${existingLibraryItem.path}"`)
-  return existingLibraryItem
+  if (libraryItems.length) Logger.debug(`[LibraryScanner] Found ${libraryItems.length} library item(s) with inode matching one of "${itemFileInos.join(',')}" for path "${fullPath}"`)
+  return libraryItems
+}
+
+/**
+ * Watcher fallback when no item exists at the updated path: find an existing item that was moved here, by inode.
+ * An inode match alone is not trusted (Unraid shfs inode collisions, inode reuse after delete),
+ * so every candidate must pass the inode match guard. #1447 #4943 #4981 #4963
+ *
+ * @param {string} libraryId
+ * @param {string} fullPath
+ * @param {boolean} isSingleMedia
+ * @param {string[]|string} itemFiles relative paths from the watcher update
+ * @returns {Promise<import('../models/LibraryItem')|null>} expanded library item
+ */
+async function findLibraryItemByGuardedInoMatch(libraryId, fullPath, isSingleMedia, itemFiles) {
+  const candidates = [...(await findLibraryItemsByItemToItemInoMatch(libraryId, fullPath)), ...(await findLibraryItemsByItemToFileInoMatch(libraryId, fullPath, isSingleMedia)), ...(await findLibraryItemsByFileToItemInoMatch(libraryId, fullPath, isSingleMedia, itemFiles))]
+  const checkedIds = new Set()
+  for (const candidate of candidates) {
+    if (checkedIds.has(candidate.id)) continue
+    checkedIds.add(candidate.id)
+
+    const result = await inoMatchGuard.checkInoMatch({
+      libraryItem: candidate,
+      targetPath: fullPath,
+      targetFiles: () => inoMatchGuard.getTargetFilesOnDisk(fullPath, isSingleMedia, itemFiles, candidate),
+      otherItemAtTargetPath: async () =>
+        (await Database.libraryItemModel.count({
+          where: {
+            path: fullPath,
+            id: {
+              [sequelize.Op.ne]: candidate.id
+            }
+          }
+        })) > 0
+    })
+    if (!result.ok) {
+      Logger.warn(`[LibraryScanner] Library item "${candidate.path}" (inode ${candidate.ino}) has an inode match at "${fullPath}" that was not used: ${result.reason}`)
+      continue
+    }
+
+    Logger.info(`[LibraryScanner] Library item "${candidate.path}" was moved to "${fullPath}" (inode match)`)
+    return Database.libraryItemModel.findOneExpanded({ id: candidate.id })
+  }
+  return null
 }
