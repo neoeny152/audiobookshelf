@@ -96,6 +96,17 @@ describe('Case-insensitive series and author names (#4255 #4033 #5278 #4934)', (
       expect(warm).to.deep.equal(cold)
     })
 
+    it('with the nunicode extension (Unicode lower()), the warm cache folds Unicode too', async () => {
+      Database.supportsUnicodeFoldings = true
+      try {
+        warmFilterData([{ id: 'author-1', name: 'Émile' }], [{ id: 'series-1', name: 'Été' }])
+        expect(await Database.getAuthorIdByName(library.id, 'émile')).to.equal('author-1')
+        expect(await Database.getSeriesIdByName(library.id, 'ÉTÉ')).to.equal('series-1')
+      } finally {
+        Database.supportsUnicodeFoldings = false
+      }
+    })
+
     it('renaming an author to the exact name of another non-ASCII author still merges them', async () => {
       const { book } = await createBookItem('One')
       const emile = await Database.authorModel.create({ name: 'Émile', lastFirst: 'Émile', libraryId: library.id })

@@ -661,6 +661,19 @@ class Database {
   }
 
   /**
+   * Fold a name the way the DB's lower() does, for lookups in the cached filter data.
+   * Plain SQLite lower() only folds A-Z; with the nunicode extension loaded it folds Unicode.
+   * Matching it keeps the result the same whether or not the cache is loaded.
+   *
+   * @param {string} name
+   * @returns {string}
+   */
+  nameLookupKey(name) {
+    if (typeof name !== 'string') return ''
+    return this.supportsUnicodeFoldings ? name.toLowerCase() : asciiLowerCase(name)
+  }
+
+  /**
    * Get author id for library by name. Uses library filter data if available
    *
    * @param {string} libraryId
@@ -671,10 +684,9 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.authorModel.getByNameAndLibrary(authorName, libraryId))?.id || null
     }
-    // Same comparison as the DB lookup (SQLite lower(), A-Z only), or a warm cache creates "max" next to "Max" (#4255 #4033)
-    // and the result would depend on whether the cache is loaded for non-ASCII names
-    const key = asciiLowerCase(authorName)
-    return this.libraryFilterData[libraryId].authors.find((au) => asciiLowerCase(au.name) === key)?.id || null
+    // Same comparison as the DB lookup, or a warm cache creates "max" next to "Max" (#4255 #4033)
+    const key = this.nameLookupKey(authorName)
+    return this.libraryFilterData[libraryId].authors.find((au) => this.nameLookupKey(au.name) === key)?.id || null
   }
 
   /**
@@ -688,9 +700,9 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.seriesModel.getByNameAndLibrary(seriesName, libraryId))?.id || null
     }
-    // Same comparison as the DB lookup (SQLite lower(), A-Z only), or a warm cache creates "harry potter" next to "Harry Potter" (#4255)
-    const key = asciiLowerCase(seriesName)
-    return this.libraryFilterData[libraryId].series.find((se) => asciiLowerCase(se.name) === key)?.id || null
+    // Same comparison as the DB lookup, or a warm cache creates "harry potter" next to "Harry Potter" (#4255)
+    const key = this.nameLookupKey(seriesName)
+    return this.libraryFilterData[libraryId].series.find((se) => this.nameLookupKey(se.name) === key)?.id || null
   }
 
   /**
