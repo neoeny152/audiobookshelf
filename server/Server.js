@@ -17,6 +17,7 @@ const is = require('./libs/requestIp/isJs')
 const fileUtils = require('./utils/fileUtils')
 const { toNumber } = require('./utils/index')
 const { getRequestOrigin } = require('./utils/requestUtils')
+const { createJsonBodyParser } = require('./utils/jsonBodyParser')
 const Logger = require('./Logger')
 
 const Auth = require('./Auth')
@@ -353,8 +354,9 @@ class Server {
     )
     router.use(express.urlencoded({ extended: true, limit: '5mb' }))
 
-    // Skip JSON parsing for internal-api routes
-    router.use(/^(?!\/internal-api).*/, express.json({ limit: '10mb' }))
+    // JSON parsing for all routes except internal-api routes. The local session sync routes parse their
+    // (larger) body in ApiRouter after authentication (see utils/jsonBodyParser.js)
+    router.use(createJsonBodyParser())
 
     router.use('/api', this.auth.ifAuthNeeded(this.authMiddleware.bind(this)), this.apiRouter.router)
     router.use('/hls', this.hlsRouter.router)

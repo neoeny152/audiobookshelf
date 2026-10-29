@@ -8,6 +8,7 @@ const Database = require('../Database')
 const SocketAuthority = require('../SocketAuthority')
 
 const fs = require('../libs/fsExtra')
+const { localSessionJsonParser } = require('../utils/jsonBodyParser')
 const date = require('../libs/dateAndTime')
 
 const CacheManager = require('../managers/CacheManager')
@@ -243,8 +244,9 @@ class ApiRouter {
     this.router.delete('/sessions/:id', SessionController.middleware.bind(this), SessionController.delete.bind(this))
     this.router.get('/sessions/open', SessionController.getOpenSessions.bind(this))
     this.router.post('/sessions/batch/delete', SessionController.batchDelete.bind(this))
-    this.router.post('/session/local', SessionController.syncLocal.bind(this))
-    this.router.post('/session/local-all', SessionController.syncLocalSessions.bind(this))
+    // Offline session uploads can be larger than the default json body limit (#4755)
+    this.router.post('/session/local', localSessionJsonParser, SessionController.syncLocal.bind(this))
+    this.router.post('/session/local-all', localSessionJsonParser, SessionController.syncLocalSessions.bind(this))
     // TODO: Update these endpoints because they are only for open playback sessions
     this.router.get('/session/:id', SessionController.openSessionMiddleware.bind(this), SessionController.getOpenSession.bind(this))
     this.router.post('/session/:id/sync', SessionController.openSessionMiddleware.bind(this), SessionController.sync.bind(this))
