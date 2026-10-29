@@ -12,17 +12,26 @@
  *   target pause P = the pause (>= minSilenceSec) that contains the reference (+/- SLACK), else the latest pause that
  *                    ends at most SPEECH_TOL s before it (reference sits in speech just after the pause)
  *   correct        = proposal inside P (+/- SLACK)
- *   exact-ish      = |proposal - (P.end - leadSec)| <= 0.5
+ *   on-anchor      = |proposal - (P.end - leadSec)| <= 0.5. This is snap's own anchor convention, not agreement with the
+ *                    reference (references sit ~0.4 s before it): with anchorInsidePause on it equals "correct" by
+ *                    construction, so read it as "where in the pause", never as accuracy
+ *   medR           = median |proposal - reference| in seconds (the reference itself, with its own small offsets)
  *   bad            = not correct (wrong pause or left in speech)
- *   regression     = the damaged input was already inside P but the proposal is not
+ *   regression     = the damaged input was already inside P but the proposal is not. The 'clean' (undamaged) and
+ *                    'late1' patterns measure regressions on lists that are already right, the most common real input
  * References without a target pause are reported as "noTgt" and scored by distance to the reference (<= 1.5 s = ok).
+ *
+ * Black Ice and The Girls in the Cabin mostly measure a convention: their references sit after the spoken heading while
+ * snap prefers the break pause before it. The totals are also printed without them ("excl. conv.").
+ * A last block snaps each book's CURRENT chapter list (from items/*.json) and counts the starts that change: a list
+ * that is already fine should come back (nearly) unchanged.
  *
  * Data (defaults can be overridden by env):
  *   SNAP_BENCH_DIR   folder with items/*.json and pauses/<relPath with / -> __>/<audio filename>.txt
  *   SNAP_BENCH_TRUTH folder with final-<prodId>.json
  *
  * Usage:
- *   node scripts/snap-bench.js [--split train|holdout|all] [--patterns late3,late5] [--book <substr>]
+ *   node scripts/snap-bench.js [--split train|holdout|all] [--patterns clean,late1,late3,late5,late8,early2,mixed,jitter] [--book <substr>]
  *                              [--opts '{"leadSec":0.25}'] [--fails] [--json out.json]
  */
 const fs = require('fs')
@@ -61,7 +70,7 @@ const TRUTH_MAP = {
 
 const TRAIN = ['The Last Flight', 'Black Ice', 'Book 1 - Dungeon Crawler Carl', 'Book 4 - The Gate', 'Book 6 - The Eye', 'The Bones She Buried', 'The Quiet Tenant']
 
-const PATTERNS = ['late3', 'late5', 'late8', 'early2', 'mixed', 'jitter']
+const PATTERNS = ['clean', 'late1', 'late3', 'late5', 'late8', 'early2', 'mixed', 'jitter']
 
 /** Seeded PRNG so every run damages the same way */
 function mulberry32(seed) {
@@ -77,6 +86,11 @@ function mulberry32(seed) {
 
 function damage(pattern, start, rng) {
   switch (pattern) {
+    case 'clean':
+      // undamaged: the most common real input, scored mainly for regressions
+      return start
+    case 'late1':
+      return start + 1
     case 'late3':
       return start + 3
     case 'late5':
@@ -188,7 +202,8 @@ function loadBooks(args) {
     })
     const timeline = chapterSnap.buildTimeline(media)
     const T = chapterSnap.computeDuration(timeline, item.media.duration)
-    books.push({ name, relPath, split, truth, timeline, T, filePauses, bookPauses: bookLevelPauses(timeline, filePauses) })
+    const current = (item.media.chapters || []).map((c) => ({ title: c.title, start: c.start }))
+    books.push({ name, relPath, split, truth, current, timeline, T, filePauses, bookPauses: bookLevelPauses(timeline, filePauses) })
   }
   return books.sort((a, b) => (a.split === b.split ? a.name.localeCompare(b.name) : a.split === 'train' ? -1 : 1))
 }
@@ -272,7 +287,7 @@ async function benchOne(book, pattern, options) {
     pool: 4
   })
 
-  const row = { n: 0, correct: 0, exact: 0, bad: 0, noTgt: 0, alreadyOk: 0, regress: 0, dists: [], fails: [] }
+  const row = { n: 0, correct: 0, exact: 0, bad: 0, noTgt: 0, alreadyOk: 0, regress: 0, dists: [], refDists: [], fails: [] }
   for (let i = 1; i < book.truth.length; i++) {
     const r = book.truth[i].start
     const got = response.chapters[i].proposedStart
@@ -285,6 +300,7 @@ async function benchOne(book, pattern, options) {
       if (ok) row.correct++
       else row.bad++
       row.dists.push(Math.abs(got - r))
+      row.refDists.push(Math.abs(got - r))
       if (Math.abs(sent - r) <= NO_TARGET_TOL) {
         row.alreadyOk++
         if (!ok) row.regress++
@@ -298,6 +314,7 @@ async function benchOne(book, pattern, options) {
     if (ok) row.correct++
     else row.bad++
     if (Math.abs(got - target) <= EXACT_TOL) row.exact++
+    row.refDists.push(Math.abs(got - r))
     if (inPause(sent, P)) {
       row.alreadyOk++
       if (!ok) row.regress++
@@ -310,20 +327,39 @@ async function benchOne(book, pattern, options) {
 const pct = (a, b) => (b ? ((100 * a) / b).toFixed(1) : '-')
 
 function fmtRow(label, pattern, row) {
-  return [label.padEnd(30).slice(0, 30), pattern.padEnd(7), String(row.n).padStart(5), pct(row.correct, row.n).padStart(6), pct(row.exact, row.n).padStart(6), String(row.bad).padStart(4), median(row.dists).toFixed(2).padStart(6), `${row.regress}/${row.alreadyOk}`.padStart(8), String(row.noTgt).padStart(5)].join(' ')
+  return [label.padEnd(30).slice(0, 30), pattern.padEnd(7), String(row.n).padStart(5), pct(row.correct, row.n).padStart(6), pct(row.exact, row.n).padStart(6), String(row.bad).padStart(4), median(row.dists).toFixed(2).padStart(6), median(row.refDists).toFixed(2).padStart(6), `${row.regress}/${row.alreadyOk}`.padStart(8), String(row.noTgt).padStart(5)].join(' ')
 }
 
 function addRow(acc, row) {
   for (const k of ['n', 'correct', 'exact', 'bad', 'noTgt', 'alreadyOk', 'regress']) acc[k] = (acc[k] || 0) + row[k]
   acc.dists = (acc.dists || []).concat(row.dists)
+  acc.refDists = (acc.refDists || []).concat(row.refDists)
   return acc
+}
+
+/** Books whose references follow a different heading convention (after the spoken heading, not the break before it) */
+const CONVENTION_BOOKS = ['Black Ice', 'The Girls in the Cabin']
+
+/** Snap a book's current chapter list: how many starts change, by more than half a second, and file-start chapters moved */
+async function benchCurrent(book, options) {
+  if (book.current.length < 2) return null
+  const chapters = chapterSnap.validateChapters(book.current, book.T)
+  const response = await chapterSnapRunner.runSnap({ libraryItemId: book.name, timeline: book.timeline, T: book.T, chapters, options, detect: makeDetect(book.filePauses), deadlineMs: 1e9, pool: 4 })
+  const changed = response.chapters.filter((c) => c.changed)
+  const fileStarts = response.chapters.filter((c) => chapterSnap.onFileStart(book.timeline, c.originalStart))
+  return {
+    n: response.chapters.length,
+    changed: changed.length,
+    big: changed.filter((c) => Math.abs(c.delta) > 0.5).length,
+    fileStartMoved: fileStarts.filter((c) => c.changed || c.trackIndex !== chapterSnap.trackIndexAt(book.timeline, c.originalStart)).length
+  }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   const options = chapterSnap.parseOptions(args.opts)
   const books = loadBooks(args)
-  const header = ['book'.padEnd(30), 'pattern'.padEnd(7), 'n'.padStart(5), 'corr%'.padStart(6), 'exct%'.padStart(6), 'bad'.padStart(4), 'medD'.padStart(6), 'regr/ok'.padStart(8), 'noTgt'.padStart(5)].join(' ')
+  const header = ['book'.padEnd(30), 'pattern'.padEnd(7), 'n'.padStart(5), 'corr%'.padStart(6), 'onAn%'.padStart(6), 'bad'.padStart(4), 'medD'.padStart(6), 'medR'.padStart(6), 'regr/ok'.padStart(8), 'noTgt'.padStart(5)].join(' ')
   console.log(`options ${JSON.stringify(options)}`)
   console.log(header)
   const totals = {}
@@ -332,13 +368,17 @@ async function main() {
     const bookTotal = {}
     for (const pattern of args.patterns) {
       const row = await benchOne(book, pattern, options)
-      out.push({ book: book.name, split: book.split, pattern, ...row, medDist: median(row.dists), dists: undefined })
+      out.push({ book: book.name, split: book.split, pattern, ...row, medDist: median(row.dists), medRef: median(row.refDists), dists: undefined, refDists: undefined })
       console.log(fmtRow(`${book.split === 'train' ? 'T' : 'H'} ${book.name}`, pattern, row))
       if (args.fails) for (const f of row.fails) console.log(`    ${JSON.stringify(f)}`)
       addRow(bookTotal, row)
       const key = `${book.split}|${pattern}`
       totals[key] = addRow(totals[key] || {}, row)
       totals[`${book.split}|ALL`] = addRow(totals[`${book.split}|ALL`] || {}, row)
+      if (!CONVENTION_BOOKS.some((c) => book.name.includes(c))) {
+        totals[`${book.split}|xconv|${pattern}`] = addRow(totals[`${book.split}|xconv|${pattern}`] || {}, row)
+        totals[`${book.split}|xconv|ALL`] = addRow(totals[`${book.split}|xconv|ALL`] || {}, row)
+      }
     }
     console.log(fmtRow(`  = ${book.name}`, 'all', bookTotal))
   }
@@ -350,10 +390,32 @@ async function main() {
       if (row) console.log(fmtRow(split.toUpperCase(), pattern, row))
     }
   }
+  console.log(`\nTotals excl. conv. (${CONVENTION_BOOKS.join(', ')})`)
+  for (const split of ['train', 'holdout']) {
+    for (const pattern of ['clean', 'ALL']) {
+      const row = totals[`${split}|xconv|${pattern}`]
+      if (row) console.log(fmtRow(split.toUpperCase(), pattern, row))
+    }
+  }
+
+  console.log('\nCurrent lists: chapters, starts changed, changed by > 0.5 s, file-start chapters moved or re-filed')
+  const cur = { n: 0, changed: 0, big: 0, fileStartMoved: 0 }
+  const fmtCur = (label, c) => `  ${label.padEnd(30).slice(0, 30)} ${String(c.n).padStart(4)} ${String(c.changed).padStart(4)} ${String(c.big).padStart(4)} ${String(c.fileStartMoved).padStart(3)}`
+  for (const book of books) {
+    const c = await benchCurrent(book, options)
+    if (!c) continue
+    for (const k of Object.keys(cur)) cur[k] += c[k]
+    console.log(fmtCur(book.name, c))
+  }
+  console.log(fmtCur('ALL', cur))
   if (args.json) fs.writeFileSync(args.json, JSON.stringify({ options, rows: out }, null, 1))
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error)
+    process.exit(1)
+  })
+}
+
+module.exports = { loadBooks, makeDetect, bookLevelPauses, targetPause, damage, mulberry32 }
