@@ -12,6 +12,9 @@ function opts(overrides = {}) {
 /** The rules before the accuracy bench: a start inside a pause stays put, 3 s heading look-back (analyze.py) */
 const LEGACY = Object.freeze({ anchorInsidePause: false, headingLookbackSec: 3 })
 
+/** Opt-in anchoring of a start that is already inside a pause */
+const ANCHOR = Object.freeze({ anchorInsidePause: true })
+
 function pause(start, end, extra = {}) {
   return { start, end, startClipped: false, endClipped: false, crossesFileBoundary: false, ...extra }
 }
@@ -371,9 +374,11 @@ describe('chapterSnap', () => {
 
       const result = chapterSnap.snapOne({ index: 1, t: 600.0, pauses, timeline, options: opts(), bounds: chapterSnap.boundsFor([0, 600, 1100], 1, 1200) })
       expect(result.reason).to.equal(REASONS.INSIDE_PAUSE)
-      // anchored leadSec before the end of the joined pause, in the second file
-      expect(result.proposedStart).to.be.closeTo(600.55, 1e-9)
-      expect(chapterSnap.trackIndexAt(timeline, result.proposedStart)).to.equal(1)
+      expect(result.proposedStart).to.equal(600)
+      // anchored (opt-in): leadSec before the end of the joined pause, in the second file
+      const anchored = chapterSnap.snapOne({ index: 1, t: 600.0, pauses, timeline, options: opts(ANCHOR), bounds: chapterSnap.boundsFor([0, 600, 1100], 1, 1200) })
+      expect(anchored.proposedStart).to.be.closeTo(600.55, 1e-9)
+      expect(chapterSnap.trackIndexAt(timeline, anchored.proposedStart)).to.equal(1)
     })
 
     it('joins two halves each shorter than minSilenceSec into one pause at the joint', () => {
@@ -389,7 +394,7 @@ describe('chapterSnap', () => {
 
       const result = chapterSnap.snapOne({ index: 1, t: 3600, pauses, timeline, options: opts(), bounds: chapterSnap.boundsFor([0, 3600, 5000], 1, 7200) })
       expect(result.reason).to.equal(REASONS.INSIDE_PAUSE)
-      expect(result.proposedStart).to.be.closeTo(3600.25, 1e-9)
+      expect(result.proposedStart).to.equal(3600)
       expect(chapterSnap.confidenceFor(result)).to.equal('medium')
     })
 
@@ -408,8 +413,8 @@ describe('chapterSnap', () => {
     it('inside-pause uses SLACK at both edges', () => {
       const p = [pause(100, 102)]
       expect(snap(99.7, p).reason).to.equal(REASONS.INSIDE_PAUSE)
-      expect(snap(99.7, p).proposedStart).to.equal(101.75)
-      expect(snap(99.7, p, { options: LEGACY }).proposedStart).to.equal(99.7)
+      expect(snap(99.7, p).proposedStart).to.equal(99.7)
+      expect(snap(99.7, p, { options: ANCHOR }).proposedStart).to.equal(101.75)
       expect(snap(102.3, p).reason).to.equal(REASONS.INSIDE_PAUSE)
       expect(snap(102.31, p).reason).to.equal(REASONS.NEAREST_LONGEST_PAUSE)
       expect(snap(102.31, p).proposedStart).to.equal(101.75)
@@ -517,14 +522,14 @@ describe('chapterSnap', () => {
 
       it('does not move a correct start inside the long pause to an earlier, shorter pause', () => {
         const r = snap(93, [pause(88, 89), pause(90.5, 94.2)])
-        expect(r).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 93.95 })
+        expect(r).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 93 })
         expect(r.pause.end).to.equal(94.2)
       })
 
       it('ignores a longer pause that ends more than headingLookbackSec before the chosen pause', () => {
         const three = { headingLookbackSec: 3 }
         expect(snap(95.8, [pause(87.8, 92), afterHeading], { options: three }).reason).to.equal(REASONS.HEADING_LOOKBACK)
-        expect(snap(95.8, [pause(87.79, 91.99), afterHeading], { options: three })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.85 })
+        expect(snap(95.8, [pause(87.79, 91.99), afterHeading], { options: three })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8 })
         expect(snap(95.8, [pause(85, 90.5), afterHeading], { options: { headingLookbackSec: 6 } }).reason).to.equal(REASONS.HEADING_LOOKBACK)
         // default 10 s
         expect(snap(95.8, [pause(80, 85), afterHeading]).reason).to.equal(REASONS.HEADING_LOOKBACK)
@@ -548,13 +553,13 @@ describe('chapterSnap', () => {
       })
 
       it('is off with headingLookbackSec 0', () => {
-        expect(snap(95.8, [breakPause, afterHeading], { options: { headingLookbackSec: 0 } })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.85, pause: afterHeading })
+        expect(snap(95.8, [breakPause, afterHeading], { options: { headingLookbackSec: 0 } })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
       })
 
       it('keeps the chosen pause when the earlier one is outside the neighbour bounds', () => {
         const bounds = chapterSnap.boundsFor([0, 93, 95.8], 2, 1000)
         expect(bounds.lo).to.equal(94)
-        expect(snap(95.8, [breakPause, afterHeading], { bounds })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.85, pause: afterHeading })
+        expect(snap(95.8, [breakPause, afterHeading], { bounds })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
       })
 
       it('falls back to the chosen pause when the order pass rejects the look-back', () => {
@@ -564,7 +569,7 @@ describe('chapterSnap', () => {
         expect(proposals[2].reason).to.equal(REASONS.HEADING_LOOKBACK)
         chapterSnap.resolveOrder(starts, proposals)
         expect(proposals[1]).to.include({ reason: REASONS.NEAREST_LONGEST_PAUSE, proposedStart: 93.95 })
-        expect(proposals[2]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.85, pause: afterHeading })
+        expect(proposals[2]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 95.8, pause: afterHeading })
       })
 
       it('reaches past a spoken heading and subtitle to the break pause (default 10 s)', () => {
@@ -583,33 +588,34 @@ describe('chapterSnap', () => {
     describe('anchorInsidePause', () => {
       it('moves a start inside a pause to leadSec before the pause end, like a moved start', () => {
         // early mark 2 s into the 4 s break pause
-        const r = snap(92, [pause(90, 94.2)])
+        const r = snap(92, [pause(90, 94.2)], { options: ANCHOR })
         expect(r).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 93.95 })
         expect(chapterSnap.confidenceFor(r)).to.equal('high')
-        expect(snap(92, [pause(90, 94.2)], { options: { leadSec: 0.5 } }).proposedStart).to.equal(93.7)
+        expect(snap(92, [pause(90, 94.2)], { options: { ...ANCHOR, leadSec: 0.5 } }).proposedStart).to.equal(93.7)
         // within SLACK after the end moves back onto the same anchor
-        expect(snap(94.4, [pause(90, 94.2)]).proposedStart).to.equal(93.95)
+        expect(snap(94.4, [pause(90, 94.2)], { options: ANCHOR }).proposedStart).to.equal(93.95)
       })
 
-      it('keeps the start where it is when the option is off', () => {
+      it('keeps the start where it is when the option is off (the default)', () => {
         expect(snap(92, [pause(90, 94.2)], { options: { anchorInsidePause: false } })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
+        expect(snap(92, [pause(90, 94.2)])).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
       })
 
       it('keeps the start when the pause end was cut by the analysed window', () => {
-        expect(snap(92, [pause(90, 94.2, { endClipped: true })])).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
+        expect(snap(92, [pause(90, 94.2, { endClipped: true })], { options: ANCHOR })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
       })
 
       it('keeps the start when the anchor would cross the next chapter bound', () => {
         // next chapter at 94: hi bound 93
         const bounds = chapterSnap.boundsFor([0, 92, 94], 1, 1000)
-        expect(snap(92, [pause(90, 94.2)], { bounds })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
+        expect(snap(92, [pause(90, 94.2)], { bounds, options: ANCHOR })).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 92 })
       })
 
       it('falls back to the original start when the order pass rejects the anchor', () => {
         // two starts 1.4 s apart around the end of one pause: both anchors land on 93.95, the second keeps its start
         const starts = [0, 93, 94.4]
         const pauses = [pause(90, 94.2)]
-        const proposals = starts.map((t, i) => chapterSnap.snapOne({ index: i, t, pauses, timeline: [track(0, 0, 1000)], options: opts(), bounds: chapterSnap.boundsFor(starts, i, 1000) }))
+        const proposals = starts.map((t, i) => chapterSnap.snapOne({ index: i, t, pauses, timeline: [track(0, 0, 1000)], options: opts(ANCHOR), bounds: chapterSnap.boundsFor(starts, i, 1000) }))
         expect(proposals[1].proposedStart).to.equal(93.95)
         expect(proposals[2].proposedStart).to.equal(93.95)
         chapterSnap.resolveOrder(starts, proposals)
@@ -618,7 +624,8 @@ describe('chapterSnap', () => {
       })
 
       it('is accepted as a boolean option and echoed in the response', () => {
-        expect(chapterSnap.parseOptions({}).anchorInsidePause).to.equal(true)
+        expect(chapterSnap.parseOptions({}).anchorInsidePause).to.equal(false)
+        expect(chapterSnap.parseOptions({ anchorInsidePause: true }).anchorInsidePause).to.equal(true)
         expect(chapterSnap.parseOptions({ anchorInsidePause: false }).anchorInsidePause).to.equal(false)
         expect(() => chapterSnap.parseOptions({ anchorInsidePause: 'no' })).to.throw(SnapInputError, 'anchorInsidePause')
       })

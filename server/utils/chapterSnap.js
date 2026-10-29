@@ -2,8 +2,10 @@
  * Chapter snap: pure logic (no I/O).
  *
  * Moves chapter starts onto real pauses in the audio. Ported from the chapterbot analyze.py rules:
- * - a start that is already inside a pause (within SLACK) stays in that pause, anchored `leadSec` before its end like a
- *   moved start (`anchorInsidePause`, default on; off = it stays exactly where it is)
+ * - a start that is already inside a pause (within SLACK) stays where it is. With `anchorInsidePause` (opt-in, default
+ *   off) it moves to `leadSec` before the end of that pause, the anchor a moved start gets. Off by default because it
+ *   changes nearly every start of a list that is already right (reason inside-pause with changed: true) without
+ *   putting any start into a different pause
  * - otherwise it moves to `leadSec` before the end of the pause that minimises
  *   |pause.end - t| - BONUS_WEIGHT * min(pause length, BONUS_CAP), among pauses that end within the window
  *   and keep the chapter between its neighbours' original starts
@@ -49,7 +51,7 @@ const DEFAULT_OPTIONS = Object.freeze({
   leadSec: 0.25,
   headingLookbackSec: 10,
   snapToFileStart: false,
-  anchorInsidePause: true
+  anchorInsidePause: false
 })
 
 const NUMERIC_OPTION_BOUNDS = Object.freeze({
@@ -112,7 +114,8 @@ function clamp(value, min, max) {
  * @property {number} leadSec
  * @property {number} headingLookbackSec - how far before the chosen pause a longer pause may sit to win (0 = off)
  * @property {boolean} snapToFileStart
- * @property {boolean} anchorInsidePause - move a start that is already inside a pause to leadSec before its end
+ * @property {boolean} anchorInsidePause - opt-in: move a start that is already inside a pause to leadSec before its end
+ *   (same pause, reason stays inside-pause; a start on a file start is kept)
  * @property {boolean} [verify] - run the chapterbot speech check (only present when true)
  */
 

@@ -308,8 +308,7 @@ describe('chapterSnapRunner', () => {
         }
       })
       expect(calls).to.deep.equal([chapterSnap.JOINT_MIN_SILENCE, chapterSnap.JOINT_MIN_SILENCE])
-      // anchored leadSec before the end of the joined pause (anchorInsidePause), so it opens the second file
-      expect(result.chapters[1]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 3600.25, changed: true, confidence: 'medium', trackIndex: 1 })
+      expect(result.chapters[1]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 3600, changed: false, confidence: 'medium', trackIndex: 1 })
       expect(result.chapters[1].pause).to.include({ start: 3599.55, end: 3600.5, duration: 0.95, crossesFileBoundary: true })
       expect(result.stats.pausesFound).to.equal(2)
     })
@@ -496,7 +495,7 @@ describe('chapterSnapRunner', () => {
       })
     })
 
-    it('puts 8 s late and 2 s early marks on the same anchor in the break pause', async () => {
+    it('puts 8 s late marks, and 2 s early marks with anchorInsidePause, on the same anchor in the break pause', async () => {
       // Published marks 277.62, 14264.15, 33770.16. Late marks land in the pause after the spoken heading and subtitle
       // (up to 5.6 s after the break) or in speech; early marks land inside the break pause or just before it.
       const breaks = [280.147506, 14266.019524, 33770.081905]
@@ -505,7 +504,8 @@ describe('chapterSnapRunner', () => {
         ['early2', -2]
       ]) {
         const starts = [0, 277.62 + offset, 14264.15 + offset, 33770.16 + offset]
-        const result = await run({ timeline: longTimeline, T: LONG_T, chapters: starts.map((start, i) => ({ id: i, start })), detect: seekDetect })
+        const options = { ...chapterSnap.DEFAULT_OPTIONS, anchorInsidePause: true }
+        const result = await run({ timeline: longTimeline, T: LONG_T, chapters: starts.map((start, i) => ({ id: i, start })), detect: seekDetect, options })
         breaks.forEach((e, k) => {
           expect(result.chapters[k + 1].proposedStart, `${label} chapter ${k + 1}`).to.be.closeTo(e - chapterSnap.DEFAULT_OPTIONS.leadSec, 0.001)
         })
