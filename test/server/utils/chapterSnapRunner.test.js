@@ -333,7 +333,10 @@ describe('chapterSnapRunner', () => {
           detect,
           options: { ...chapterSnap.DEFAULT_OPTIONS, anchorInsidePause }
         })
-        expect(result.chapters.map((c) => c.trackIndex), `anchor ${anchorInsidePause}`).to.deep.equal([0, 1, 2])
+        expect(
+          result.chapters.map((c) => c.trackIndex),
+          `anchor ${anchorInsidePause}`
+        ).to.deep.equal([0, 1, 2])
         expect(result.chapters.slice(1).map((c) => c.reason)).to.deep.equal([REASONS.INSIDE_PAUSE, REASONS.INSIDE_PAUSE])
         expect(result.stats.moved, `anchor ${anchorInsidePause}`).to.equal(0)
       }
