@@ -31,6 +31,10 @@ class Scanner {
      * Quick match author/series updates run one at a time. Parallel matches (same book from
      * two requests, or two books with the same new author/series) otherwise race between
      * the name lookup and the insert and create duplicates (#5215).
+     * Scope: quick match only. Book edits and library scans still create authors/series outside
+     * this queue and can race it; at worst that creates a duplicate Author row, never a crash,
+     * since every join row insert goes through findOrCreateLink. One queue for all libraries:
+     * each step is short DB work, and a SQLite lock fails with SQLITE_BUSY instead of hanging.
      * @type {Promise<any>}
      */
     this.bookLinkQueue = Promise.resolve()
