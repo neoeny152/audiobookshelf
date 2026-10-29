@@ -7,6 +7,28 @@ const SocketAuthority = require('../SocketAuthority')
 const { isNullOrNaN } = require('../utils')
 const TokenManager = require('../auth/TokenManager')
 
+/** @type {Map<string, Promise<any>>} tail of the pending progress writes per user + item */
+const mediaProgressLocks = new Map()
+
+/**
+ * Run fn after every earlier call with the same key has settled
+ *
+ * @template T
+ * @param {string} key
+ * @param {() => Promise<T>} fn
+ * @returns {Promise<T>}
+ */
+function withMediaProgressLock(key, fn) {
+  const previous = mediaProgressLocks.get(key) || Promise.resolve()
+  const run = previous.then(fn, fn)
+  const tail = run.catch(() => {})
+  mediaProgressLocks.set(key, tail)
+  tail.then(() => {
+    if (mediaProgressLocks.get(key) === tail) mediaProgressLocks.delete(key)
+  })
+  return run
+}
+
 class UserCache {
   constructor() {
     this.cache = new LRUCache({ max: 100 })
@@ -728,6 +750,17 @@ class User extends Model {
    * @returns {Promise<{ mediaProgress: import('./MediaProgress'), error: [string], statusCode: [number] }>}
    */
   async createUpdateMediaProgressFromPayload(progressPayload) {
+    // Serialize writes for the same user + item so concurrent requests (e.g. Plappa calling
+    // /api/session/local and /api/me/progress/batch/update at once) cannot both create a row (#3845)
+    const lockKey = `${this.id}:${progressPayload?.episodeId || progressPayload?.libraryItemId}`
+    return withMediaProgressLock(lockKey, () => this._createUpdateMediaProgressFromPayload(progressPayload))
+  }
+
+  /**
+   * @param {ProgressUpdatePayload} progressPayload
+   * @returns {Promise<{ mediaProgress: import('./MediaProgress'), error: [string], statusCode: [number] }>}
+   */
+  async _createUpdateMediaProgressFromPayload(progressPayload) {
     /** @type {import('./MediaProgress')|null} */
     let mediaProgress = null
     let mediaItemId = null
@@ -821,7 +854,18 @@ class User extends Model {
       } else {
         newMediaProgressPayload.finishedAt = null
       }
-      mediaProgress = await this.sequelize.models.mediaProgress.create(newMediaProgressPayload)
+      try {
+        mediaProgress = await this.sequelize.models.mediaProgress.create(newMediaProgressPayload)
+      } catch (error) {
+        if (!(error instanceof sequelize.UniqueConstraintError)) throw error
+        // Another process created the row first (unique index on userId + mediaItemId): update it instead
+        Logger.warn(`[User] createUpdateMediaProgress: progress for media item ${mediaItemId} was created concurrently, updating it instead`)
+        const existingProgress = await this.sequelize.models.mediaProgress.findOne({ where: { userId: this.id, mediaItemId } })
+        if (!existingProgress) throw error
+        mediaProgress = await existingProgress.applyProgressUpdate(progressPayload)
+      }
+      if (!this.mediaProgresses) this.mediaProgresses = []
+      this.mediaProgresses = this.mediaProgresses.filter((mp) => mp.mediaItemId !== mediaItemId)
       this.mediaProgresses.push(mediaProgress)
     }
     userCache.maybeInvalidate(this)

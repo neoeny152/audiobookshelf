@@ -195,6 +195,8 @@ class Database {
     await this.buildModels(force)
     Logger.info(`[Database] Db initialized with models:`, Object.keys(this.sequelize.models).join(', '))
 
+    await this.ensureMediaProgressUniqueIndex()
+
     await this.addTriggers()
 
     await this.loadData()
@@ -202,6 +204,23 @@ class Database {
     Logger.info(`[Database] running ANALYZE`)
     await this.sequelize.query('ANALYZE')
     Logger.info(`[Database] ANALYZE completed`)
+  }
+
+  /**
+   * Make sure mediaProgresses has one row per (userId, mediaItemId) (upstream #3845).
+   * Runs the idempotent v2.37.3 migration after sync so it also applies when the server
+   * version was not bumped (MigrationManager only runs migrations newer than the db version).
+   * A failure is logged and does not stop the server; progress writes are also serialized in User.
+   */
+  async ensureMediaProgressUniqueIndex() {
+    const migration = require('./migrations/v2.37.3-media-progress-unique-user-item')
+    try {
+      const queryInterface = this.sequelize.getQueryInterface()
+      if (await migration.hasUniqueIndex(queryInterface)) return
+      await migration.up({ context: { queryInterface, logger: Logger } })
+    } catch (error) {
+      Logger.error(`[Database] Failed to ensure unique index on mediaProgresses(userId, mediaItemId)`, error)
+    }
   }
 
   /**
