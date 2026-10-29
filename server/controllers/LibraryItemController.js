@@ -516,6 +516,8 @@ class LibraryItemController {
 
     req.libraryItem.media.audioFiles = updatedAudioFiles
     req.libraryItem.media.changed('audioFiles', true)
+    // Excluding or including a track changes the playable duration (#5311)
+    req.libraryItem.media.duration = Database.bookModel.getDurationFromAudioFiles(updatedAudioFiles)
     await req.libraryItem.media.save()
 
     SocketAuthority.libraryItemEmitter('item_updated', req.libraryItem)
@@ -1188,6 +1190,8 @@ class LibraryItemController {
       if (req.libraryItem.media.audioFiles.some((af) => af.ino === req.params.fileid)) {
         req.libraryItem.media.audioFiles = req.libraryItem.media.audioFiles.filter((af) => af.ino !== req.params.fileid)
         req.libraryItem.media.changed('audioFiles', true)
+        // Deleted track no longer counts towards the duration (#5311)
+        req.libraryItem.media.duration = Database.bookModel.getDurationFromAudioFiles(req.libraryItem.media.audioFiles)
       } else if (req.libraryItem.media.ebookFile?.ino === req.params.fileid) {
         req.libraryItem.media.ebookFile = null
         req.libraryItem.media.changed('ebookFile', true)

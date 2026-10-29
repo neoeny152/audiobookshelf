@@ -136,14 +136,16 @@ class BookScanner {
 
       media.audioFiles = AudioFileScanner.runSmartTrackOrder(existingLibraryItem.relPath, media.audioFiles)
 
-      media.duration = 0
-      media.audioFiles.forEach((af) => {
-        if (!isNaN(af.duration)) {
-          media.duration += af.duration
-        }
-      })
-
       media.changed('audioFiles', true)
+    }
+
+    // Duration only counts included audio files (#5311). Checked on every rescan so a
+    // duration saved with excluded tracks counted is corrected by the next scan.
+    const includedDuration = Database.bookModel.getDurationFromAudioFiles(media.audioFiles)
+    if (Math.abs((Number(media.duration) || 0) - includedDuration) > 0.001) {
+      libraryScan.addLog(LogLevel.DEBUG, `Updating duration for "${media.title}" from ${media.duration} to ${includedDuration}`)
+      media.duration = includedDuration
+      hasMediaChanges = true
     }
 
     // Check if cover was removed
@@ -469,8 +471,7 @@ class BookScanner {
     bookMetadata.explicit = !!bookMetadata.explicit // Ensure boolean
     bookMetadata.abridged = !!bookMetadata.abridged // Ensure boolean
 
-    let duration = 0
-    scannedAudioFiles.forEach((af) => (duration += !isNaN(af.duration) ? Number(af.duration) : 0))
+    const duration = Database.bookModel.getDurationFromAudioFiles(scannedAudioFiles)
     const bookObject = {
       ...bookMetadata,
       audioFiles: scannedAudioFiles,

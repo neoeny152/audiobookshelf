@@ -134,6 +134,25 @@ class Book extends Model {
   }
 
   /**
+   * Book duration is the sum of the durations of the audio files that are played,
+   * so excluded audio files are not counted (#5311)
+   *
+   * @param {AudioFileObject[]} audioFiles
+   * @returns {number}
+   */
+  static getDurationFromAudioFiles(audioFiles) {
+    let duration = 0
+    for (const af of audioFiles || []) {
+      if (!af || af.exclude) continue
+      const afDuration = Number(af.duration)
+      if (af.duration !== null && af.duration !== undefined && !isNaN(afDuration)) {
+        duration += afDuration
+      }
+    }
+    return duration
+  }
+
+  /**
    * Initialize model
    * @param {import('../Database').sequelize} sequelize
    */
