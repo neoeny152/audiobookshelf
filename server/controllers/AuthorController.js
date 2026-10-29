@@ -11,6 +11,7 @@ const CoverManager = require('../managers/CoverManager')
 const AuthorFinder = require('../finders/AuthorFinder')
 
 const { reqSupportsWebp, isValidASIN, clampPositiveInt } = require('../utils/index')
+const { sqlNameEquals } = require('../utils/nameMatching')
 
 const naturalSort = createNewSortInstance({
   comparer: new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' }).compare
@@ -119,7 +120,7 @@ class AuthorController {
     if (authorNameUpdate && typeof payload.name === 'string') {
       existingAuthor = await Database.authorModel.findOne({
         where: [
-          sequelize.where(sequelize.fn('lower', sequelize.col('name')), payload.name.toLowerCase()),
+          sqlNameEquals(payload.name),
           {
             id: {
               [sequelize.Op.not]: req.author.id

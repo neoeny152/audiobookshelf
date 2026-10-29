@@ -1,7 +1,7 @@
-const { DataTypes, Model, Op, where, fn, col } = require('sequelize')
+const { DataTypes, Model, Op } = require('sequelize')
 const Logger = require('../Logger')
 const { getTitlePrefixAtEnd, getTitleIgnorePrefix } = require('../utils')
-const { dedupeNames, dedupeSeries } = require('../utils/nameMatching')
+const { dedupeNames, dedupeSeries, sqlNameEquals } = require('../utils/nameMatching')
 const parseNameString = require('../utils/parsers/parseNameString')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 const libraryItemsBookFilters = require('../utils/queries/libraryItemsBookFilters')
@@ -17,7 +17,7 @@ const SocketAuthority = require('../SocketAuthority')
  */
 async function hasOtherWithSameName(model, record, name) {
   const count = await model.count({
-    where: [where(fn('lower', col('name')), name.toLowerCase()), { libraryId: record.libraryId, id: { [Op.not]: record.id } }]
+    where: [sqlNameEquals(name), { libraryId: record.libraryId, id: { [Op.not]: record.id } }]
   })
   return count > 0
 }

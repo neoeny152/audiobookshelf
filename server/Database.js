@@ -4,6 +4,7 @@ const { Sequelize, Op } = require('sequelize')
 const packageJson = require('../package.json')
 const fs = require('./libs/fsExtra')
 const Logger = require('./Logger')
+const { asciiLowerCase } = require('./utils/nameMatching')
 
 const dbMigration = require('./utils/migrations/dbMigration')
 const Auth = require('./Auth')
@@ -670,9 +671,10 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.authorModel.getByNameAndLibrary(authorName, libraryId))?.id || null
     }
-    // Case-insensitive like the DB lookup (lower(name)), or a warm cache creates "max" next to "Max" (#4255 #4033)
-    const key = authorName.toLowerCase()
-    return this.libraryFilterData[libraryId].authors.find((au) => au.name?.toLowerCase() === key)?.id || null
+    // Same comparison as the DB lookup (SQLite lower(), A-Z only), or a warm cache creates "max" next to "Max" (#4255 #4033)
+    // and the result would depend on whether the cache is loaded for non-ASCII names
+    const key = asciiLowerCase(authorName)
+    return this.libraryFilterData[libraryId].authors.find((au) => asciiLowerCase(au.name) === key)?.id || null
   }
 
   /**
@@ -686,9 +688,9 @@ class Database {
     if (!this.libraryFilterData[libraryId]) {
       return (await this.seriesModel.getByNameAndLibrary(seriesName, libraryId))?.id || null
     }
-    // Case-insensitive like the DB lookup (lower(name)), or a warm cache creates "harry potter" next to "Harry Potter" (#4255)
-    const key = seriesName.toLowerCase()
-    return this.libraryFilterData[libraryId].series.find((se) => se.name?.toLowerCase() === key)?.id || null
+    // Same comparison as the DB lookup (SQLite lower(), A-Z only), or a warm cache creates "harry potter" next to "Harry Potter" (#4255)
+    const key = asciiLowerCase(seriesName)
+    return this.libraryFilterData[libraryId].series.find((se) => asciiLowerCase(se.name) === key)?.id || null
   }
 
   /**

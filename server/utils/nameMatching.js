@@ -70,4 +70,53 @@ function dedupeSeries(seriesObjects, nameProp = 'name', sequenceProp = 'sequence
   return [...byKey.values()]
 }
 
-module.exports = { nameKey, namesMatch, dedupeNames, dedupeSeries }
+/**
+ * Lowercase only A-Z, exactly like SQLite's built-in lower() (no ICU).
+ * Lookups that must agree with a SQL lower(name) comparison (the in-memory filter data cache)
+ * use this, so "Émile" and "émile" are different names whether or not the cache is loaded.
+ *
+ * @param {string} str
+ * @returns {string}
+ */
+function asciiLowerCase(str) {
+  return typeof str === 'string' ? str.replace(/[A-Z]+/g, (s) => s.toLowerCase()) : ''
+}
+
+/**
+ * Sequelize condition: column equals name, ignoring ASCII case.
+ * Both sides go through SQLite's lower(), so a non-ASCII name still matches its exact spelling
+ * (JS toLowerCase() on one side only would turn "Émile" into "émile", which lower(name) never returns).
+ *
+ * @param {string} name
+ * @param {string} [column]
+ */
+function sqlNameEquals(name, column = 'name') {
+  const { where, fn, col } = require('sequelize')
+  return where(fn('lower', col(column)), fn('lower', name))
+}
+
+/**
+ * Pick which of a book's linked authors/series to keep for the wanted names.
+ * For each wanted name, the linked records with that name in any case are candidates; the one with the
+ * exact spelling is kept, otherwise the first one (callers pass links oldest first). Other candidates are
+ * near-duplicates left by older bugs ("max" and "Max" both linked) and are not kept, nor are records that
+ * match no wanted name.
+ *
+ * @template {{ name: string }} T
+ * @param {T[]} linkedRecords in link order, oldest first
+ * @param {string[]} wantedNames
+ * @returns {Map<T, string>} kept record => wanted spelling
+ */
+function pickLinksToKeep(linkedRecords, wantedNames) {
+  /** @type {Map<T, string>} */
+  const kept = new Map()
+  for (const wantedName of wantedNames) {
+    const candidates = linkedRecords.filter((record) => namesMatch(record.name, wantedName))
+    if (!candidates.length) continue
+    const keep = candidates.find((record) => record.name === wantedName) || candidates[0]
+    if (!kept.has(keep)) kept.set(keep, wantedName)
+  }
+  return kept
+}
+
+module.exports = { nameKey, namesMatch, dedupeNames, dedupeSeries, asciiLowerCase, sqlNameEquals, pickLinksToKeep }

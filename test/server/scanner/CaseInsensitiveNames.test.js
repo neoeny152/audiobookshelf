@@ -64,6 +64,53 @@ describe('Case-insensitive series and author names (#4255 #4033 #5278 #4934)', (
     })
   })
 
+  describe('non-ASCII names (SQLite lower() only folds A-Z)', () => {
+    it('the DB lookup finds the exact spelling of a non-ASCII name', async () => {
+      const author = await Database.authorModel.create({ name: 'Émile Zola', lastFirst: 'Zola, Émile', libraryId: library.id })
+      const series = await Database.seriesModel.create({ name: 'Les Rougon-Macquart Été', libraryId: library.id })
+
+      expect((await Database.authorModel.getByNameAndLibrary('Émile Zola', library.id))?.id).to.equal(author.id)
+      expect((await Database.authorModel.getByNameAndLibrary('ÉMILE ZOLA', library.id))?.id).to.equal(author.id)
+      // Known limitation: É/é are not folded, same as the cold lookup always did
+      expect((await Database.authorModel.getByNameAndLibrary('émile zola', library.id))?.id).to.equal(undefined)
+      expect((await Database.seriesModel.getByNameAndLibrary('les rougon-macquart Été', library.id))?.id).to.equal(series.id)
+    })
+
+    it('a warm cache resolves names exactly like the cold DB lookup', async () => {
+      const author = await Database.authorModel.create({ name: 'Émile', lastFirst: 'Émile', libraryId: library.id })
+      const series = await Database.seriesModel.create({ name: 'Été', libraryId: library.id })
+      const lookups = ['Émile', 'émile', 'ÉMILE']
+      const seriesLookups = ['Été', 'été', 'ÉTÉ']
+
+      const cold = []
+      for (const name of lookups) cold.push(await Database.getAuthorIdByName(library.id, name))
+      for (const name of seriesLookups) cold.push(await Database.getSeriesIdByName(library.id, name))
+
+      warmFilterData([{ id: author.id, name: author.name }], [{ id: series.id, name: series.name }])
+      const warm = []
+      for (const name of lookups) warm.push(await Database.getAuthorIdByName(library.id, name))
+      for (const name of seriesLookups) warm.push(await Database.getSeriesIdByName(library.id, name))
+
+      // "ÉMILE" folds to "Émile" (only A-Z change); "ÉTÉ" folds to "ÉtÉ", not "Été"
+      expect(cold).to.deep.equal([author.id, null, author.id, series.id, null, null])
+      expect(warm).to.deep.equal(cold)
+    })
+
+    it('renaming an author to the exact name of another non-ASCII author still merges them', async () => {
+      const { book } = await createBookItem('One')
+      const emile = await Database.authorModel.create({ name: 'Émile', lastFirst: 'Émile', libraryId: library.id })
+      const other = await Database.authorModel.create({ name: 'Other', lastFirst: 'Other', libraryId: library.id })
+      await Database.bookAuthorModel.create({ bookId: book.id, authorId: other.id })
+
+      const res = { json: sinon.stub(), status: sinon.stub().returnsThis(), send: sinon.stub() }
+      await AuthorController.update.call({}, { author: other, body: { name: 'Émile' } }, res)
+
+      expect(res.json.firstCall.args[0].merged).to.equal(true)
+      expect(res.json.firstCall.args[0].author.id).to.equal(emile.id)
+      expect(await Database.authorModel.count()).to.equal(1)
+    })
+  })
+
   describe('library scan', () => {
     let libraryScan
 
