@@ -408,4 +408,86 @@ describe('chapterSnapRunner', () => {
       expect(first.chapters[1].proposedStart).to.be.greaterThan(second.chapters[2].proposedStart)
     })
   })
+
+  describe('long single-file book (no drift)', () => {
+    // Recorded from a full linear `ffmpeg -i book.m4b -af silencedetect=noise=-38dB:d=0.7` of a real 9.4 h single-file
+    // m4b (AAC 44.1 kHz, start_time 0). Windowed input-seek runs (-ss before -i, as the snap does) at 4 min, 3 h 57 min
+    // and 9 h 22 min reported the same pauses to the microsecond once the seek point was added back.
+    const LONG_T = 33804.051156
+    const longTimeline = chapterSnap.buildTimeline([{ duration: LONG_T, metadata: { path: '/books/long/book.m4b' } }])
+    const realPauses = [
+      [246.766213, 247.996145],
+      [248.77424, 250.095215],
+      [260.227823, 261.108345],
+      [263.361723, 264.403855],
+      [266.779751, 267.53737],
+      [273.935057, 275.060385],
+      [275.947642, 280.147506],
+      [280.551293, 281.628707],
+      [283.442336, 284.504671],
+      [285.784603, 288.344331],
+      [292.678912, 293.510227],
+      [295.626667, 296.683175],
+      [304.194354, 304.92771],
+      [309.147619, 309.849546],
+      [310.620272, 311.570431],
+      [14242.250023, 14243.277188],
+      [14247.993243, 14248.831633],
+      [14257.300862, 14258.426825],
+      [14259.880295, 14260.807823],
+      [14261.817823, 14266.019524],
+      [14266.438186, 14267.52746],
+      [14269.738073, 14272.31068],
+      [14284.38127, 14285.450612],
+      [14290.156349, 14291.19737],
+      [14295.852404, 14296.899819],
+      [33738.156916, 33739.120159],
+      [33744.503356, 33745.636463],
+      [33748.275442, 33749.224014],
+      [33750.496667, 33751.281361],
+      [33752.470023, 33753.649773],
+      [33754.346576, 33755.693605],
+      [33758.27898, 33759.118889],
+      [33762.723129, 33763.445079],
+      [33763.982472, 33765.032245],
+      [33766.545465, 33770.081905],
+      [33797.546009, 33802.766871]
+    ]
+    // Fake ffmpeg with input seeking: timestamps restart at 0 at the seek point, a pause cut by the window is clipped
+    const seekDetect = async ({ startSec, durationSec }) => {
+      const lines = []
+      for (const [s, e] of realPauses) {
+        const ls = Math.max(0, s - startSec)
+        const le = Math.min(durationSec, e - startSec)
+        if (le <= 0 || ls >= durationSec) continue
+        lines.push(`[Parsed_silencedetect_0 @ 0x1] silence_start: ${ls.toFixed(6)}`)
+        if (e - startSec <= durationSec) lines.push(`[Parsed_silencedetect_0 @ 0x1] silence_end: ${le.toFixed(6)} | silence_duration: ${(le - ls).toFixed(6)}`)
+      }
+      return { lines }
+    }
+
+    it('places every start the same distance before its pause end at the start, middle and end of the book', async () => {
+      // QA input: published chapter marks + 3 s
+      const starts = [0, 280.62, 14267.15, 33773.16]
+      const result = await run({
+        timeline: longTimeline,
+        T: LONG_T,
+        chapters: starts.map((start, i) => ({ id: i, start })),
+        detect: seekDetect
+      })
+      expect(result.complete).to.equal(true)
+      const expected = [
+        [275.947642, 280.147506],
+        [14261.817823, 14266.019524],
+        [33766.545465, 33770.081905]
+      ]
+      expected.forEach(([s, e], k) => {
+        const chapter = result.chapters[k + 1]
+        expect(chapter.pause.start, `chapter ${k + 1} pause start`).to.be.closeTo(s, 0.001)
+        expect(chapter.pause.end, `chapter ${k + 1} pause end`).to.be.closeTo(e, 0.001)
+        // No position-dependent offset: always leadSec before the pause end, wherever the window was seeked to
+        expect(chapter.proposedStart, `chapter ${k + 1} start`).to.be.closeTo(e - chapterSnap.DEFAULT_OPTIONS.leadSec, 0.001)
+      })
+    })
+  })
 })
