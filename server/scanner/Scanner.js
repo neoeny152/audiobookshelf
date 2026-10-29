@@ -2,6 +2,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 const { getTitleIgnorePrefix } = require('../utils/index')
+const { namesMatch, dedupeNames, dedupeSeries } = require('../utils/nameMatching')
 
 // Utils
 const { findMatchingEpisodesInFeed, getPodcastFeed } = require('../utils/podcastUtils')
@@ -25,7 +26,26 @@ const TaskManager = require('../managers/TaskManager')
  */
 
 class Scanner {
-  constructor() {}
+  constructor() {
+    /**
+     * Quick match author/series updates run one at a time. Parallel matches (same book from
+     * two requests, or two books with the same new author/series) otherwise race between
+     * the name lookup and the insert and create duplicates (#5215).
+     * @type {Promise<any>}
+     */
+    this.bookLinkQueue = Promise.resolve()
+  }
+
+  /**
+   * @template T
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  runBookLinkUpdate(fn) {
+    const run = this.bookLinkQueue.then(fn, fn)
+    this.bookLinkQueue = run.catch(() => {})
+    return run
+  }
 
   /**
    *
@@ -73,7 +93,7 @@ class Scanner {
         }
       }
 
-      const bookBuildUpdateData = await this.quickMatchBookBuildUpdatePayload(apiRouterCtx, libraryItem, matchData, options)
+      const bookBuildUpdateData = await this.runBookLinkUpdate(() => this.quickMatchBookBuildUpdatePayload(apiRouterCtx, libraryItem, matchData, options))
       updatePayload = bookBuildUpdateData.updatePayload
       if (bookBuildUpdateData.hasSeriesUpdates || bookBuildUpdateData.hasAuthorUpdates) {
         hasUpdated = true
@@ -240,14 +260,13 @@ class Scanner {
     let hasAuthorUpdates = false
     if (matchData.author && (!libraryItem.media.authorName || options.overrideDetails)) {
       if (!Array.isArray(matchData.author)) {
-        matchData.author = matchData.author
-          .split(',')
-          .map((au) => au.trim())
-          .filter((au) => !!au)
+        matchData.author = matchData.author.split(',')
       }
+      // Duplicate names ("Foo, foo") would insert the same bookAuthor twice (#2650 #5319)
+      matchData.author = dedupeNames(matchData.author)
       const authorIdsRemoved = []
       for (const authorName of matchData.author) {
-        const existingAuthor = libraryItem.media.authors.find((a) => a.name.toLowerCase() === authorName.toLowerCase())
+        const existingAuthor = libraryItem.media.authors.find((a) => namesMatch(a.name, authorName))
         if (!existingAuthor) {
           let author = await Database.authorModel.getByNameAndLibrary(authorName, libraryItem.libraryId)
           if (!author) {
@@ -260,27 +279,24 @@ class Scanner {
             // Update filter data
             Database.addAuthorToFilterData(libraryItem.libraryId, author.name, author.id)
           }
-          await Database.bookAuthorModel
-            .create({
-              authorId: author.id,
-              bookId: libraryItem.media.id
-            })
-            .then(() => {
-              Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Added author "${author.name}" to "${libraryItem.media.title}"`)
-              libraryItem.media.authors.push(author)
-              hasAuthorUpdates = true
-            })
-        }
-        const authorsRemoved = libraryItem.media.authors.filter((a) => !matchData.author.find((ma) => ma.toLowerCase() === a.name.toLowerCase()))
-        if (authorsRemoved.length) {
-          for (const author of authorsRemoved) {
-            await Database.bookAuthorModel.destroy({ where: { authorId: author.id, bookId: libraryItem.media.id } })
-            libraryItem.media.authors = libraryItem.media.authors.filter((a) => a.id !== author.id)
-            authorIdsRemoved.push(author.id)
-            Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Removed author "${author.name}" from "${libraryItem.media.title}"`)
+          if (!libraryItem.media.authors.some((a) => a.id === author.id)) {
+            // findOrCreate: a concurrent match of the same book may have added it already (#5215)
+            await Database.bookAuthorModel.findOrCreateLink(libraryItem.media.id, author.id)
+            Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Added author "${author.name}" to "${libraryItem.media.title}"`)
+            libraryItem.media.authors.push(author)
+            hasAuthorUpdates = true
           }
-          hasAuthorUpdates = true
         }
+      }
+      const authorsRemoved = libraryItem.media.authors.filter((a) => !matchData.author.some((ma) => namesMatch(ma, a.name)))
+      if (authorsRemoved.length) {
+        for (const author of authorsRemoved) {
+          await Database.bookAuthorModel.destroy({ where: { authorId: author.id, bookId: libraryItem.media.id } })
+          libraryItem.media.authors = libraryItem.media.authors.filter((a) => a.id !== author.id)
+          authorIdsRemoved.push(author.id)
+          Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Removed author "${author.name}" from "${libraryItem.media.title}"`)
+        }
+        hasAuthorUpdates = true
       }
 
       // For all authors removed from book, check if they are empty now and should be removed
@@ -293,9 +309,14 @@ class Scanner {
     let hasSeriesUpdates = false
     if (matchData.series && (!libraryItem.media.seriesName || options.overrideDetails)) {
       if (!Array.isArray(matchData.series)) matchData.series = [{ series: matchData.series, sequence: matchData.sequence }]
+      // Duplicate names would insert the same bookSeries twice (#5215)
+      matchData.series = dedupeSeries(
+        matchData.series.filter((ms) => typeof ms?.series === 'string'),
+        'series'
+      )
       const seriesIdsRemoved = []
       for (const seriesMatchItem of matchData.series) {
-        const existingSeries = libraryItem.media.series.find((s) => s.name.toLowerCase() === seriesMatchItem.series.toLowerCase())
+        const existingSeries = libraryItem.media.series.find((s) => namesMatch(s.name, seriesMatchItem.series))
         if (existingSeries) {
           if (existingSeries.bookSeries.sequence !== seriesMatchItem.sequence) {
             existingSeries.bookSeries.sequence = seriesMatchItem.sequence
@@ -306,35 +327,45 @@ class Scanner {
         } else {
           let seriesItem = await Database.seriesModel.getByNameAndLibrary(seriesMatchItem.series, libraryItem.libraryId)
           if (!seriesItem) {
-            seriesItem = await Database.seriesModel.create({
-              name: seriesMatchItem.series,
-              nameIgnorePrefix: getTitleIgnorePrefix(seriesMatchItem.series),
-              libraryId: libraryItem.libraryId
-            })
-            // Update filter data
-            Database.addSeriesToFilterData(libraryItem.libraryId, seriesItem.name, seriesItem.id)
-            SocketAuthority.emitter('series_added', seriesItem.toOldJSON())
+            try {
+              seriesItem = await Database.seriesModel.create({
+                name: seriesMatchItem.series,
+                nameIgnorePrefix: getTitleIgnorePrefix(seriesMatchItem.series),
+                libraryId: libraryItem.libraryId
+              })
+              // Update filter data
+              Database.addSeriesToFilterData(libraryItem.libraryId, seriesItem.name, seriesItem.id)
+              SocketAuthority.emitter('series_added', seriesItem.toOldJSON())
+            } catch (error) {
+              // A concurrent match created the same series (unique name per library)
+              seriesItem = await Database.seriesModel.getByNameAndLibrary(seriesMatchItem.series, libraryItem.libraryId)
+              if (!seriesItem) throw error
+            }
           }
-          const bookSeries = await Database.bookSeriesModel.create({
-            seriesId: seriesItem.id,
-            bookId: libraryItem.media.id,
-            sequence: seriesMatchItem.sequence
-          })
-          seriesItem.bookSeries = bookSeries
-          libraryItem.media.series.push(seriesItem)
-          Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Added series "${seriesItem.name}" to "${libraryItem.media.title}"`)
-          hasSeriesUpdates = true
-        }
-        const seriesRemoved = libraryItem.media.series.filter((s) => !matchData.series.find((ms) => ms.series.toLowerCase() === s.name.toLowerCase()))
-        if (seriesRemoved.length) {
-          for (const series of seriesRemoved) {
-            await series.bookSeries.destroy()
-            libraryItem.media.series = libraryItem.media.series.filter((s) => s.id !== series.id)
-            seriesIdsRemoved.push(series.id)
-            Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Removed series "${series.name}" from "${libraryItem.media.title}"`)
+          const existingLink = libraryItem.media.series.find((s) => s.id === seriesItem.id)
+          if (!existingLink) {
+            // findOrCreate: a concurrent match of the same book may have added it already (#5215)
+            const { bookSeries, created } = await Database.bookSeriesModel.findOrCreateLink(libraryItem.media.id, seriesItem.id, seriesMatchItem.sequence)
+            if (!created && bookSeries.sequence !== seriesMatchItem.sequence) {
+              bookSeries.sequence = seriesMatchItem.sequence
+              await bookSeries.save()
+            }
+            seriesItem.bookSeries = bookSeries
+            libraryItem.media.series.push(seriesItem)
+            Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Added series "${seriesItem.name}" to "${libraryItem.media.title}"`)
+            hasSeriesUpdates = true
           }
-          hasSeriesUpdates = true
         }
+      }
+      const seriesRemoved = libraryItem.media.series.filter((s) => !matchData.series.some((ms) => namesMatch(ms.series, s.name)))
+      if (seriesRemoved.length) {
+        for (const series of seriesRemoved) {
+          await series.bookSeries.destroy()
+          libraryItem.media.series = libraryItem.media.series.filter((s) => s.id !== series.id)
+          seriesIdsRemoved.push(series.id)
+          Logger.info(`[Scanner] quickMatchBookBuildUpdatePayload: Removed series "${series.name}" from "${libraryItem.media.title}"`)
+        }
+        hasSeriesUpdates = true
       }
 
       // For all series removed from book, check if it is empty now and should be removed

@@ -1,4 +1,4 @@
-const { DataTypes, Model, fn, col } = require('sequelize')
+const { DataTypes, Model, fn, col, UniqueConstraintError } = require('sequelize')
 
 class BookAuthor extends Model {
   constructor(values, options) {
@@ -12,6 +12,31 @@ class BookAuthor extends Model {
     this.authorId
     /** @type {Date} */
     this.createdAt
+  }
+
+  /**
+   * Link an author to a book unless the link already exists.
+   * Safe against duplicate names in the source and concurrent requests (#5319 #5215):
+   * the UNIQUE(bookId, authorId) constraint is never hit as an unhandled error.
+   *
+   * @param {string} bookId
+   * @param {string} authorId
+   * @param {Object} [extraValues] e.g. createdAt to keep the author order
+   * @returns {Promise<{ bookAuthor: BookAuthor, created: boolean }>}
+   */
+  static async findOrCreateLink(bookId, authorId, extraValues = {}) {
+    const existing = await this.findOne({ where: { bookId, authorId } })
+    if (existing) return { bookAuthor: existing, created: false }
+    try {
+      const bookAuthor = await this.create({ ...extraValues, bookId, authorId })
+      return { bookAuthor, created: true }
+    } catch (error) {
+      if (!(error instanceof UniqueConstraintError)) throw error
+      // Created by a concurrent request between the lookup and the insert
+      const bookAuthor = await this.findOne({ where: { bookId, authorId } })
+      if (!bookAuthor) throw error
+      return { bookAuthor, created: false }
+    }
   }
 
   static removeByIds(authorId = null, bookId = null) {

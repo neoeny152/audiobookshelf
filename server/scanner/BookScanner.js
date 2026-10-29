@@ -3,6 +3,7 @@ const Path = require('path')
 const sequelize = require('sequelize')
 const { LogLevel } = require('../utils/constants')
 const { getTitleIgnorePrefix, areEquivalent } = require('../utils/index')
+const { namesMatch, dedupeNames, dedupeSeries } = require('../utils/nameMatching')
 const parseNameString = require('../utils/parsers/parseNameString')
 const parseEbookMetadata = require('../utils/parsers/parseEbookMetadata')
 const globals = require('../utils/globals')
@@ -222,14 +223,15 @@ class BookScanner {
 
       if (key === 'authors') {
         // Check for authors added
+        const authorIdsOnBook = new Set(media.authors.map((au) => au.id))
         for (const authorName of bookMetadata.authors) {
-          if (!media.authors.some((au) => au.name === authorName)) {
+          if (!media.authors.some((au) => namesMatch(au.name, authorName))) {
             const existingAuthorId = await Database.getAuthorIdByName(libraryItemData.libraryId, authorName)
             if (existingAuthorId) {
-              await Database.bookAuthorModel.create({
-                bookId: media.id,
-                authorId: existingAuthorId
-              })
+              // Name resolved to an author already on this book (other spelling) - nothing to add (#5319)
+              if (authorIdsOnBook.has(existingAuthorId)) continue
+              authorIdsOnBook.add(existingAuthorId)
+              await Database.bookAuthorModel.findOrCreateLink(media.id, existingAuthorId)
               libraryScan.authorsNumBooksChangedIds.add(existingAuthorId)
               libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" added author "${authorName}"`)
               authorsUpdated = true
@@ -240,6 +242,7 @@ class BookScanner {
                 libraryId: libraryItemData.libraryId
               })
               await media.addAuthor(newAuthor)
+              authorIdsOnBook.add(newAuthor.id)
               Database.addAuthorToFilterData(libraryItemData.libraryId, newAuthor.name, newAuthor.id)
               SocketAuthority.emitter('author_added', newAuthor.toOldJSON())
               libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" added new author "${authorName}"`)
@@ -249,7 +252,7 @@ class BookScanner {
         }
         // Check for authors removed
         for (const author of media.authors) {
-          if (!bookMetadata.authors.includes(author.name)) {
+          if (!bookMetadata.authors.some((authorName) => namesMatch(authorName, author.name))) {
             await author.bookAuthor.destroy()
             libraryScan.authorsNumBooksChangedIds.add(author.id)
             libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" removed author "${author.name}"`)
@@ -259,16 +262,16 @@ class BookScanner {
         }
       } else if (key === 'series') {
         // Check for series added
+        const seriesIdsOnBook = new Set(media.series.map((se) => se.id))
         for (const seriesObj of bookMetadata.series) {
-          const existingBookSeries = media.series.find((se) => se.name === seriesObj.name)
+          const existingBookSeries = media.series.find((se) => namesMatch(se.name, seriesObj.name))
           if (!existingBookSeries) {
             const existingSeriesId = await Database.getSeriesIdByName(libraryItemData.libraryId, seriesObj.name)
             if (existingSeriesId) {
-              await Database.bookSeriesModel.create({
-                bookId: media.id,
-                seriesId: existingSeriesId,
-                sequence: seriesObj.sequence
-              })
+              // Name resolved to a series already on this book (other spelling) - nothing to add (#5215)
+              if (seriesIdsOnBook.has(existingSeriesId)) continue
+              seriesIdsOnBook.add(existingSeriesId)
+              await Database.bookSeriesModel.findOrCreateLink(media.id, existingSeriesId, seriesObj.sequence)
               libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" added series "${seriesObj.name}"${seriesObj.sequence ? ` with sequence "${seriesObj.sequence}"` : ''}`)
               seriesUpdated = true
             } else {
@@ -278,6 +281,7 @@ class BookScanner {
                 libraryId: libraryItemData.libraryId
               })
               await media.addSeries(newSeries, { through: { sequence: seriesObj.sequence } })
+              seriesIdsOnBook.add(newSeries.id)
               Database.addSeriesToFilterData(libraryItemData.libraryId, newSeries.name, newSeries.id)
               libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" added new series "${seriesObj.name}"${seriesObj.sequence ? ` with sequence "${seriesObj.sequence}"` : ''}`)
               seriesUpdated = true
@@ -291,7 +295,7 @@ class BookScanner {
         }
         // Check for series removed
         for (const series of media.series) {
-          if (!bookMetadata.series.some((se) => se.name === series.name)) {
+          if (!bookMetadata.series.some((se) => namesMatch(se.name, series.name))) {
             await series.bookSeries.destroy()
             libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" removed series "${series.name}"`)
             seriesUpdated = true
@@ -483,10 +487,15 @@ class BookScanner {
 
     const createdAtTimestamp = new Date().getTime()
     const newAuthorNames = new Set()
+    // Several names can resolve to one existing author ("max; MAX" while "Max" exists).
+    // Each author is linked once, or the UNIQUE(bookId, authorId) insert aborts the item (#5319)
+    const linkedAuthorIds = new Set()
     if (bookMetadata.authors.length) {
       for (const authorName of bookMetadata.authors) {
         const matchingAuthorId = await Database.getAuthorIdByName(libraryItemData.libraryId, authorName)
         if (matchingAuthorId) {
+          if (linkedAuthorIds.has(matchingAuthorId)) continue
+          linkedAuthorIds.add(matchingAuthorId)
           bookObject.bookAuthors.push({
             authorId: matchingAuthorId
           })
@@ -507,11 +516,14 @@ class BookScanner {
         }
       }
     }
+    const linkedSeriesIds = new Set()
     if (bookMetadata.series.length) {
       for (const seriesObj of bookMetadata.series) {
         if (!seriesObj.name) continue
         const matchingSeriesId = await Database.getSeriesIdByName(libraryItemData.libraryId, seriesObj.name)
         if (matchingSeriesId) {
+          if (linkedSeriesIds.has(matchingSeriesId)) continue
+          linkedSeriesIds.add(matchingSeriesId)
           bookObject.bookSeries.push({
             seriesId: matchingSeriesId,
             sequence: seriesObj.sequence
@@ -697,6 +709,11 @@ class BookScanner {
       const coverMatch = libraryItemData.imageLibraryFiles.find((iFile) => /\/cover\.[^.\/]*$/.test(iFile.metadata.path))
       bookMetadata.coverPath = coverMatch?.metadata.path || libraryItemData.imageLibraryFiles[0].metadata.path
     }
+
+    // Sources can repeat a name ("Author: Foo, Foo" in .nfo, "max; MAX" in tags).
+    // Keep each author and series once (case-insensitive, first spelling wins) (#2650 #5319)
+    bookMetadata.authors = dedupeNames(bookMetadata.authors)
+    bookMetadata.series = dedupeSeries(bookMetadata.series)
 
     bookMetadata.titleIgnorePrefix = getTitleIgnorePrefix(bookMetadata.title)
 

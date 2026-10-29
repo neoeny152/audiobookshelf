@@ -1,6 +1,7 @@
 const { DataTypes, Model } = require('sequelize')
 const Logger = require('../Logger')
 const { getTitlePrefixAtEnd, getTitleIgnorePrefix } = require('../utils')
+const { dedupeNames, dedupeSeries } = require('../utils/nameMatching')
 const parseNameString = require('../utils/parsers/parseNameString')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 const libraryItemsBookFilters = require('../utils/queries/libraryItemsBookFilters')
@@ -469,6 +470,8 @@ class Book extends Model {
     /** @type {typeof import('./BookAuthor')} */
     const bookAuthorModel = this.sequelize.models.bookAuthor
 
+    // "Foo" and "foo" in one request would link the same author twice (#5215)
+    authors = dedupeNames(authors)
     const authorsCleaned = authors.map((a) => a.toLowerCase()).filter((a) => a)
     const authorsRemoved = this.authors.filter((au) => !authorsCleaned.includes(au.name.toLowerCase()))
     const newAuthorNames = authors.filter((a) => !this.authors.some((au) => au.name.toLowerCase() === a.toLowerCase()))
@@ -485,7 +488,8 @@ class Book extends Model {
     const authorsAdded = []
     for (const authorName of newAuthorNames) {
       const { author, created } = await authorModel.findOrCreateByNameAndLibrary(authorName, libraryId)
-      await bookAuthorModel.create({ bookId: this.id, authorId: author.id })
+      if (this.authors.some((au) => au.id === author.id)) continue
+      await bookAuthorModel.findOrCreateLink(this.id, author.id)
       if (created) {
         SocketAuthority.emitter('author_added', author.toOldJSON())
       } else {
@@ -524,6 +528,8 @@ class Book extends Model {
     /** @type {typeof import('./BookSeries')} */
     const bookSeriesModel = this.sequelize.models.bookSeries
 
+    // "Foo" and "foo" in one request would link the same series twice (#5215)
+    seriesObjects = dedupeSeries(seriesObjects)
     const seriesNamesCleaned = seriesObjects.map((se) => se.name.toLowerCase())
     const seriesRemoved = this.series.filter((se) => !seriesNamesCleaned.includes(se.name.toLowerCase()))
     const seriesAdded = []
@@ -541,7 +547,13 @@ class Book extends Model {
         }
       } else {
         const series = await seriesModel.findOrCreateByNameAndLibrary(seriesObj.name, libraryId)
-        series.bookSeries = await bookSeriesModel.create({ bookId: this.id, seriesId: series.id, sequence: seriesObjSequence })
+        if (this.series.some((se) => se.id === series.id)) continue
+        const { bookSeries, created } = await bookSeriesModel.findOrCreateLink(this.id, series.id, seriesObjSequence)
+        if (!created && bookSeries.sequence !== seriesObjSequence) {
+          bookSeries.sequence = seriesObjSequence
+          await bookSeries.save()
+        }
+        series.bookSeries = bookSeries
         this.series.push(series)
         seriesAdded.push(series)
         hasUpdates = true
