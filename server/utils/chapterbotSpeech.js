@@ -258,7 +258,15 @@ const VOWEL_RE = /^[aeiouy]$/
  * ("Over" is not heard in "Ever since", "End Game" not in "And game on").
  */
 const FUZZY_NEVER_SHORT = new Set(
-  'add aid ail all and any are arm art ask ate awe aye eat ebb egg eke elf elk elm end era ere eve ewe eye ill imp inn ion ire its oak oar oat odd off oil old one opt orb ore our out owe own urn use able ache acre aged ages ahead aims airs also ally ants away awry each earl ears ease east easy eats echo edge else ends even ever evil exit eyes idea idle inch info into iron isle item oath obey odds oily okay once ones only onto open oral ours outs oven over owed owes owns undo unit upon urge used user uses'.split(' ')
+  [
+    'add aid ail all and any are arm art ask ate awe aye eat ebb egg eke elf elk elm end era ere eve ewe eye ill imp inn',
+    'ion ire its oak oar oat odd off oil old one opt orb ore our out owe own urn use able ache acre aged ages aims airs',
+    'also ally ants away awry each earl ears ease east easy eats echo edge else ends even ever evil exit eyes idea idle',
+    'inch info into iron isle item oath obey odds oily okay once ones only onto open oral ours outs oven over owed owes',
+    'owns undo unit upon urge used user uses'
+  ]
+    .join(' ')
+    .split(' ')
 )
 
 /**
