@@ -341,7 +341,7 @@ class LibraryScanner {
     const groups = new Map()
     for (const libraryItem of libraryItems) {
       if (!libraryItem.path || !libraryItem.ino) continue
-      const key = `${libraryItem.path} ${libraryItem.ino}`
+      const key = `${libraryItem.path}\u0000${libraryItem.ino}`
       if (!groups.has(key)) groups.set(key, [])
       groups.get(key).push(libraryItem)
     }
