@@ -2,13 +2,15 @@
  * Chapter snap: pure logic (no I/O).
  *
  * Moves chapter starts onto real pauses in the audio. Ported from the chapterbot analyze.py rules:
- * - a start that is already inside a pause (within SLACK) stays where it is
+ * - a start that is already inside a pause (within SLACK) stays in that pause, anchored `leadSec` before its end like a
+ *   moved start (`anchorInsidePause`, default on; off = it stays exactly where it is)
  * - otherwise it moves to `leadSec` before the end of the pause that minimises
  *   |pause.end - t| - BONUS_WEIGHT * min(pause length, BONUS_CAP), among pauses that end within the window
  *   and keep the chapter between its neighbours' original starts
- * - heading look-back: chapter marks often land 2-6 s late, just after the spoken "Chapter N", so either rule above
- *   picks the short pause after the heading. A clearly longer pause (>= HEADING_RATIO x and >= HEADING_MIN_EXTRA s
- *   longer) that ends at most `headingLookbackSec` before the chosen pause starts wins instead
+ * - heading look-back: chapter marks often land 2-10 s late, just after the spoken "Chapter N" (and its subtitle), so
+ *   either rule above picks a short pause after the heading. A clearly longer pause (>= HEADING_RATIO x and
+ *   >= HEADING_MIN_EXTRA s longer) that ends at most `headingLookbackSec` (default 10) before the chosen pause starts
+ *   wins instead: the pause between chapters is usually the longest one around
  *
  * The caller (chapterSnapRunner) does the silence detection and hands parsed pauses to these functions.
  */
@@ -45,8 +47,9 @@ const DEFAULT_OPTIONS = Object.freeze({
   minSilenceSec: 0.7,
   noiseDb: -38,
   leadSec: 0.25,
-  headingLookbackSec: 3,
-  snapToFileStart: false
+  headingLookbackSec: 10,
+  snapToFileStart: false,
+  anchorInsidePause: true
 })
 
 const NUMERIC_OPTION_BOUNDS = Object.freeze({
@@ -54,7 +57,7 @@ const NUMERIC_OPTION_BOUNDS = Object.freeze({
   minSilenceSec: [0.2, 5],
   noiseDb: [-80, -20],
   leadSec: [0, 1],
-  headingLookbackSec: [0, 6]
+  headingLookbackSec: [0, 15]
 })
 
 const REASONS = Object.freeze({
@@ -109,6 +112,7 @@ function clamp(value, min, max) {
  * @property {number} leadSec
  * @property {number} headingLookbackSec - how far before the chosen pause a longer pause may sit to win (0 = off)
  * @property {boolean} snapToFileStart
+ * @property {boolean} anchorInsidePause - move a start that is already inside a pause to leadSec before its end
  * @property {boolean} [verify] - run the chapterbot speech check (only present when true)
  */
 
@@ -137,9 +141,10 @@ function parseOptions(raw, { verifyAvailable = false } = {}) {
     options[key] = clamp(value, min, max)
   }
 
-  if ('snapToFileStart' in raw && raw.snapToFileStart !== undefined) {
-    if (typeof raw.snapToFileStart !== 'boolean') throw new SnapInputError('options.snapToFileStart must be a boolean')
-    options.snapToFileStart = raw.snapToFileStart
+  for (const key of ['snapToFileStart', 'anchorInsidePause']) {
+    if (!(key in raw) || raw[key] === undefined) continue
+    if (typeof raw[key] !== 'boolean') throw new SnapInputError(`options.${key} must be a boolean`)
+    options[key] = raw[key]
   }
 
   if ('verify' in raw && raw.verify !== undefined) {
@@ -627,6 +632,16 @@ function snapOne({ index, t, pauses, timeline, options, bounds, skipReason = nul
   if (inside) {
     proposal.reason = REASONS.INSIDE_PAUSE
     proposal.pause = inside
+    // Anchor on the same spot of the pause as a moved start (leadSec before speech resumes), so an early start in the
+    // pause before the chapter and a start already placed in it end up in the same place. The original start stays
+    // the fallback for the order pass. A pause end cut by the analysed window is not a real edge: keep the start.
+    if (options.anchorInsidePause && !inside.endClipped) {
+      const target = pauseTarget(inside, options.leadSec)
+      if (inBounds(target, bounds) && Math.abs(target - t) > EPS) {
+        proposal.proposedStart = target
+        proposal.alternatives = [{ pause: inside, target: t, score: 0 }]
+      }
+    }
     return applyHeadingLookback(proposal, pauses, options)
   }
 
@@ -844,7 +859,8 @@ function buildResponse({ libraryItemId, T, options, chapters, itemChapters, prop
       noiseDb: options.noiseDb,
       leadSec: options.leadSec,
       headingLookbackSec: options.headingLookbackSec,
-      snapToFileStart: options.snapToFileStart
+      snapToFileStart: options.snapToFileStart,
+      anchorInsidePause: options.anchorInsidePause
     },
     stats: {
       ...stats,
