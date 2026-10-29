@@ -113,7 +113,8 @@ class AutoPipelineController {
 
   /**
    * DELETE: /api/items/:id/pipeline
-   * Remove the item from the queue or dismiss its result. A running EPUB job is not cancelled.
+   * Remove the item from the queue or dismiss its result. A running EPUB job is not cancelled. 409 while the worker is on
+   * the item.
    */
   async dismissItemPipeline(req, res) {
     if (!guard(req, res)) return

@@ -453,15 +453,18 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   /**
-   * Remove an item from the queue, or dismiss its result. A running EPUB job is not cancelled.
+   * Remove an item from the queue, or dismiss its result. A running EPUB job is not cancelled. Not while the worker is
+   * on the item: the running step would still change the book after the state is gone.
    *
    * @param {string} libraryItemId
    * @returns {Promise<boolean>} false when the item has no state
+   * @throws {PipelineError} 409 while the item is being processed
    */
   async dismiss(libraryItemId) {
     this.assertEnabled()
     const state = this.states.get(libraryItemId)
     if (!state) return false
+    if (this.current === libraryItemId) throw new PipelineError(409, 'The item is being processed right now')
     this.states.delete(libraryItemId)
     await this.store.removeItem(libraryItemId)
     this.log(state, 'dismissed', state.status)
@@ -1253,7 +1256,7 @@ class AutoPipelineManager extends EventEmitter {
     })
     const state = this.states.get(libraryItem.id)
     if (state && state.chapters) {
-      state.chapters = { ...state.chapters, result: 'restored', restoredFrom: name, appliedHash: null }
+      state.chapters = { ...state.chapters, result: 'restored', restoredFrom: name, appliedHash: null, applied: false }
       state.reason = `chapters restored from ${name}`
       await this.save(state)
     }

@@ -951,12 +951,29 @@ describe('AutoPipelineManager', () => {
       const backups = await manager.listBackups(id)
       expect(backups).to.have.length(2)
       expect(backups.find((b) => b.name === result.backup)).to.include({ chapters: 5, source: 'restore' })
-      expect(stateOf(id).chapters).to.include({ result: 'restored', appliedHash: null })
+      expect(stateOf(id).chapters).to.include({ result: 'restored', appliedHash: null, applied: false })
 
       expect(await manager.dismiss(id)).to.equal(true)
       expect(manager.states.has(id)).to.equal(false)
       expect(await manager.listBackups(id)).to.have.length(2)
       expect(await manager.dismiss(id)).to.equal(false)
+    })
+
+    it('dismiss refuses while the worker is on the item', async () => {
+      const id = await createItem()
+      await addItems([id])
+      manager.current = id
+      try {
+        await manager.dismiss(id)
+        expect.fail('dismiss should throw')
+      } catch (error) {
+        expect(error).to.be.instanceOf(AutoPipelineManager.PipelineError)
+        expect(error.status).to.equal(409)
+      } finally {
+        manager.current = null
+      }
+      expect(manager.states.has(id)).to.equal(true)
+      expect(await manager.dismiss(id)).to.equal(true)
     })
 
     it('runLibrary queues unprocessed items, or all of them', async () => {
