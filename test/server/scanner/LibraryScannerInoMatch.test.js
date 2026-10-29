@@ -43,10 +43,11 @@ describe('LibraryScanner inode match guard', () => {
     }
   }
 
-  async function createItem({ relPath, ino, files, isFile = false }) {
+  async function createItem({ id, relPath, ino, files, isFile = false }) {
     const path = `${ROOT}/${relPath}`
-    const book = await Database.bookModel.create({ title: relPath, audioFiles: [], tags: [], narrators: [], genres: [], chapters: [] })
+    const book = await Database.bookModel.create({ ...(id ? { id } : {}), title: relPath, audioFiles: [], tags: [], narrators: [], genres: [], chapters: [] })
     return Database.libraryItemModel.create({
+      ...(id ? { id } : {}),
       path,
       relPath,
       ino: String(ino),
@@ -190,11 +191,16 @@ describe('LibraryScanner inode match guard', () => {
     })
 
     it('picks the colliding candidate that passes the guard, not the first one', async () => {
-      await createItem({ relPath: 'Author/Book A', ino: 100, files: [['a.mp3', 1000, 101]] })
-      const bookC = await createItem({ relPath: 'Author/Book C', ino: 100, files: [['c.mp3', 3000, 301]] })
+      // Book C sits in the middle by insert order, item/book id and title, with a non-matching item on each side,
+      // so a plain lookup by inode returns a wrong item first whichever index SQLite walks
+      await createItem({ id: 'ffffffff-0000-4000-8000-000000000000', relPath: 'Author/Book A', ino: 100, files: [['a.mp3', 1000, 101]] })
+      const bookC = await createItem({ id: '88888888-0000-4000-8000-000000000000', relPath: 'Author/Book C', ino: 100, files: [['c.mp3', 3000, 301]] })
+      await createItem({ id: '00000000-0000-4000-8000-000000000000', relPath: 'Author/Book D', ino: 100, files: [['d.mp3', 4000, 401]] })
       useFakeDisk({
         [`${ROOT}/Author/Book A`]: { ino: 100, dir: true },
         [`${ROOT}/Author/Book A/a.mp3`]: { ino: 101, size: 1000 },
+        [`${ROOT}/Author/Book D`]: { ino: 100, dir: true },
+        [`${ROOT}/Author/Book D/d.mp3`]: { ino: 401, size: 4000 },
         [`${ROOT}/Author/Book C (Unabridged)`]: { ino: 100, dir: true },
         [`${ROOT}/Author/Book C (Unabridged)/c.mp3`]: { ino: 301, size: 3000 }
       })
