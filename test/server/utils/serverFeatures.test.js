@@ -1,6 +1,6 @@
 const { expect } = require('chai')
 
-const { SERVER_FEATURES, OPTIONAL_FEATURES, buildStatusPayload } = require('../../../server/utils/serverFeatures')
+const { SERVER_FEATURES, OPTIONAL_FEATURES, availableOptionalFeatures, buildStatusPayload } = require('../../../server/utils/serverFeatures')
 const { version } = require('../../../package.json')
 const ApiRouter = require('../../../server/routers/ApiRouter')
 const Auth = require('../../../server/Auth')
@@ -47,6 +47,15 @@ describe('serverFeatures', () => {
     expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'chapterbotVerify', 'chapterbotEpub'])
   })
 
+  it('lists chapterbotEpubCurrent with chapterbotEpub and autoPipeline only behind its gate', () => {
+    expect(availableOptionalFeatures([])).to.deep.equal([])
+    expect(availableOptionalFeatures(['chapterbotVerify'])).to.deep.equal(['chapterbotVerify'])
+    expect(availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'])).to.deep.equal(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent'])
+    expect(availableOptionalFeatures([], { autoPipeline: true })).to.deep.equal(['autoPipeline'])
+    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'], { autoPipeline: true })).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'autoPipeline'])
+    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures([], { autoPipeline: false })).serverFeatures).to.not.include('autoPipeline')
+  })
+
   it('every advertised feature has its routes registered', () => {
     const apiRouter = new ApiRouter({ auth: new Auth(), apiCacheManager: new ApiCacheManager() })
     const routes = apiRouter.router._router.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods).join(',')} ${l.route.path}`)
@@ -55,7 +64,9 @@ describe('serverFeatures', () => {
       libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download'],
       readAlong: ['get /items/:id/ebook/:fileid/readalong'],
       chapterbotVerify: ['post /items/:id/chapters/snap'],
-      chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId']
+      chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId'],
+      chapterbotEpubCurrent: ['get /items/:id/epub'],
+      autoPipeline: ['get /libraries/:id/pipeline', 'post /libraries/:id/pipeline/run', 'get /items/:id/pipeline', 'post /items/:id/pipeline/run', 'delete /items/:id/pipeline', 'get /items/:id/pipeline/proposal', 'post /items/:id/pipeline/proposal/approve', 'post /items/:id/pipeline/proposal/reject', 'get /items/:id/pipeline/backups', 'post /items/:id/pipeline/backups/:name/restore']
     }
     expect(Object.keys(featureRoutes).sort()).to.deep.equal([...SERVER_FEATURES, ...OPTIONAL_FEATURES].sort())
     for (const feature of [...SERVER_FEATURES, ...OPTIONAL_FEATURES]) {

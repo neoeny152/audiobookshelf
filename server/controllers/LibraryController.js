@@ -19,6 +19,8 @@ const Scanner = require('../scanner/Scanner')
 const Database = require('../Database')
 const Watcher = require('../Watcher')
 const RssFeedManager = require('../managers/RssFeedManager')
+const AutoPipelineManager = require('../managers/AutoPipelineManager')
+const { mergeAutoPipelineSettings, normalizeAutoPipelineSettings, AutoPipelineSettingsError } = require('../utils/autoPipeline/settings')
 
 const libraryFilters = require('../utils/queries/libraryFilters')
 const libraryItemsPodcastFilters = require('../utils/queries/libraryItemsPodcastFilters')
@@ -95,6 +97,14 @@ class LibraryController {
               return res.status(400).send('Invalid request. Settings "metadataPrecedence" must be an array')
             }
             newLibraryPayload.settings[key] = [...req.body.settings[key]]
+          } else if (key === 'autoPipeline') {
+            // fork only: validated field by field, merged over the defaults
+            try {
+              newLibraryPayload.settings[key] = mergeAutoPipelineSettings(newLibraryPayload.settings[key], req.body.settings[key])
+            } catch (error) {
+              if (error instanceof AutoPipelineSettingsError) return res.status(400).send(`Invalid request. ${error.message}`)
+              throw error
+            }
           } else if (key === 'autoScanCronExpression' || key === 'podcastSearchRegion') {
             if (!req.body.settings[key]) continue
             if (typeof req.body.settings[key] !== 'string') {
@@ -300,6 +310,7 @@ class LibraryController {
     let hasUpdates = false
     let hasUpdatedDisableWatcher = false
     let hasUpdatedScanCron = false
+    const previousAutoPipeline = updatedSettings.autoPipeline ? { ...updatedSettings.autoPipeline } : null
     if (req.body.settings) {
       for (const key in req.body.settings) {
         if (!Object.keys(defaultLibrarySettings).includes(key)) {
@@ -315,6 +326,21 @@ class LibraryController {
             hasUpdates = true
             updatedSettings[key] = [...req.body.settings[key]]
             Logger.debug(`[LibraryController] Library "${req.library.name}" updating setting "${key}" to "${updatedSettings[key]}"`)
+          }
+        } else if (key === 'autoPipeline') {
+          // fork only: a partial object is merged over the stored one; each field is validated
+          let merged
+          try {
+            merged = mergeAutoPipelineSettings(normalizeAutoPipelineSettings(updatedSettings[key]), req.body.settings[key])
+          } catch (error) {
+            if (!(error instanceof AutoPipelineSettingsError)) throw error
+            Logger.error(`[LibraryController] Invalid request. ${error.message}`)
+            return res.status(400).send(`Invalid request. ${error.message}`)
+          }
+          if (JSON.stringify(merged) !== JSON.stringify(updatedSettings[key])) {
+            hasUpdates = true
+            updatedSettings[key] = merged
+            Logger.debug(`[LibraryController] Library "${req.library.name}" updating setting "${key}" to ${JSON.stringify(merged)}`)
           }
         } else if (key === 'autoScanCronExpression' || key === 'podcastSearchRegion') {
           if (req.body.settings[key] !== null && typeof req.body.settings[key] !== 'string') {
@@ -504,6 +530,10 @@ class LibraryController {
     }
 
     if (hasUpdates) {
+      if (req.library.settings?.autoPipeline) {
+        await AutoPipelineManager.onLibrarySettingsChanged(req.library, previousAutoPipeline).catch((error) => Logger.error(`[LibraryController] Auto pipeline settings change failed`, error))
+      }
+
       // Only emit to users with access to library
       const userFilter = (user) => {
         return user.checkCanAccessLibrary?.(req.library.id)

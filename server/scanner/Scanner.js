@@ -31,10 +31,11 @@ class Scanner {
      * Quick match author/series updates run one at a time. Parallel matches (same book from
      * two requests, or two books with the same new author/series) otherwise race between
      * the name lookup and the insert and create duplicates (#5215).
-     * Scope: quick match only. Book edits and library scans still create authors/series outside
-     * this queue and can race it; at worst that creates a duplicate Author row, never a crash,
-     * since every join row insert goes through findOrCreateLink. One queue for all libraries:
-     * each step is short DB work, and a SQLite lock fails with SQLITE_BUSY instead of hanging.
+     * Scope: applyBookMatch (quick match and the auto pipeline). Book edits and library scans
+     * still create authors/series outside this queue and can race it; at worst that creates a
+     * duplicate Author row, never a crash, since every join row insert goes through
+     * findOrCreateLink. One queue for all libraries: each step is short DB work, and a SQLite
+     * lock fails with SQLITE_BUSY instead of hanging.
      * @type {Promise<any>}
      */
     this.bookLinkQueue = Promise.resolve()
@@ -83,25 +84,7 @@ class Scanner {
         }
       }
       const matchData = results[0]
-
-      // Update cover if not set OR overrideCover flag
-      if (matchData.cover && (!libraryItem.media.coverPath || options.overrideCover)) {
-        Logger.debug(`[Scanner] Updating cover "${matchData.cover}"`)
-        const coverResult = await CoverManager.downloadCoverFromUrlNew(matchData.cover, libraryItem.id, libraryItem.isFile ? null : libraryItem.path)
-        if (coverResult.error) {
-          Logger.warn(`[Scanner] Match cover "${matchData.cover}" failed to use: ${coverResult.error}`)
-        } else {
-          libraryItem.media.coverPath = coverResult.cover
-          libraryItem.media.changed('coverPath', true) // Cover path may be the same but this forces the update
-          hasUpdated = true
-        }
-      }
-
-      const bookBuildUpdateData = await this.runBookLinkUpdate(() => this.quickMatchBookBuildUpdatePayload(apiRouterCtx, libraryItem, matchData, options))
-      updatePayload = bookBuildUpdateData.updatePayload
-      if (bookBuildUpdateData.hasSeriesUpdates || bookBuildUpdateData.hasAuthorUpdates) {
-        hasUpdated = true
-      }
+      return this.applyBookMatch(apiRouterCtx, libraryItem, matchData, options)
     } else if (libraryItem.isPodcast) {
       // Podcast quick match
       const results = await PodcastFinder.search(searchTitle)
@@ -128,6 +111,58 @@ class Scanner {
       updatePayload = this.quickMatchPodcastBuildUpdatePayload(libraryItem, matchData, options)
     }
 
+    return this.saveMatchUpdates(libraryItem, updatePayload, hasUpdated, options)
+  }
+
+  /**
+   * Apply one book search result to a library item: cover, details, authors and series, with the same rules as quick
+   * match (fill empty fields, or override them with overrideCover/overrideDetails or the server setting
+   * scannerPreferMatchedMetadata). Saves, writes the metadata file and emits item_updated when anything changed.
+   *
+   * Quick match calls it with the first search result; the auto pipeline with the result it scored.
+   *
+   * @param {import('../routers/ApiRouter')} apiRouterCtx
+   * @param {import('../models/LibraryItem')} libraryItem - expanded book item
+   * @param {Object} matchData - a BookFinder.search result
+   * @param {QuickMatchOptions} [options]
+   * @returns {Promise<{updated: boolean, libraryItem: Object}>}
+   */
+  async applyBookMatch(apiRouterCtx, libraryItem, matchData, options = {}) {
+    if (options.overrideCover === undefined && options.overrideDetails === undefined && Database.serverSettings.scannerPreferMatchedMetadata) {
+      options.overrideCover = true
+      options.overrideDetails = true
+    }
+
+    let hasUpdated = false
+
+    // Update cover if not set OR overrideCover flag
+    if (matchData.cover && (!libraryItem.media.coverPath || options.overrideCover)) {
+      Logger.debug(`[Scanner] Updating cover "${matchData.cover}"`)
+      const coverResult = await CoverManager.downloadCoverFromUrlNew(matchData.cover, libraryItem.id, libraryItem.isFile ? null : libraryItem.path)
+      if (coverResult.error) {
+        Logger.warn(`[Scanner] Match cover "${matchData.cover}" failed to use: ${coverResult.error}`)
+      } else {
+        libraryItem.media.coverPath = coverResult.cover
+        libraryItem.media.changed('coverPath', true) // Cover path may be the same but this forces the update
+        hasUpdated = true
+      }
+    }
+
+    const bookBuildUpdateData = await this.runBookLinkUpdate(() => this.quickMatchBookBuildUpdatePayload(apiRouterCtx, libraryItem, matchData, options))
+    if (bookBuildUpdateData.hasSeriesUpdates || bookBuildUpdateData.hasAuthorUpdates) {
+      hasUpdated = true
+    }
+    return this.saveMatchUpdates(libraryItem, bookBuildUpdateData.updatePayload, hasUpdated, options)
+  }
+
+  /**
+   * @param {import('../models/LibraryItem')} libraryItem
+   * @param {Object} updatePayload
+   * @param {boolean} hasUpdated
+   * @param {QuickMatchOptions} options
+   * @returns {Promise<{updated: boolean, libraryItem: Object}>}
+   */
+  async saveMatchUpdates(libraryItem, updatePayload, hasUpdated, options) {
     if (Object.keys(updatePayload).length) {
       Logger.debug('[Scanner] Updating details with payload', updatePayload)
       libraryItem.media.set(updatePayload)

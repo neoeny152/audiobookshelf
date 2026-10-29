@@ -454,10 +454,13 @@ function assessSpeech(title, before, after) {
  * @param {Set<string>} [params.skipReasons] - proposals with these reasons are not checked
  * @param {Object} [params.client] - chapterbotClient (tests)
  * @param {() => number} [params.now]
- * @param {number} [params.deadlineMs]
+ * @param {number} [params.deadlineMs] - budget from now; defaults to the HTTP request budget (VERIFY_DEADLINE_MS)
+ * @param {number} [params.maxStarts] - starts checked per verify(); defaults to the HTTP limit (MAX_VERIFY_STARTS).
+ *   The auto pipeline checks a book in chunks of this size with a longer deadline, so the sidecar sees the same request
+ *   sizes as from the HTTP route.
  * @returns {{verify: Function}}
  */
-function createVerifier({ titles, skipReasons = new Set(), client = chapterbotClient, now = Date.now, deadlineMs = VERIFY_DEADLINE_MS }) {
+function createVerifier({ titles, skipReasons = new Set(), client = chapterbotClient, now = Date.now, deadlineMs = VERIFY_DEADLINE_MS, maxStarts = MAX_VERIFY_STARTS }) {
   // the budget covers the snap that runs before verify(), so it starts now
   const deadlineAt = now() + deadlineMs
   return {
@@ -480,9 +483,9 @@ function createVerifier({ titles, skipReasons = new Set(), client = chapterbotCl
         return { verdicts: [], warnings }
       }
 
-      const checked = wanted.slice(0, MAX_VERIFY_STARTS)
+      const checked = wanted.slice(0, maxStarts)
       if (wanted.length > checked.length) {
-        warnings.push(`Speech check limited to ${MAX_VERIFY_STARTS} chapters per request: ${wanted.length - checked.length} not checked. Resend with "indexes" set to the rest to check them.`)
+        warnings.push(`Speech check limited to ${maxStarts} chapters per request: ${wanted.length - checked.length} not checked. Resend with "indexes" set to the rest to check them.`)
       }
 
       const verdicts = []

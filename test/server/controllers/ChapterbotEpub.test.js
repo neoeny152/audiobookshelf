@@ -480,6 +480,8 @@ describe('Chapterbot EPUB endpoints', () => {
     expect((await call('startEpubJob')).statusCode).to.equal(202)
     sidecar.state = { ...sidecar.state, status: 'done' }
     await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'failed')
+    // the record is marked failed inside the copy, before finish() lets the watcher back in
+    await ChapterbotEpubManager.jobs.get(bookItemId).finishing
     expect(watcher.addIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
     expect(watcher.removeIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
     expect(scanItem.called).to.equal(false)
@@ -648,6 +650,165 @@ describe('Chapterbot EPUB endpoints', () => {
         expect((await fetch(`${base}/${lf.ino}/readalong`)).status).to.equal(403)
       } finally {
         await new Promise((resolve) => server.close(resolve))
+      }
+    })
+  })
+
+  describe('current job for any viewer (chapterbotEpubCurrent)', () => {
+    let broadcasts
+
+    beforeEach(() => {
+      broadcasts = []
+      sinon.stub(SocketAuthority, 'emitter').callsFake((evt, data, filter) => broadcasts.push({ evt, data, filter }))
+    })
+
+    it('registers GET /items/:id/epub', () => {
+      const routes = apiRouter.router._router.stack.filter((l) => l.route).map((l) => `${Object.keys(l.route.methods).join(',')} ${l.route.path} ${l.route.stack[l.route.stack.length - 1].handle.name}`)
+      expect(routes).to.include('get /items/:id/epub bound getCurrentEpubJob')
+    })
+
+    it('returns the item job without a job id, to users without update permission too', async () => {
+      const none = await call('getCurrentEpubJob', { reqUser: user({ canUpdate: false }) })
+      expect(none.statusCode).to.equal(404)
+
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'running', stage: 'transcribing', progress: 0.25, chaptersDone: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'running')
+      const viewer = user({ id: 'user-2', canUpdate: false })
+      const res = await call('getCurrentEpubJob', { reqUser: viewer })
+      expect(res.statusCode).to.equal(200)
+      expect(res.json.firstCall.args[0]).to.include({ jobId: JOB_ID, libraryItemId: bookItemId, status: 'running', progress: 0.25, origin: 'user' })
+
+      // the read-only route passes the item middleware for a user without canUpdate
+      const mwRes = fakeResponse()
+      const next = sinon.spy()
+      await LibraryItemController.middleware.bind(apiRouter)({ method: 'GET', path: `/items/${bookItemId}/epub`, user: viewer, params: { id: bookItemId } }, mwRes, next)
+      expect(next.calledOnce).to.equal(true)
+
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+      // the finished job stays visible
+      const done = await call('getCurrentEpubJob', { reqUser: viewer })
+      expect(done.json.firstCall.args[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub' })
+    })
+
+    it('broadcasts progress to everyone who can access the item', async () => {
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'running', stage: 'transcribing', progress: 0.5, chaptersDone: 2 }
+      await until(() => broadcasts.some((b) => b.data.progress === 0.5))
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+
+      const updates = broadcasts.filter((b) => b.evt === 'chapterbot_epub_updated')
+      const statuses = updates.map((b) => b.data.status)
+      expect(statuses[0]).to.equal('queued')
+      expect(statuses).to.include.members(['running', 'downloading', 'done'])
+      // an unchanged poll is not sent again
+      expect(updates.filter((b) => b.data.status === 'running' && b.data.progress === 0.5)).to.have.length(1)
+      // only to users who can access the item
+      const filter = updates[0].filter
+      const seen = []
+      expect(filter({ checkCanAccessLibraryItem: (li) => seen.push(li) > 0 })).to.equal(true)
+      expect(filter({ checkCanAccessLibraryItem: () => false })).to.equal(false)
+      expect(seen[0]).to.deep.include({ libraryId })
+      expect(seen[0].media).to.deep.equal({ explicit: false, tags: [] })
+      // the starting user still gets the done event
+      expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+    })
+
+    it('a job started by the auto pipeline has no user and reports its end through the ended event', async () => {
+      const ended = []
+      ChapterbotEpubManager.on('ended', (job) => ended.push(job))
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const job = await ChapterbotEpubManager.start(libraryItem, null, { origin: 'pipeline' })
+      expect(job).to.include({ origin: 'pipeline', status: 'queued' })
+      sidecar.state = { ...sidecar.state, status: 'failed', error: 'audio_failed' }
+      await until(() => ended.length === 1)
+      expect(ended[0]).to.include({ jobId: JOB_ID, status: 'failed', origin: 'pipeline', userId: null })
+      expect(clientEmitter.called).to.equal(false)
+      expect(broadcasts.some((b) => b.evt === 'chapterbot_epub_updated' && b.data.status === 'failed')).to.equal(true)
+    })
+  })
+
+  describe('restart (persisted jobs)', () => {
+    let persistPath
+
+    beforeEach(() => {
+      persistPath = Path.join(stagingDir, 'pipeline', 'epub-jobs.json')
+      sinon.stub(SocketAuthority, 'emitter')
+    })
+
+    function freshManager() {
+      const m = new ChapterbotEpubManager.ChapterbotEpubManager()
+      m.pollMs = 10
+      m.tempDir = stagingDir
+      m.scanItem = scanItem
+      m.watcher = watcher
+      return m
+    }
+
+    it('persists running jobs and drops them when they end', async () => {
+      await ChapterbotEpubManager.init({ persistPath })
+      expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      await ChapterbotEpubManager.persistChain
+      const entries = JSON.parse(fs.readFileSync(persistPath, 'utf8'))
+      expect(entries).to.have.length(1)
+      expect(entries[0]).to.include({ libraryItemId: bookItemId, jobId: JOB_ID, origin: 'user', userId: 'user-1' })
+
+      sidecar.state = { ...sidecar.state, status: 'cancelled' }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'cancelled')
+      await ChapterbotEpubManager.persistChain
+      expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+    })
+
+    it('follows a job again after a restart and writes its EPUB into the library', async () => {
+      await ChapterbotEpubManager.init({ persistPath })
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      await ChapterbotEpubManager.persistChain
+      // the server stops; the job finishes on the sidecar meanwhile
+      ChapterbotEpubManager.reset()
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+
+      const restarted = freshManager()
+      const ended = []
+      restarted.on('ended', (job) => ended.push(job))
+      try {
+        await restarted.init({ persistPath })
+        await until(() => ended.length === 1)
+        expect(ended[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub', origin: 'user', userId: 'user-1' })
+        expect(fs.existsSync(Path.join(itemDir, 'Black Ice (from audio).epub'))).to.equal(true)
+        expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done')).to.equal(true)
+        expect((await restarted.getCurrent(bookItemId)).status).to.equal('done')
+        await restarted.persistChain
+        expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+      } finally {
+        restarted.reset()
+      }
+    })
+
+    it('a job the sidecar no longer knows is marked failed; entries for deleted items are dropped', async () => {
+      fs.mkdirSync(Path.dirname(persistPath), { recursive: true })
+      fs.writeFileSync(
+        persistPath,
+        JSON.stringify([
+          { libraryItemId: bookItemId, jobId: 'e'.repeat(32), origin: 'pipeline', userId: null, createdAt: 1 },
+          { libraryItemId: 'gone-item', jobId: 'd'.repeat(32), origin: 'user', userId: 'user-1', createdAt: 1 },
+          { libraryItemId: 'x', jobId: '../../etc' }
+        ])
+      )
+      const restarted = freshManager()
+      const ended = []
+      restarted.on('ended', (job) => ended.push(job))
+      try {
+        await restarted.init({ persistPath })
+        expect(restarted.jobs.size).to.equal(1)
+        await until(() => ended.length === 1)
+        expect(ended[0]).to.include({ status: 'failed', error: 'The job no longer exists on chapterbot', origin: 'pipeline' })
+        // the sidecar was told to delete the job of the missing item
+        await until(() => sidecar.requests.some((r) => r.method === 'DELETE' && r.url === `/v1/jobs/${'d'.repeat(32)}`))
+      } finally {
+        restarted.reset()
       }
     })
   })

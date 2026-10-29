@@ -17,9 +17,30 @@ const { version } = require('../../package.json')
  * Optional features, only listed while they work (see utils/chapterbotClient.js advertisedFeatures):
  * - chapterbotVerify: POST /api/items/:id/chapters/snap accepts options.verify = true (Whisper speech check)
  * - chapterbotEpub: POST /api/items/:id/epub, GET and DELETE /api/items/:id/epub/:jobId (EPUB from audio)
+ * - chapterbotEpubCurrent: GET /api/items/:id/epub returns the item's current EPUB job without a job id (any user who
+ *   can access the item), and chapterbot_epub_updated socket events carry its progress to everyone who can see the
+ *   item. Listed together with chapterbotEpub.
+ * - autoPipeline: hands-off processing of new books (match, chapters, EPUB), GET/POST /api/libraries/:id/pipeline[/run],
+ *   /api/items/:id/pipeline[/run|/proposal|/proposal/approve|/proposal/reject|/backups|/backups/:name/restore],
+ *   library.settings.autoPipeline and pipeline_item_updated socket events. Listed only when the server runs with
+ *   ABS_AUTO_PIPELINE=1 (see managers/AutoPipelineManager.js).
  */
 const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong'])
-const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub'])
+const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'autoPipeline'])
+
+/**
+ * The optional features that are available right now.
+ *
+ * @param {string[]} chapterbotFeatures - chapterbotClient.advertisedFeatures()
+ * @param {{autoPipeline?: boolean}} [flags]
+ * @returns {string[]}
+ */
+function availableOptionalFeatures(chapterbotFeatures = [], { autoPipeline = false } = {}) {
+  const features = [...chapterbotFeatures]
+  if (chapterbotFeatures.includes('chapterbotEpub')) features.push('chapterbotEpubCurrent')
+  if (autoPipeline) features.push('autoPipeline')
+  return features
+}
 
 /**
  * Payload for GET /status (unauthenticated).
@@ -48,4 +69,4 @@ function buildStatusPayload(Database, optionalFeatures = []) {
   return payload
 }
 
-module.exports = { SERVER_FEATURES, OPTIONAL_FEATURES, buildStatusPayload }
+module.exports = { SERVER_FEATURES, OPTIONAL_FEATURES, availableOptionalFeatures, buildStatusPayload }

@@ -1,5 +1,6 @@
 const { DataTypes, Model } = require('sequelize')
 const Logger = require('../Logger')
+const { defaultAutoPipelineSettings } = require('../utils/autoPipeline/settings')
 
 /**
  * @typedef LibrarySettingsObject
@@ -76,7 +77,9 @@ class Library extends Model {
         onlyShowLaterBooksInContinueSeries: false,
         metadataPrecedence: this.defaultMetadataPrecedence,
         markAsFinishedPercentComplete: null,
-        markAsFinishedTimeRemaining: 10
+        markAsFinishedTimeRemaining: 10,
+        // fork only: hands-off processing of new books, off by default (server/utils/autoPipeline/settings.js)
+        autoPipeline: defaultAutoPipelineSettings()
       }
     }
   }

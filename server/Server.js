@@ -9,7 +9,7 @@ const cookieParser = require('cookie-parser')
 const axios = require('axios')
 
 const { version } = require('../package.json')
-const { buildStatusPayload } = require('./utils/serverFeatures')
+const { buildStatusPayload, availableOptionalFeatures } = require('./utils/serverFeatures')
 const chapterbotClient = require('./utils/chapterbotClient')
 
 // Utils
@@ -43,6 +43,8 @@ const CronManager = require('./managers/CronManager')
 const ApiCacheManager = require('./managers/ApiCacheManager')
 const BinaryManager = require('./managers/BinaryManager')
 const ShareManager = require('./managers/ShareManager')
+const ChapterbotEpubManager = require('./managers/ChapterbotEpubManager')
+const AutoPipelineManager = require('./managers/AutoPipelineManager')
 const LibraryScanner = require('./scanner/LibraryScanner')
 
 //Import the main Passport and Express-Session library
@@ -235,6 +237,18 @@ class Server {
     // Probe the optional chapterbot sidecar in the background so the first GET /status already knows its features
     chapterbotClient.warmUp()
 
+    // Follow EPUB jobs that were running before a restart, then the auto pipeline (fork only, needs ABS_AUTO_PIPELINE=1)
+    try {
+      await ChapterbotEpubManager.init()
+    } catch (error) {
+      Logger.error('[Server] Restoring EPUB jobs failed', error)
+    }
+    try {
+      await AutoPipelineManager.init(this.apiRouter)
+    } catch (error) {
+      Logger.error('[Server] Auto pipeline init failed', error)
+    }
+
     if (Database.serverSettings.scannerDisableWatcher) {
       Logger.info(`[Server] Watcher is disabled`)
       Watcher.disabled = true
@@ -413,7 +427,7 @@ class Server {
     router.get('/status', (req, res) => {
       // status check for client to see if server has been initialized (see utils/serverFeatures.js)
       // optional chapterbot features come from a cached health check and never wait on the sidecar
-      res.json(buildStatusPayload(Database, chapterbotClient.advertisedFeatures()))
+      res.json(buildStatusPayload(Database, availableOptionalFeatures(chapterbotClient.advertisedFeatures(), { autoPipeline: AutoPipelineManager.enabled })))
     })
     router.get('/ping', (req, res) => {
       Logger.info('Received ping')

@@ -700,3 +700,7 @@ function cleanAuthorForCompares(author) {
 function stripRedundantSpaces(str) {
   return str.replace(/\s+/g, ' ').trim()
 }
+
+// Shared with the auto pipeline match scorer (server/utils/autoPipeline/matchScore.js)
+module.exports.cleanTitleForCompares = cleanTitleForCompares
+module.exports.cleanAuthorForCompares = cleanAuthorForCompares

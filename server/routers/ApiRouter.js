@@ -37,6 +37,7 @@ const MiscController = require('../controllers/MiscController')
 const ShareController = require('../controllers/ShareController')
 const StatsController = require('../controllers/StatsController')
 const ApiKeyController = require('../controllers/ApiKeyController')
+const AutoPipelineController = require('../controllers/AutoPipelineController')
 
 class ApiRouter {
   constructor(Server) {
@@ -100,6 +101,9 @@ class ApiRouter {
     this.router.get('/libraries/:id/podcast-titles', LibraryController.middleware.bind(this), LibraryController.getPodcastTitles.bind(this))
     this.router.get('/libraries/:id/download', LibraryController.middleware.bind(this), LibraryController.downloadMultiple.bind(this))
     this.router.post('/libraries/:id/download', LibraryController.middleware.bind(this), LibraryController.downloadMultiplePost.bind(this))
+    // fork only: auto pipeline (ABS_AUTO_PIPELINE=1)
+    this.router.get('/libraries/:id/pipeline', LibraryController.middleware.bind(this), AutoPipelineController.getLibraryPipeline.bind(this))
+    this.router.post('/libraries/:id/pipeline/run', LibraryController.middleware.bind(this), AutoPipelineController.runLibraryPipeline.bind(this))
 
     //
     // Item Routes
@@ -127,8 +131,18 @@ class ApiRouter {
     this.router.post('/items/:id/chapters', LibraryItemController.middleware.bind(this), LibraryItemController.updateMediaChapters.bind(this))
     this.router.post('/items/:id/chapters/snap', LibraryItemController.middleware.bind(this), LibraryItemController.snapMediaChapters.bind(this))
     this.router.post('/items/:id/epub', LibraryItemController.middleware.bind(this), LibraryItemController.startEpubJob.bind(this))
+    this.router.get('/items/:id/epub', LibraryItemController.middleware.bind(this), LibraryItemController.getCurrentEpubJob.bind(this))
     this.router.get('/items/:id/epub/:jobId', LibraryItemController.middleware.bind(this), LibraryItemController.getEpubJob.bind(this))
     this.router.delete('/items/:id/epub/:jobId', LibraryItemController.middleware.bind(this), LibraryItemController.cancelEpubJob.bind(this))
+    // fork only: auto pipeline (ABS_AUTO_PIPELINE=1)
+    this.router.get('/items/:id/pipeline', LibraryItemController.middleware.bind(this), AutoPipelineController.getItemPipeline.bind(this))
+    this.router.post('/items/:id/pipeline/run', LibraryItemController.middleware.bind(this), AutoPipelineController.runItemPipeline.bind(this))
+    this.router.delete('/items/:id/pipeline', LibraryItemController.middleware.bind(this), AutoPipelineController.dismissItemPipeline.bind(this))
+    this.router.get('/items/:id/pipeline/proposal', LibraryItemController.middleware.bind(this), AutoPipelineController.getProposal.bind(this))
+    this.router.post('/items/:id/pipeline/proposal/approve', LibraryItemController.middleware.bind(this), AutoPipelineController.approveProposal.bind(this))
+    this.router.post('/items/:id/pipeline/proposal/reject', LibraryItemController.middleware.bind(this), AutoPipelineController.rejectProposal.bind(this))
+    this.router.get('/items/:id/pipeline/backups', LibraryItemController.middleware.bind(this), AutoPipelineController.listBackups.bind(this))
+    this.router.post('/items/:id/pipeline/backups/:name/restore', LibraryItemController.middleware.bind(this), AutoPipelineController.restoreBackup.bind(this))
     this.router.get('/items/:id/ffprobe/:fileid', LibraryItemController.middleware.bind(this), LibraryItemController.getFFprobeData.bind(this))
     this.router.get('/items/:id/file/:fileid', LibraryItemController.middleware.bind(this), LibraryItemController.getLibraryFile.bind(this))
     this.router.delete('/items/:id/file/:fileid', LibraryItemController.middleware.bind(this), LibraryItemController.deleteLibraryFile.bind(this))

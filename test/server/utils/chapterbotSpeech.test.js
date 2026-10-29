@@ -463,6 +463,23 @@ describe('chapterbotSpeech', () => {
       expect(warnings[0]).to.include('5 not checked')
     })
 
+    it('takes a smaller or larger start limit and a longer deadline (auto pipeline chunks)', async () => {
+      const client = fakeClient()
+      const proposals = Array.from({ length: 31 }, (_, i) => proposal(i, i * 10))
+      const small = await createVerifier({ titles: [], client, maxStarts: 3 }).verify({ proposals, timeline })
+      expect(small.verdicts).to.have.length(3)
+      expect(small.warnings[0]).to.include('limited to 3 chapters per request: 27 not checked')
+
+      let t = 0
+      const now = () => t
+      const big = createVerifier({ titles: [], client: fakeClient(), now, deadlineMs: 10 * 60 * 1000, maxStarts: 30 })
+      // far past the HTTP budget of 55 s: the pipeline deadline still has room
+      t = 120000
+      const result = await big.verify({ proposals, timeline })
+      expect(result.verdicts).to.have.length(30)
+      expect(result.warnings).to.deep.equal([])
+    })
+
     it('sizes batches to the time left and stops inside the budget', async () => {
       const client = fakeClient()
       let t = 0

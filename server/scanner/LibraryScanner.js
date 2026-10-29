@@ -59,6 +59,23 @@ class LibraryScanner {
   }
 
   /**
+   * Hand new items to the auto pipeline (fork only). It only records them as queued (no work inside the scan lock) and
+   * does nothing unless ABS_AUTO_PIPELINE=1 and the library's autoPipeline mode is not off.
+   *
+   * @param {import('../models/Library')} library
+   * @param {import('../models/LibraryItem')[]} libraryItems
+   */
+  queueForAutoPipeline(library, libraryItems) {
+    if (!library || !libraryItems?.length) return
+    // required here: AutoPipelineManager requires the scanner modules
+    const AutoPipelineManager = require('../managers/AutoPipelineManager')
+    AutoPipelineManager.onItemsAdded(
+      library,
+      libraryItems.map((li) => li.id)
+    ).catch((error) => Logger.error(`[LibraryScanner] Queueing new items for the auto pipeline failed`, error))
+  }
+
+  /**
    * @param {string} libraryId
    * @returns {boolean}
    */
@@ -323,6 +340,7 @@ class LibraryScanner {
         // Emit new items in chunks of 10 to client
         if (newLibraryItems.length === 10) {
           SocketAuthority.libraryItemsEmitter('items_added', newLibraryItems)
+          this.queueForAutoPipeline(libraryScan.library, newLibraryItems)
           newLibraryItems = []
         }
 
@@ -331,6 +349,7 @@ class LibraryScanner {
       // Emit new items to client
       if (newLibraryItems.length) {
         SocketAuthority.libraryItemsEmitter('items_added', newLibraryItems)
+        this.queueForAutoPipeline(libraryScan.library, newLibraryItems)
       }
     }
 
@@ -844,6 +863,7 @@ class LibraryScanner {
       }
       if (newLibraryItem) {
         SocketAuthority.libraryItemEmitter('item_added', newLibraryItem)
+        this.queueForAutoPipeline(library, [newLibraryItem])
       }
       itemGroupingResults[itemDir] = newLibraryItem ? ScanResult.ADDED : ScanResult.NOTHING
     }

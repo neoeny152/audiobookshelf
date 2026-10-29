@@ -25,6 +25,7 @@ const CacheManager = require('../managers/CacheManager')
 const CoverManager = require('../managers/CoverManager')
 const ShareManager = require('../managers/ShareManager')
 const ChapterbotEpubManager = require('../managers/ChapterbotEpubManager')
+const { applyChapters } = require('../utils/applyChapters')
 
 /**
  * @typedef RequestUserObject
@@ -958,42 +959,11 @@ class LibraryItemController {
     }
 
     const chapters = req.body.chapters || []
-
-    let hasUpdates = false
-    if (chapters.length !== req.libraryItem.media.chapters.length) {
-      req.libraryItem.media.chapters = chapters.map((c, index) => {
-        return {
-          id: index,
-          title: c.title,
-          start: c.start,
-          end: c.end
-        }
-      })
-      hasUpdates = true
-    } else {
-      for (const [index, chapter] of chapters.entries()) {
-        const currentChapter = req.libraryItem.media.chapters[index]
-        if (currentChapter.title !== chapter.title || currentChapter.start !== chapter.start || currentChapter.end !== chapter.end) {
-          currentChapter.title = chapter.title
-          currentChapter.start = chapter.start
-          currentChapter.end = chapter.end
-          hasUpdates = true
-        }
-      }
-    }
-
-    if (hasUpdates) {
-      req.libraryItem.media.changed('chapters', true)
-      await req.libraryItem.media.save()
-
-      await req.libraryItem.saveMetadataFile()
-
-      SocketAuthority.libraryItemEmitter('item_updated', req.libraryItem)
-    }
+    const { updated } = await applyChapters(req.libraryItem, chapters)
 
     res.json({
       success: true,
-      updated: hasUpdates
+      updated
     })
   }
 
@@ -1091,8 +1061,9 @@ class LibraryItemController {
    * POST: /api/items/:id/epub
    * Build an EPUB from the book's audio with the chapterbot sidecar (optional, see utils/chapterbotClient.js).
    * The server follows the job, writes "<Title> (from audio).epub" into the item folder (never overwriting),
-   * rescans the item and emits chapterbot_epub_done / chapterbot_epub_failed to the requesting user.
-   * One job per item; jobs are kept in memory only and are forgotten on a server restart.
+   * rescans the item and emits chapterbot_epub_done / chapterbot_epub_failed to the requesting user, and
+   * chapterbot_epub_updated to everyone who can access the item.
+   * One job per item; running jobs are persisted and followed again after a server restart.
    *
    * @param {LibraryItemControllerRequest} req
    * @param {Response} res
@@ -1114,6 +1085,21 @@ class LibraryItemController {
       Logger.error(`[LibraryItemController] Starting EPUB job for "${req.libraryItem.id}" failed`, error)
       res.status(500).json({ error: 'Starting the EPUB job failed' })
     }
+  }
+
+  /**
+   * GET: /api/items/:id/epub
+   * The item's current EPUB job (or its latest one, kept for a day after it ended), without a job id, so any viewer
+   * sees the progress of a job started elsewhere (another browser, another user, the auto pipeline).
+   * Read only: any user who can access the item may call it. 404 when the item has no job.
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async getCurrentEpubJob(req, res) {
+    const job = await ChapterbotEpubManager.getCurrent(req.libraryItem.id)
+    if (!job) return res.status(404).json({ error: 'No EPUB job for this item' })
+    res.json(job)
   }
 
   /**
@@ -1465,8 +1451,9 @@ class LibraryItemController {
 
     if (req.path.includes('/play')) {
       // allow POST requests using /play and /play/:episodeId
-    } else if (req.method == 'DELETE' && /\/items\/[^/]+\/epub\/[^/]+$/.test(req.path)) {
-      // cancelling an EPUB job deletes nothing in the library; the handler checks canUpdate
+    } else if (req.method == 'DELETE' && /\/items\/[^/]+\/(epub\/[^/]+|pipeline)$/.test(req.path)) {
+      // cancelling an EPUB job or dismissing the item from the auto pipeline deletes nothing in the library; the
+      // handler checks canUpdate
     } else if (req.method == 'DELETE' && !req.user.canDelete) {
       Logger.warn(`[LibraryItemController] User "${req.user.username}" attempted to delete without permission`)
       return res.sendStatus(403)
