@@ -466,6 +466,57 @@ class Book extends Model {
   }
 
   /**
+   * A book's author is now spelled differently, only in case ("max" -> "Max", #4934).
+   * Renames the author when that book is its only book and no other author in the library has the
+   * new name; otherwise the author is left as is (rename it on the author page, which merges).
+   * Used by the book editor and by library scans.
+   *
+   * @param {import('./Author')} author linked to exactly the book being updated
+   * @param {string} newName
+   * @returns {Promise<{ renamed: boolean, reason?: string }>}
+   */
+  static async renameAuthorForSpelling(author, newName) {
+    /** @type {typeof import('./Author')} */
+    const authorModel = this.sequelize.models.author
+    /** @type {typeof import('./BookAuthor')} */
+    const bookAuthorModel = this.sequelize.models.bookAuthor
+
+    const numBooks = await bookAuthorModel.getCountForAuthor(author.id)
+    if (numBooks !== 1) return { renamed: false, reason: `author has ${numBooks} books` }
+    if (await hasOtherWithSameName(authorModel, author, newName)) return { renamed: false, reason: 'another author has that name' }
+
+    author.name = newName
+    author.lastFirst = authorModel.getLastFirst(newName)
+    await author.save()
+    SocketAuthority.emitter('author_updated', author.toOldJSONExpanded(numBooks))
+    return { renamed: true }
+  }
+
+  /**
+   * Same as {@link Book.renameAuthorForSpelling} for a series
+   *
+   * @param {import('./Series')} series linked to the book being updated
+   * @param {string} newName
+   * @returns {Promise<{ renamed: boolean, reason?: string }>}
+   */
+  static async renameSeriesForSpelling(series, newName) {
+    /** @type {typeof import('./Series')} */
+    const seriesModel = this.sequelize.models.series
+    /** @type {typeof import('./BookSeries')} */
+    const bookSeriesModel = this.sequelize.models.bookSeries
+
+    const numBooks = await bookSeriesModel.count({ where: { seriesId: series.id } })
+    if (numBooks !== 1) return { renamed: false, reason: `series has ${numBooks} books` }
+    if (await hasOtherWithSameName(seriesModel, series, newName)) return { renamed: false, reason: 'another series has that name' }
+
+    series.name = newName
+    series.nameIgnorePrefix = getTitleIgnorePrefix(newName)
+    await series.save()
+    SocketAuthority.emitter('series_updated', series.toOldJSON())
+    return { renamed: true }
+  }
+
+  /**
    * Creates or removes authors from the book using the author names from the request
    *
    * @param {string[]} authors
@@ -506,15 +557,11 @@ class Book extends Model {
     for (const authorName of authors) {
       const author = this.authors.find((au) => au.name !== authorName && au.name.toLowerCase() === authorName.toLowerCase())
       if (!author) continue
-      const numBooks = await bookAuthorModel.getCountForAuthor(author.id)
-      if (numBooks !== 1 || (await hasOtherWithSameName(authorModel, author, authorName))) {
-        Logger.debug(`[Book] "${this.title}" Not renaming author "${author.name}" to "${authorName}": author has ${numBooks} books or the name is used by another author`)
+      const { renamed, reason } = await Book.renameAuthorForSpelling(author, authorName)
+      if (!renamed) {
+        Logger.debug(`[Book] "${this.title}" Not renaming author "${author.name}" to "${authorName}": ${reason}`)
         continue
       }
-      author.name = authorName
-      author.lastFirst = authorModel.getLastFirst(authorName)
-      await author.save()
-      SocketAuthority.emitter('author_updated', author.toOldJSONExpanded(numBooks))
       Logger.debug(`[Book] "${this.title}" Renamed author to "${authorName}"`)
       authorsRenamed.push(author)
     }
@@ -577,17 +624,14 @@ class Book extends Model {
       if (existingSeries && existingSeries.name !== seriesObj.name) {
         // Case-only change ("harry potter" -> "Harry Potter") used to be a no-op (#4934).
         // Rename the series when this book is its only book; otherwise keep it and rename on the series page.
-        const numBooks = await bookSeriesModel.count({ where: { seriesId: existingSeries.id } })
-        if (numBooks === 1 && !(await hasOtherWithSameName(seriesModel, existingSeries, seriesObj.name))) {
-          existingSeries.name = seriesObj.name
-          existingSeries.nameIgnorePrefix = getTitleIgnorePrefix(seriesObj.name)
-          await existingSeries.save()
-          SocketAuthority.emitter('series_updated', existingSeries.toOldJSON())
+        const previousName = existingSeries.name
+        const { renamed, reason } = await Book.renameSeriesForSpelling(existingSeries, seriesObj.name)
+        if (renamed) {
           seriesRenamed.push(existingSeries)
           hasUpdates = true
           Logger.debug(`[Book] "${this.title}" Renamed series to "${seriesObj.name}"`)
         } else {
-          Logger.debug(`[Book] "${this.title}" Not renaming series "${existingSeries.name}" to "${seriesObj.name}": series has ${numBooks} books`)
+          Logger.debug(`[Book] "${this.title}" Not renaming series "${previousName}" to "${seriesObj.name}": ${reason}`)
         }
       }
       if (existingSeries) {

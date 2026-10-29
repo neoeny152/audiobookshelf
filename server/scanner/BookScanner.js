@@ -3,7 +3,7 @@ const Path = require('path')
 const sequelize = require('sequelize')
 const { LogLevel } = require('../utils/constants')
 const { getTitleIgnorePrefix, areEquivalent } = require('../utils/index')
-const { namesMatch, dedupeNames, dedupeSeries } = require('../utils/nameMatching')
+const { namesMatch, dedupeNames, dedupeSeries, pickLinksToKeep } = require('../utils/nameMatching')
 const parseNameString = require('../utils/parsers/parseNameString')
 const parseEbookMetadata = require('../utils/parsers/parseEbookMetadata')
 const globals = require('../utils/globals')
@@ -252,9 +252,11 @@ class BookScanner {
             }
           }
         }
-        // Check for authors removed
+        // Check for authors removed. One link per name is kept: older bugs could link near-duplicates
+        // ("max" and "Max") to one book. The exact spelling stays, otherwise the oldest link.
+        const authorsToKeep = pickLinksToKeep(media.authors, bookMetadata.authors)
         for (const author of media.authors) {
-          if (!bookMetadata.authors.some((authorName) => namesMatch(authorName, author.name))) {
+          if (!authorsToKeep.has(author)) {
             await author.bookAuthor.destroy()
             libraryScan.authorsNumBooksChangedIds.add(author.id)
             libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" removed author "${author.name}"`)
@@ -262,11 +264,25 @@ class BookScanner {
             bookAuthorsRemoved.push(author.id)
           }
         }
+        // Case-only change in the source ("max" -> "Max"): same rule as the book editor (#4934 #5319)
+        for (const [author, authorName] of authorsToKeep) {
+          if (author.name === authorName) continue
+          const previousName = author.name
+          const { renamed, reason } = await Database.bookModel.renameAuthorForSpelling(author, authorName)
+          if (renamed) {
+            Database.renameAuthorInFilterData(libraryItemData.libraryId, author.id, authorName)
+            libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" renamed author "${previousName}" => "${authorName}"`)
+            authorsUpdated = true
+          } else {
+            libraryScan.addLog(LogLevel.INFO, `Book "${bookMetadata.title}" lists author "${authorName}" but author "${previousName}" was not renamed (${reason}). Rename it on the author page.`)
+          }
+        }
       } else if (key === 'series') {
         // Check for series added
         const seriesIdsOnBook = new Set(media.series.map((se) => se.id))
         for (const seriesObj of bookMetadata.series) {
-          const existingBookSeries = media.series.find((se) => namesMatch(se.name, seriesObj.name))
+          // Prefer the exact spelling, like pickLinksToKeep below
+          const existingBookSeries = media.series.find((se) => se.name === seriesObj.name) || media.series.find((se) => namesMatch(se.name, seriesObj.name))
           if (!existingBookSeries) {
             const existingSeriesId = await Database.getSeriesIdByName(libraryItemData.libraryId, seriesObj.name)
             if (existingSeriesId) {
@@ -295,13 +311,30 @@ class BookScanner {
             await existingBookSeries.bookSeries.save()
           }
         }
-        // Check for series removed
+        // Check for series removed, keeping one link per name (see authors above)
+        const seriesToKeep = pickLinksToKeep(
+          media.series,
+          bookMetadata.series.map((se) => se.name)
+        )
         for (const series of media.series) {
-          if (!bookMetadata.series.some((se) => namesMatch(se.name, series.name))) {
+          if (!seriesToKeep.has(series)) {
             await series.bookSeries.destroy()
             libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" removed series "${series.name}"`)
             seriesUpdated = true
             bookSeriesRemoved.push(series.id)
+          }
+        }
+        // Case-only change in the source ("harry potter" -> "Harry Potter") (#4934)
+        for (const [series, seriesName] of seriesToKeep) {
+          if (series.name === seriesName) continue
+          const previousName = series.name
+          const { renamed, reason } = await Database.bookModel.renameSeriesForSpelling(series, seriesName)
+          if (renamed) {
+            Database.renameSeriesInFilterData(libraryItemData.libraryId, series.id, seriesName)
+            libraryScan.addLog(LogLevel.DEBUG, `Updating book "${bookMetadata.title}" renamed series "${previousName}" => "${seriesName}"`)
+            seriesUpdated = true
+          } else {
+            libraryScan.addLog(LogLevel.INFO, `Book "${bookMetadata.title}" lists series "${seriesName}" but series "${previousName}" was not renamed (${reason}). Rename it on the series page.`)
           }
         }
       } else if (key === 'genres') {

@@ -2,7 +2,7 @@ const Logger = require('../Logger')
 const SocketAuthority = require('../SocketAuthority')
 const Database = require('../Database')
 const { getTitleIgnorePrefix } = require('../utils/index')
-const { namesMatch, dedupeNames, dedupeSeries } = require('../utils/nameMatching')
+const { namesMatch, dedupeNames, dedupeSeries, pickLinksToKeep } = require('../utils/nameMatching')
 
 // Utils
 const { findMatchingEpisodesInFeed, getPodcastFeed } = require('../utils/podcastUtils')
@@ -288,7 +288,10 @@ class Scanner {
           }
         }
       }
-      const authorsRemoved = libraryItem.media.authors.filter((a) => !matchData.author.some((ma) => namesMatch(ma, a.name)))
+      // One link per name: near-duplicates from older bugs ("max" and "Max" both on the book) are dropped,
+      // keeping the exact spelling, otherwise the oldest link
+      const authorsToKeep = pickLinksToKeep(libraryItem.media.authors, matchData.author)
+      const authorsRemoved = libraryItem.media.authors.filter((a) => !authorsToKeep.has(a))
       if (authorsRemoved.length) {
         for (const author of authorsRemoved) {
           await Database.bookAuthorModel.destroy({ where: { authorId: author.id, bookId: libraryItem.media.id } })
@@ -316,7 +319,7 @@ class Scanner {
       )
       const seriesIdsRemoved = []
       for (const seriesMatchItem of matchData.series) {
-        const existingSeries = libraryItem.media.series.find((s) => namesMatch(s.name, seriesMatchItem.series))
+        const existingSeries = libraryItem.media.series.find((s) => s.name === seriesMatchItem.series) || libraryItem.media.series.find((s) => namesMatch(s.name, seriesMatchItem.series))
         if (existingSeries) {
           if (existingSeries.bookSeries.sequence !== seriesMatchItem.sequence) {
             existingSeries.bookSeries.sequence = seriesMatchItem.sequence
@@ -357,7 +360,11 @@ class Scanner {
           }
         }
       }
-      const seriesRemoved = libraryItem.media.series.filter((s) => !matchData.series.some((ms) => namesMatch(ms.series, s.name)))
+      const seriesToKeep = pickLinksToKeep(
+        libraryItem.media.series,
+        matchData.series.map((ms) => ms.series)
+      )
+      const seriesRemoved = libraryItem.media.series.filter((s) => !seriesToKeep.has(s))
       if (seriesRemoved.length) {
         for (const series of seriesRemoved) {
           await series.bookSeries.destroy()
