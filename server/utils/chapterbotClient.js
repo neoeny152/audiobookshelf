@@ -222,11 +222,12 @@ function requireConfig() {
  * @param {AbortSignal} [opts.signal]
  * @param {boolean} [opts.auth]
  * @param {import('stream').Writable} [opts.sink] - stream a 2xx body here instead of parsing JSON
+ * @param {boolean} [opts.anyStatus] - resolve non-2xx answers too (json is undefined when the body is not JSON)
  * @returns {Promise<{status: number, headers: Object, json?: *, bytes?: number}>}
  */
 function request(method, path, opts = {}) {
   const cfg = requireConfig()
-  const { body, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = MAX_JSON_BYTES, signal = null, auth = true, sink = null } = opts
+  const { body, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = MAX_JSON_BYTES, signal = null, auth = true, sink = null, anyStatus = false } = opts
   const label = `${method} ${path}`
 
   // Never contact anything but the configured base URL
@@ -283,8 +284,8 @@ function request(method, path, opts = {}) {
       const status = res.statusCode || 0
       const ok = status >= 200 && status < 300
       // A /v1 answer proves the sidecar is up even while /healthz is too slow (busy) to answer in time.
-      // 429/503 are its "busy" answers. /healthz itself is judged by checkHealth.
-      if (target.pathname !== `${cfg.basePath}/healthz` && (ok || status === 429 || status === 503)) noteAlive()
+      // /healthz itself is judged by checkHealth.
+      if (target.pathname !== `${cfg.basePath}/healthz`) noteAlive(status)
       const limit = ok ? maxBytes : MAX_ERROR_BYTES
 
       if (ok && sink) {
@@ -324,6 +325,7 @@ function request(method, path, opts = {}) {
         } catch {
           json = undefined
         }
+        if (!ok && anyStatus) return finish(null, { status, headers: res.headers, json })
         if (!ok) {
           const detail = json && typeof json.detail === 'object' && !Array.isArray(json.detail) ? json.detail : null
           const detailCode = typeof detail?.code === 'string' ? detail.code.slice(0, 64) : undefined
@@ -340,17 +342,41 @@ function request(method, path, opts = {}) {
   })
 }
 
-/** The sidecar answered a /v1 call: refresh the last-known-good time unless /healthz said it is broken */
-function noteAlive() {
-  if (health.ok !== false) health.okAt = Date.now()
+/**
+ * The sidecar answered a /v1 call: refresh the last-known-good time.
+ * - 2xx: unless /healthz said it is broken
+ * - 429/503 ("busy"): only once /healthz has said it is healthy. Before any /healthz verdict a 503 could just as well
+ *   come from a dead EPUB worker, so it is no proof of a working sidecar.
+ *
+ * @param {number} status
+ */
+function noteAlive(status) {
+  if (status >= 200 && status < 300) {
+    if (health.ok !== false) health.okAt = Date.now()
+  } else if (status === 429 || status === 503) {
+    if (health.ok === true) health.okAt = Date.now()
+  }
+}
+
+/**
+ * Whether a non-200 /healthz answer says nothing about the sidecar itself: a reverse proxy in front of a sidecar that
+ * is restarting or too busy to answer (502/504), or a 503 without the sidecar's own {ok: false} body.
+ *
+ * @param {number} status
+ * @param {*} json
+ */
+function isTransientHealthAnswer(status, json) {
+  if (status === 502 || status === 504) return true
+  return status === 503 && !(json && typeof json === 'object' && json.ok === false)
 }
 
 /**
  * GET /healthz (no token sent). Updates the cached health used for /status.
  *
  * - 200 {ok: true}: healthy
- * - any other answer (503 {ok: false} when an EPUB worker died, 401, garbage): unhealthy, features drop at once
- * - timeout / connection error: no verdict, the last-known-good result is kept (see HEALTH_FRESH_MS)
+ * - 503 {ok: false} (an EPUB worker died), other 4xx/5xx, a 200 without ok: true, garbage: unhealthy, features drop at once
+ * - timeout / connection error, 502/504 or a 503 without {ok: false} (a proxy in front of a restarting or busy
+ *   sidecar): no verdict, the last-known-good result is kept (see HEALTH_FRESH_MS)
  *
  * @param {Object} [opts]
  * @param {number} [opts.timeoutMs]
@@ -359,7 +385,12 @@ function noteAlive() {
 async function checkHealth({ timeoutMs = HEALTH_TIMEOUT_MS } = {}) {
   health.checkedAt = Date.now()
   try {
-    const { json } = await request('GET', '/healthz', { auth: false, timeoutMs, maxBytes: 4096 })
+    const { status, json } = await request('GET', '/healthz', { auth: false, timeoutMs, maxBytes: 4096, anyStatus: true })
+    if (status < 200 || status >= 300) {
+      const message = `Chapterbot GET /healthz returned ${status}`
+      if (isTransientHealthAnswer(status, json)) throw new ChapterbotError('unreachable', message, { status })
+      throw new ChapterbotError('http_error', message, { status })
+    }
     const ok = json?.ok === true
     if (!ok && health.ok !== false) Logger.warn(`[Chapterbot] Health check says the sidecar is unhealthy`)
     health.ok = ok

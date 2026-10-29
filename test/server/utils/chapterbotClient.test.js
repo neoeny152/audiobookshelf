@@ -413,7 +413,10 @@ describe('chapterbotClient', () => {
           sendJson(res, 503, { detail: { code: 'busy', message: 'try later' } })
         })
         configureFor(fake.url)
-        chapterbotClient._health.okAt = 0
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+        // the healthy probe was long ago
+        chapterbotClient._health.okAt = Date.now() - chapterbotClient.HEALTH_FRESH_MS - 1000
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
         await chapterbotClient.getInfo().catch(() => null)
         expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
 
@@ -421,6 +424,76 @@ describe('chapterbotClient', () => {
         await chapterbotClient.checkHealth()
         await chapterbotClient.getInfo().catch(() => null)
         expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+      })
+
+      it('does not count a /v1 503 as proof of life before /healthz ever answered, but does count a 2xx', async () => {
+        const jobId = '0123456789abcdef0123456789abcdef'
+        let jobStatus = 503
+        fake = await startFakeServer((req, res) => {
+          if (jobStatus === 503) return sendJson(res, 503, { detail: { code: 'epub_worker_dead', message: 'no worker' } })
+          sendJson(res, 200, { jobId, status: 'running' })
+        })
+        configureFor(fake.url)
+        expect(chapterbotClient._health.ok).to.equal(null)
+        await chapterbotClient.getJob(jobId).catch(() => null)
+        expect(chapterbotClient._health.okAt).to.equal(0)
+
+        jobStatus = 200
+        await chapterbotClient.getJob(jobId)
+        expect(chapterbotClient._health.okAt).to.be.greaterThan(0)
+      })
+
+      for (const [label, status, body] of [
+        ['a 502 from a reverse proxy', 502, '<html>Bad Gateway</html>'],
+        ['a 504 from a reverse proxy', 504, '<html>Gateway Timeout</html>'],
+        ['a 503 without the sidecar {ok: false} body', 503, '<html>Service Unavailable</html>'],
+        ['a 503 with a JSON body that is not {ok: false}', 503, JSON.stringify({ detail: 'busy' })]
+      ]) {
+        it(`keeps the last result on ${label}`, async () => {
+          let answer = null
+          fake = await startFakeServer((req, res) => {
+            if (!answer) return sendJson(res, 200, { ok: true, epubWorkers: 1 })
+            res.writeHead(answer.status, { 'Content-Type': 'text/html' })
+            res.end(answer.body)
+          })
+          configureFor(fake.url)
+          expect(await chapterbotClient.checkHealth()).to.equal(true)
+          answer = { status, body }
+          expect(await chapterbotClient.checkHealth()).to.equal(true)
+          expect(chapterbotClient._health.ok).to.equal(true)
+          expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+        })
+      }
+
+      for (const [label, status, body] of [
+        ['a 503 {ok: false} (EPUB worker died)', 503, { ok: false, epubWorkers: 0 }],
+        ['a 401', 401, { detail: 'unauthorized' }],
+        ['a 500', 500, { detail: 'boom' }],
+        ['a 200 without ok: true', 200, { status: 'weird' }]
+      ]) {
+        it(`drops the features at once on ${label}`, async () => {
+          let answer = null
+          fake = await startFakeServer((req, res) => (answer ? sendJson(res, answer.status, answer.body) : sendJson(res, 200, { ok: true })))
+          configureFor(fake.url)
+          expect(await chapterbotClient.checkHealth()).to.equal(true)
+          answer = { status, body }
+          expect(await chapterbotClient.checkHealth()).to.equal(false)
+          expect(chapterbotClient._health.ok).to.equal(false)
+          expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+        })
+      }
+
+      it('drops the features at once on a 200 that is not JSON', async () => {
+        let garbage = false
+        fake = await startFakeServer((req, res) => {
+          if (!garbage) return sendJson(res, 200, { ok: true })
+          res.writeHead(200, { 'Content-Type': 'text/plain' })
+          res.end('not json')
+        })
+        configureFor(fake.url)
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+        garbage = true
+        expect(await chapterbotClient.checkHealth()).to.equal(false)
       })
 
       it('warms up at start so the first /status already has the answer', async () => {
