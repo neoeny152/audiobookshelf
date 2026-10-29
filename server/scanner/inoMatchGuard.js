@@ -13,6 +13,11 @@ const fs = require('../libs/fsExtra')
  *  1. the item's old path is gone (or the "move" is a case-only rename of the same directory)
  *  2. no other library item already sits at the new path
  *  3. at least one file overlaps: same file name and size, or same file inode and size
+ *
+ * Known trade-off of rule 3: if every file changed size at the moment of the move (a tagger re-tags
+ * and renames the folder in one step, and no cover or other file stayed unchanged) the move is not
+ * followed. Nothing is deleted: the full scan marks the old item missing and adds a new item, and
+ * listening progress stays on the missing record.
  */
 
 /**
