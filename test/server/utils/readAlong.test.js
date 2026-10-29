@@ -177,6 +177,31 @@ describe('readAlong', () => {
       expect(fs.readdirSync(readAlong.dir(ITEM_ID))).to.deep.equal(['111.json'])
     })
 
+    it('matches entries by path without parsing them whole, and still reads hand-edited ones', async () => {
+      const fsExtra = require('../../../server/libs/fsExtra')
+      const readFileExtra = sinon.spy(fsExtra, 'readFile')
+      await readAlong.save(ITEM_ID, '111', 'Book "1" (from audio).epub', sample())
+      const moved = epub('222', 'Book "1" (from audio).epub')
+      expect(await readAlong.find(item([moved]), moved)).to.equal(Path.join(readAlong.dir(ITEM_ID), '222.json'))
+      expect(readFileExtra.called).to.equal(false)
+
+      // epubPath not first (edited by hand): falls back to parsing the file
+      fs.writeFileSync(Path.join(readAlong.dir(ITEM_ID), '333.json'), JSON.stringify({ ...sample(), epubPath: 'Other.epub' }))
+      const other = epub('444', 'Other.epub')
+      expect(await readAlong.find(item([moved, other]), other)).to.equal(Path.join(readAlong.dir(ITEM_ID), '444.json'))
+      expect(readFileExtra.called).to.equal(true)
+    })
+
+    it('removes the entry of a deleted EPUB', async () => {
+      await readAlong.save(ITEM_ID, '111', 'Book (from audio).epub', sample())
+      await readAlong.save(ITEM_ID, '222', 'Other.epub', sample())
+      expect(await readAlong.remove(ITEM_ID, '111')).to.equal(true)
+      expect(await readAlong.remove(ITEM_ID, '111')).to.equal(false)
+      expect(await readAlong.remove(ITEM_ID, '../222')).to.equal(false)
+      expect(await readAlong.remove('../evil', '222')).to.equal(false)
+      expect(fs.readdirSync(readAlong.dir(ITEM_ID))).to.deep.equal(['222.json'])
+    })
+
     it('returns null for an item without data', async () => {
       const file = epub('555')
       expect(await readAlong.find(item([file]), file)).to.equal(null)

@@ -13,7 +13,8 @@ const { filePathToPOSIX } = require('./fileUtils')
  *
  * Storage: MetadataPath/items/<libraryItemId>/readalong/<ino>.json, keyed by the ino of the EPUB library file.
  * It is outside the library folder (the watcher and scanner never see it) and goes away with the item's
- * metadata folder. Each file is the validated sidecar JSON plus "epubPath", the EPUB's path relative to the
+ * metadata folder, or with the EPUB when it is deleted through the server (remove()). An entry whose EPUB went away
+ * outside the server is kept (a whole transcription to rebuild); clients check the OPF identifier/modified anyway. Each file is the validated sidecar JSON plus "epubPath", the EPUB's path relative to the
  * item folder, used to find the entry again when the EPUB's ino changes (copy, restore, other filesystem).
  *
  * Served by GET /api/items/:id/ebook/:fileid/readalong (feature "readAlong").
@@ -173,6 +174,37 @@ function relativeEpubPath(libraryItem, libraryFile) {
   return meta.relPath ? filePathToPOSIX(meta.relPath) : null
 }
 
+/** save() writes epubPath first: `{"epubPath":"…",` */
+const EPUB_PATH_PREFIX_RE = /^\{"epubPath":("(?:[^"\\]|\\.)*")[,}]/
+const PREFIX_BYTES = 8192
+
+/**
+ * The epubPath of a stored entry. Reads only the start of the file when it was written by save(), so looking up an
+ * EPUB without data does not parse every (possibly large) entry of the item each time.
+ *
+ * @param {string} path
+ * @returns {Promise<string|null>}
+ */
+async function readStoredEpubPath(path) {
+  let handle = null
+  try {
+    const stat = await fs.stat(path)
+    if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return null
+    handle = await fs.open(path, 'r')
+    const buffer = Buffer.alloc(Math.min(PREFIX_BYTES, stat.size))
+    const { bytesRead } = await fs.read(handle, buffer, 0, buffer.length, 0)
+    const match = EPUB_PATH_PREFIX_RE.exec(buffer.toString('utf8', 0, bytesRead))
+    if (match) return JSON.parse(match[1])
+    // not in save()'s layout (edited by hand): read it all
+    const stored = JSON.parse(await fs.readFile(path, 'utf8'))
+    return typeof stored?.epubPath === 'string' ? stored.epubPath : null
+  } catch {
+    return null
+  } finally {
+    if (handle !== null) await fs.close(handle).catch(() => {})
+  }
+}
+
 /**
  * Find the stored read-along data for an EPUB library file.
  *
@@ -213,15 +245,8 @@ async function find(libraryItem, libraryFile) {
     // still the key of another file in this item: not a stale entry
     if (otherInos.has(oldIno)) continue
     const path = Path.join(folder, name)
-    let stored
-    try {
-      const stat = await fs.stat(path)
-      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue
-      stored = JSON.parse(await fs.readFile(path, 'utf8'))
-    } catch {
-      continue
-    }
-    if (stored?.epubPath !== epubPath) continue
+    const stored = await readStoredEpubPath(path)
+    if (stored !== epubPath) continue
     if (!isSafeIno(ino)) return path
     const target = Path.join(folder, `${ino}.json`)
     try {
@@ -236,6 +261,27 @@ async function find(libraryItem, libraryFile) {
   return null
 }
 
+/**
+ * Remove the stored read-along data of an EPUB library file (deleted through the server).
+ *
+ * @param {string} libraryItemId
+ * @param {string} ino - of the EPUB library file
+ * @returns {Promise<boolean>} whether an entry was removed
+ */
+async function remove(libraryItemId, ino) {
+  ino = String(ino ?? '')
+  if (!isSafeIno(ino)) return false
+  let target
+  try {
+    target = Path.join(dir(libraryItemId), `${ino}.json`)
+  } catch {
+    return false
+  }
+  if (!(await fs.pathExists(target))) return false
+  await fs.remove(target)
+  return true
+}
+
 module.exports = {
   KIND,
   VERSION,
@@ -245,5 +291,6 @@ module.exports = {
   dir,
   save,
   find,
+  remove,
   relativeEpubPath
 }

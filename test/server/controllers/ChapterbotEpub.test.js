@@ -593,6 +593,16 @@ describe('Chapterbot EPUB endpoints', () => {
       expect(fs.existsSync(storedPath(lf.ino))).to.equal(false)
     })
 
+    it('removes the data when the EPUB file is deleted through the server', async () => {
+      await runJob()
+      const { li, lf } = await placedEpub()
+      expect(fs.existsSync(storedPath(lf.ino))).to.equal(true)
+      const res = await call('deleteLibraryFile', { item: li, libraryFile: lf, params: { fileid: lf.ino } })
+      expect(res.sendStatus.calledOnceWith(200)).to.equal(true)
+      expect(fs.existsSync(Path.join(itemDir, EPUB_NAME))).to.equal(false)
+      expect(fs.existsSync(storedPath(lf.ino))).to.equal(false)
+    })
+
     it('answers 400 for a library file that is not an EPUB', async () => {
       const li = await Database.libraryItemModel.getExpandedById(bookItemId)
       const cases = [

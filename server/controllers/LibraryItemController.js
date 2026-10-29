@@ -1218,6 +1218,11 @@ class LibraryItemController {
     req.libraryItem.libraryFiles = req.libraryItem.libraryFiles.filter((lf) => lf.ino !== req.params.fileid)
     req.libraryItem.changed('libraryFiles', true)
 
+    // Read-along data stored for this EPUB (fork feature readAlong)
+    await readAlong.remove(req.libraryItem.id, req.params.fileid).catch((error) => {
+      Logger.warn(`[LibraryItemController] Failed to remove read-along data of "${libraryFile.metadata.path}": ${error.message}`)
+    })
+
     if (req.libraryItem.isBook) {
       if (req.libraryItem.media.audioFiles.some((af) => af.ino === req.params.fileid)) {
         req.libraryItem.media.audioFiles = req.libraryItem.media.audioFiles.filter((af) => af.ino !== req.params.fileid)
