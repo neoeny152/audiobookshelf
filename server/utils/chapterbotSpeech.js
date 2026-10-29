@@ -14,6 +14,13 @@
  *   chapter). Clients may offer it as the chapter title.
  * LATE and EARLY only apply to titles that start with chapter/prologue/epilogue/interlude/part, as in the script.
  *
+ * Title words are matched against the transcript word by word and tolerant to spelling (Whisper writes "Clare" for
+ * "Claire", "Ava" for "Eva"): see tokenMatch. Numbers always match exactly. LATE, EARLY and heading use the same
+ * matcher.
+ * - expected (not in the script, additive): false for front and back matter titles (Dedication, Epigraph, Opening
+ *   Credits, About the Author, ...) that narrators often do not read out, so a heading not heard there is no reason
+ *   to look at the start. Clients that predate it treat every chapter as expected.
+ *
  * Speech never moves a start (that is the snap rule's job). It may only lower confidence: LATE or EARLY -> low.
  */
 
@@ -227,6 +234,119 @@ function heardHeading(after) {
   return null
 }
 
+/** Levenshtein distance (small strings only: title words against transcript words) */
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i]
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    prev = cur
+  }
+  return prev[b.length]
+}
+
+/** Spelling tolerance for title words of FUZZY_MIN_LENGTH letters or more: 1 - distance / longer length */
+const FUZZY_MIN_SIMILARITY = 0.8
+const FUZZY_MIN_LENGTH = 5
+const VOWEL_RE = /^[aeiouy]$/
+
+/**
+ * Whether a transcript word is the title word, allowing for how Whisper spells names: exact for numbers (any digit)
+ * and words of one or two letters; for three or four letters, one vowel swapped ("Eva" / "Ava"); from five letters,
+ * a normalised edit distance similarity of at least FUZZY_MIN_SIMILARITY ("Claire" / "Clare", "Katherine" /
+ * "Catherine").
+ *
+ * @param {string} heard - token from the transcript
+ * @param {string} want - token from the title
+ * @returns {boolean}
+ */
+function tokenMatch(heard, want) {
+  if (heard === want) return true
+  if (!heard || !want || /\d/.test(heard) || /\d/.test(want)) return false
+  const longer = Math.max(heard.length, want.length)
+  if (longer < 3) return false
+  if (longer < FUZZY_MIN_LENGTH) {
+    if (heard.length !== want.length) return false
+    let diff = 0
+    for (let k = 0; k < want.length; k++) {
+      if (heard[k] === want[k]) continue
+      if (!VOWEL_RE.test(heard[k]) || !VOWEL_RE.test(want[k])) return false
+      diff++
+    }
+    return diff <= 1
+  }
+  return 1 - editDistance(heard, want) / longer >= FUZZY_MIN_SIMILARITY
+}
+
+/**
+ * Index of the first place in `hay` where the `needle` tokens follow one another (tokenMatch each), or -1.
+ *
+ * @param {string[]} hay
+ * @param {string[]} needle
+ * @returns {number}
+ */
+function findTokens(hay, needle) {
+  if (!needle.length) return -1
+  for (let i = 0; i + needle.length <= hay.length; i++) {
+    if (needle.every((t, k) => tokenMatch(hay[i + k], t))) return i
+  }
+  return -1
+}
+
+/**
+ * Front and back matter that narrators often skip, as the start of a title's tokens (after a list index such as
+ * "3. "). A chapter title that starts with one of these gets speech.expected = false.
+ */
+const UNSPOKEN_TITLE_STARTS = Object.freeze(
+  [
+    'dedication',
+    'epigraph',
+    'foreword',
+    'forward',
+    'preface',
+    'acknowledgments',
+    'acknowledgements',
+    'acknowledgment',
+    'acknowledgement',
+    'opening credits',
+    'end credits',
+    'ending credits',
+    'closing credits',
+    'credits',
+    'introduction',
+    'copyright',
+    'about the author',
+    'about the authors',
+    'about the narrator',
+    'about the narrators',
+    'also by',
+    'praise for',
+    'title page',
+    'table of contents',
+    'contents',
+    'front matter',
+    'back matter',
+    'publishers note',
+    'a note from the publisher',
+    'bonus material'
+  ].map((t) => t.split(' '))
+)
+
+/**
+ * Whether a chapter with this title is expected to have its heading read out: false for front and back matter
+ * (see UNSPOKEN_TITLE_STARTS).
+ *
+ * @param {string} title
+ * @returns {boolean}
+ */
+function isHeadingExpected(title) {
+  const tt = tokens(String(title || '').replace(/^\s*\d+\.\s*/, ''))
+  if (!tt.length) return true
+  return !UNSPOKEN_TITLE_STARTS.some((start) => start.length <= tt.length && start.every((w, k) => tt[k] === w))
+}
+
 function words(s) {
   return String(s || '')
     .split(/\s+/)
@@ -239,7 +359,7 @@ function words(s) {
  * @param {string} title
  * @param {string} before - transcript of the clip before the start
  * @param {string} after - transcript of the clip after the start
- * @returns {{before: string, after: string, heading: boolean, late: boolean, early: boolean, heard: string|null}}
+ * @returns {{before: string, after: string, heading: boolean, late: boolean, early: boolean, heard: string|null, expected: boolean}}
  */
 function assessSpeech(title, before, after) {
   before = String(before || '')
@@ -253,33 +373,33 @@ function assessSpeech(title, before, after) {
   const tt = tokens(String(title || '').replace(/^\s*\d+\.\s*/, ''))
     .filter((t) => !TITLE_STOP.has(t))
     .slice(0, 2)
-  const key = tt.join(' ')
-  const tailTok = tokens(tail).join(' ')
-  const headTok = tokens(head3).join(' ')
-  const afterTok = tokens(aw.slice(0, 25).join(' ')).join(' ')
+  const tailTok = tokens(tail)
+  const headTok = tokens(head3)
+  const afterTok = tokens(aw.slice(0, 25).join(' '))
 
-  const at = key ? afterTok.indexOf(key) : -1
-  const leadWords = at >= 0 ? words(afterTok.slice(0, at)).length : Infinity
-  const isHeadingTitle = !!key && HEADING_WORD_RE.test(tt[0])
-  const startsWithHeading = !!key && headTok.startsWith(tt[0])
+  // the transcript words before the heading (a short lead-in like "Heat 2 of 7." is part of the heading)
+  const at = findTokens(afterTok, tt)
+  const isHeadingTitle = tt.length > 0 && HEADING_WORD_RE.test(tt[0])
+  const startsWithHeading = tt.length > 0 && headTok.length > 0 && (headTok[0].startsWith(tt[0]) || tokenMatch(headTok[0], tt[0]))
 
-  const late = isHeadingTitle && tailTok.includes(key) && !startsWithHeading
-  // a short lead-in like "Heat 2 of 7." is part of the heading
-  const early = isHeadingTitle && !startsWithHeading && at >= 0 && leadWords > 5
+  const late = isHeadingTitle && findTokens(tailTok, tt) >= 0 && !startsWithHeading
+  const early = isHeadingTitle && !startsWithHeading && at >= 0 && at > 5
 
   // heading (not in the script): the title's words, with the same stop words dropped from the transcript as from
   // the title, so "The Ashes of Rome" (key "ashes rome") matches a spoken "The Ashes of Rome"
-  const afterKeyTok = ` ${tokens(aw.slice(0, 25).join(' '))
-    .filter((t) => !TITLE_STOP.has(t))
-    .join(' ')} `
-  const keyAt = key ? afterKeyTok.indexOf(` ${key} `) : -1
-  const heading = keyAt >= 0 && words(afterKeyTok.slice(0, keyAt)).length <= 5 && !early
+  const keyAt = findTokens(
+    afterTok.filter((t) => !TITLE_STOP.has(t)),
+    tt
+  )
+  const heading = keyAt >= 0 && keyAt <= 5 && !early
 
   // a start flagged LATE or EARLY is not where the speech check listened for, so what it heard there may be the
   // neighbouring chapter ("End of chapter three. ... Chapter four.")
   const heard = late || early ? null : heardHeading(after)
 
-  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early, heard }
+  const expected = isHeadingExpected(title)
+
+  return { before: before.slice(0, MAX_TEXT), after: after.slice(0, MAX_TEXT), heading, late, early, heard, expected }
 }
 
 /**
@@ -366,6 +486,8 @@ module.exports = {
   MAX_VERIFY_STARTS,
   VERIFY_DEADLINE_MS,
   tokens,
+  tokenMatch,
+  isHeadingExpected,
   heardHeading,
   assessSpeech,
   createVerifier

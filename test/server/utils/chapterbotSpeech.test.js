@@ -5,7 +5,7 @@ const Logger = require('../../../server/Logger')
 const chapterbotSpeech = require('../../../server/utils/chapterbotSpeech')
 const { ChapterbotError } = require('../../../server/utils/chapterbotClient')
 
-const { tokens, heardHeading, assessSpeech, createVerifier } = chapterbotSpeech
+const { tokens, tokenMatch, isHeadingExpected, heardHeading, assessSpeech, createVerifier } = chapterbotSpeech
 
 describe('chapterbotSpeech', () => {
   describe('tokens (build-chapters.ps1 Tokens)', () => {
@@ -75,6 +75,28 @@ describe('chapterbotSpeech', () => {
     }
   })
 
+  describe('tokenMatch', () => {
+    it('allows spelling variants of title words', () => {
+      expect(tokenMatch('clare', 'claire')).to.equal(true)
+      expect(tokenMatch('claires', 'claire')).to.equal(true)
+      expect(tokenMatch('ava', 'eva')).to.equal(true)
+      expect(tokenMatch('catherine', 'katherine')).to.equal(true)
+      expect(tokenMatch('chapters', 'chapter')).to.equal(true)
+    })
+
+    it('keeps different words, short words and numbers apart', () => {
+      expect(tokenMatch('clara', 'claire')).to.equal(false)
+      expect(tokenMatch('hannah', 'claire')).to.equal(false)
+      expect(tokenMatch('eli', 'eva')).to.equal(false)
+      expect(tokenMatch('evan', 'eva')).to.equal(false)
+      expect(tokenMatch('mark', 'mary')).to.equal(false)
+      expect(tokenMatch('12', '1')).to.equal(false)
+      expect(tokenMatch('21st', '21')).to.equal(false)
+      expect(tokenMatch('ab', 'eb')).to.equal(false)
+      expect(tokenMatch('', 'eva')).to.equal(false)
+    })
+  })
+
   describe('assessSpeech (verify-report.ps1 rules)', () => {
     const fixtures = [
       {
@@ -141,6 +163,114 @@ describe('chapterbotSpeech', () => {
         expected: { heading: true, late: false, early: false }
       },
       {
+        name: 'QA The Last Flight: a name title heard with another spelling (Claire / Clare)',
+        title: 'Claire',
+        before: 'and she hung up without another word.',
+        after: 'Clare. Monday, February 21st. The day before the crash. The sound of the shower',
+        expected: { heading: true, late: false, early: false, heard: null }
+      },
+      {
+        name: 'a short name title heard with a vowel swapped (Eva / Ava)',
+        title: 'Eva',
+        before: 'the line went dead.',
+        after: 'Ava. Berkeley, California. August 1999.',
+        expected: { heading: true, late: false, early: false }
+      },
+      {
+        name: 'a name title heard exactly, after a short lead-in',
+        title: 'Claire',
+        before: 'she closed the door.',
+        after: 'Part two. Claire. Tuesday, February 22nd.',
+        expected: { heading: true, late: false, early: false }
+      },
+      {
+        name: 'a possessive is the same name',
+        title: 'Claire',
+        before: 'nothing more.',
+        after: "Claire's phone rang at six.",
+        expected: { heading: true, late: false, early: false }
+      },
+      {
+        name: 'a different name is not the heading',
+        title: 'Claire',
+        before: 'and she hung up without another word.',
+        after: 'Eva. Berkeley, California. August 1999. The day began',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a similar but different name is not the heading (Claire / Clara)',
+        title: 'Claire',
+        before: 'and she hung up.',
+        after: 'Clara. Monday, February 21st.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'a short name with more than a vowel changed is not the heading (Eva / Eli)',
+        title: 'Eva',
+        before: 'the line went dead.',
+        after: 'Eli. Berkeley, California.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'the name more than 5 words in is not the heading',
+        title: 'Claire',
+        before: 'and so.',
+        after: 'On the day before the crash, everyone at the house said Clare woke early.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'numbers never match fuzzily',
+        title: 'Chapter 1',
+        before: 'the end.',
+        after: 'Chapter twelve. The rain.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'not LATE when the heading heard before the start is a different word (Quasar / Kwasar)',
+        title: 'Interlude Quasar',
+        before: 'and that was all. Interlude. Kwasar.',
+        after: 'The ship drifted on for days.',
+        expected: { heading: false, late: false, early: false }
+      },
+      {
+        name: 'LATE uses the same spelling tolerance (Quasar / Quaser)',
+        title: 'Interlude Quasar',
+        before: 'and that was all. Interlude. Quaser.',
+        after: 'The ship drifted on for days.',
+        expected: { heading: false, late: true, early: false }
+      },
+      {
+        name: 'EARLY uses the same spelling tolerance (Quasar / Quaser)',
+        title: 'Interlude Quasar',
+        before: 'music',
+        after: 'This audiobook is produced by Macmillan Audio. Interlude. Quaser. The ship',
+        expected: { heading: false, late: false, early: true }
+      },
+      {
+        name: 'front matter not read out is not expected (Dedication)',
+        title: 'Dedication',
+        before: 'This is Macmillan Audio.',
+        after: 'For my mother, who taught me to read.',
+        expected: { heading: false, late: false, early: false },
+        headingExpected: false
+      },
+      {
+        name: 'front matter not read out is not expected (Epigraph)',
+        title: 'Epigraph',
+        before: 'for my mother.',
+        after: 'We are all of us broken, that is how the light gets in.',
+        expected: { heading: false, late: false, early: false },
+        headingExpected: false
+      },
+      {
+        name: 'front matter that is read out is still heard',
+        title: 'Dedication',
+        before: 'This is Macmillan Audio.',
+        after: 'Dedication. For my mother.',
+        expected: { heading: true, late: false, early: false },
+        headingExpected: false
+      },
+      {
         name: 'nothing heard',
         title: 'Chapter 9',
         before: '',
@@ -152,7 +282,8 @@ describe('chapterbotSpeech', () => {
     for (const f of fixtures) {
       it(f.name, () => {
         const speech = assessSpeech(f.title, f.before, f.after)
-        expect(speech).to.have.keys(['before', 'after', 'heading', 'late', 'early', 'heard'])
+        expect(speech).to.have.keys(['before', 'after', 'heading', 'late', 'early', 'heard', 'expected'])
+        expect(speech.expected).to.equal(f.headingExpected ?? true)
         expect(speech).to.include(f.expected)
         expect(speech.before).to.equal(f.before)
         expect(speech.after).to.equal(f.after)
@@ -174,6 +305,15 @@ describe('chapterbotSpeech', () => {
       const late = assessSpeech('Chapter 4', 'and that was that. Chapter four.', 'Part two. The rain had stopped.')
       expect(late).to.include({ late: true, heard: null })
       expect(heardHeading('Part two. The rain had stopped.')).to.equal('Part 2')
+    })
+
+    it('reports speech.expected = false only for front and back matter titles', () => {
+      const unspoken = ['Dedication', 'Epigraph', 'Foreword', 'Preface', 'Acknowledgments', 'Acknowledgements', 'Opening Credits', 'End Credits', 'Introduction', 'Copyright', 'About the Author', 'Also by Julie Clark', 'Praise for The Last Flight', '2. Dedication', 'CREDITS']
+      for (const title of unspoken) expect(isHeadingExpected(title), title).to.equal(false)
+      const spoken = ['Claire', 'Eva', 'Prologue', 'Epilogue', 'Chapter 1', 'Part 2', 'The End of the Affair', 'Credit Where Due', 'Ending', '', null]
+      for (const title of spoken) expect(isHeadingExpected(title), String(title)).to.equal(true)
+      expect(assessSpeech('Opening Credits', '', 'This is Macmillan Audio.').expected).to.equal(false)
+      expect(assessSpeech('Claire', '', 'Clare.').expected).to.equal(true)
     })
 
     it('caps the echoed transcripts', () => {
@@ -229,7 +369,7 @@ describe('chapterbotSpeech', () => {
       expect(client.verify.firstCall.args[0].starts).to.deep.equal([500.5, 1500.25, 1800])
       expect(warnings).to.deep.equal([])
       expect(verdicts).to.have.length(3)
-      expect(verdicts[0]).to.deep.equal({ index: 1, speech: { before: 'the end.', after: 'Chapter one. Hello.', heading: true, late: false, early: false, heard: 'Chapter 1' } })
+      expect(verdicts[0]).to.deep.equal({ index: 1, speech: { before: 'the end.', after: 'Chapter one. Hello.', heading: true, late: false, early: false, heard: 'Chapter 1', expected: true } })
       expect(verdicts[1]).to.include({ index: 2, confidence: 'low' })
       expect(verdicts[1].speech).to.include({ late: true, early: false })
       expect(verdicts[2]).to.include({ index: 3, confidence: 'low' })
