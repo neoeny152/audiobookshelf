@@ -1,4 +1,5 @@
 const express = require('express')
+const { wrapAsyncRoutes, apiErrorHandler } = require('../utils/asyncRouteHandler')
 const ShareController = require('../controllers/ShareController')
 const SessionController = require('../controllers/SessionController')
 
@@ -7,9 +8,11 @@ class PublicRouter {
     /** @type {import('../managers/PlaybackSessionManager')} */
     this.playbackSessionManager = playbackSessionManager
 
-    this.router = express()
+    // Rejected async handlers go to the error handler instead of crashing the server
+    this.router = wrapAsyncRoutes(express())
     this.router.disable('x-powered-by')
     this.init()
+    this.router.use(apiErrorHandler('PublicRouter'))
   }
 
   init() {

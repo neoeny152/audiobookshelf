@@ -1,4 +1,5 @@
 const express = require('express')
+const { wrapAsyncRoutes, apiErrorHandler } = require('../utils/asyncRouteHandler')
 const Path = require('path')
 const sequelize = require('sequelize')
 
@@ -56,9 +57,11 @@ class ApiRouter {
     this.emailManager = Server.emailManager
     this.apiCacheManager = Server.apiCacheManager
 
-    this.router = express()
+    // Rejected async handlers go to the error handler instead of crashing the server
+    this.router = wrapAsyncRoutes(express())
     this.router.disable('x-powered-by')
     this.init()
+    this.router.use(apiErrorHandler('ApiRouter'))
   }
 
   init() {

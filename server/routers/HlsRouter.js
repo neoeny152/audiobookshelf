@@ -1,4 +1,5 @@
 const express = require('express')
+const { wrapAsyncRoutes, apiErrorHandler } = require('../utils/asyncRouteHandler')
 const Path = require('path')
 
 const Logger = require('../Logger')
@@ -12,9 +13,11 @@ class HlsRouter {
     this.auth = auth
     this.playbackSessionManager = playbackSessionManager
 
-    this.router = express()
+    // Rejected async handlers go to the error handler instead of crashing the server
+    this.router = wrapAsyncRoutes(express())
     this.router.disable('x-powered-by')
     this.init()
+    this.router.use(apiErrorHandler('HlsRouter'))
   }
 
   init() {
