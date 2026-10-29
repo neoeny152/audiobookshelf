@@ -89,7 +89,10 @@ describe('LibraryScanner one failing item does not abort the scan (#5319)', () =
 
   it('batch quick match keeps going after one item fails and reports the result (#5215)', async () => {
     sinon.stub(SocketAuthority, 'clientEmitter')
-    const items = [{ id: 'a', media: { title: 'A' } }, { id: 'b', media: { title: 'B' } }]
+    const items = [
+      { id: 'a', media: { title: 'A' } },
+      { id: 'b', media: { title: 'B' } }
+    ]
     sinon.stub(Database.libraryItemModel, 'findAllExpandedWhere').resolves(items)
     const match = sinon.stub(Scanner, 'quickMatchLibraryItem')
     match.onFirstCall().rejects(uniqueError())

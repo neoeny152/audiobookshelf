@@ -181,7 +181,15 @@ describe('Duplicate bookAuthor/bookSeries rows (#5215 #5319 #2650)', () => {
         relPath: 'New',
         isFile: false,
         mediaMetadata: { title: 'New' },
-        libraryFiles: [{ ino: '11', metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/New/a.mp3', relPath: 'a.mp3', size: 100 }, toJSON() { return this } }]
+        libraryFiles: [
+          {
+            ino: '11',
+            metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/New/a.mp3', relPath: 'a.mp3', size: 100 },
+            toJSON() {
+              return this
+            }
+          }
+        ]
       })
     }
 
@@ -205,7 +213,13 @@ describe('Duplicate bookAuthor/bookSeries rows (#5215 #5319 #2650)', () => {
     })
 
     it('"Author: Foo, Foo" creates one author, not two (#2650)', async () => {
-      stubTags(['Foo', 'Foo'], [{ name: 'Saga', sequence: '1' }, { name: 'saga', sequence: '1' }])
+      stubTags(
+        ['Foo', 'Foo'],
+        [
+          { name: 'Saga', sequence: '1' },
+          { name: 'saga', sequence: '1' }
+        ]
+      )
 
       const libraryItem = await BookScanner.scanNewBookLibraryItem(newItemScanData(), { metadataPrecedence: ['audioMetatags'], audiobooksOnly: true }, libraryScan)
 
