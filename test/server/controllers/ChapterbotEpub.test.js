@@ -314,7 +314,7 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(sidecar.requests).to.have.length(0)
   })
 
-  it('starts a job, follows it, writes the EPUB as a supplementary ebook and tells the user', async () => {
+  it('starts a job, follows it, writes the EPUB as the primary ebook of a book without one and tells the user', async () => {
     const res = await call('startEpubJob')
     expect(res.statusCode).to.equal(202)
     const { jobId, status } = res.json.firstCall.args[0]
@@ -354,7 +354,7 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(fs.readdirSync(stagingDir)).to.deep.equal([])
     expect(scanItem.calledOnceWith(bookItemId)).to.equal(true)
 
-    // the folder watcher looked away from the copy until after the rescan, so it cannot re-promote the EPUB
+    // the folder watcher looked away from the copy until after the rescan, so its own rescan cannot race ours
     expect(watcher.addIgnoreDir.calledOnceWith(itemDir)).to.equal(true)
     expect(watcher.filesAtIgnore).to.deep.equal([])
     expect(watcher.addIgnoreDir.calledBefore(scanItem)).to.equal(true)
@@ -362,14 +362,16 @@ describe('Chapterbot EPUB endpoints', () => {
     expect(watcher.removeIgnoreDir.calledAfter(scanItem)).to.equal(true)
 
     const reloaded = await Database.libraryItemModel.getExpandedById(bookItemId)
-    expect(reloaded.media.ebookFile).to.equal(null)
-    expect(reloaded.libraryFiles.find((lf) => lf.metadata.filename === 'Black Ice (from audio).epub').isSupplementary).to.equal(true)
+    const placed = reloaded.libraryFiles.find((lf) => lf.metadata.filename === 'Black Ice (from audio).epub')
+    expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+    expect(reloaded.media.ebookFile.ebookFormat).to.equal('epub')
+    expect(placed.isSupplementary).to.equal(false)
 
     expect(clientEmitter.calledOnce).to.equal(true)
     const [userId, event, payload] = clientEmitter.firstCall.args
     expect(userId).to.equal('user-1')
     expect(event).to.equal('chapterbot_epub_done')
-    expect(payload).to.include({ jobId: JOB_ID, libraryItemId: bookItemId, status: 'done', fileName: 'Black Ice (from audio).epub' })
+    expect(payload).to.include({ jobId: JOB_ID, libraryItemId: bookItemId, status: 'done', fileName: 'Black Ice (from audio).epub', ebookRole: 'primary' })
 
     const done = await call('getEpubJob', { params: { jobId: JOB_ID } })
     expect(done.json.firstCall.args[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub' })
@@ -399,6 +401,117 @@ describe('Chapterbot EPUB endpoints', () => {
 
     const reloaded = await Database.libraryItemModel.getExpandedById(bookItemId)
     expect(reloaded.media.ebookFile.ino).to.equal('primary')
+    expect(reloaded.libraryFiles.find((lf) => lf.metadata.filename === 'Black Ice (from audio) (2).epub').isSupplementary).to.equal(true)
+    expect(ChapterbotEpubManager.jobs.get(bookItemId).ebookRole).to.equal('supplementary')
+  })
+
+  describe('primary or supplementary ebook', () => {
+    const placedName = 'Black Ice (from audio).epub'
+
+    async function addLibraryFile(name, isSupplementary) {
+      fs.writeFileSync(Path.join(itemDir, name), 'other ebook')
+      const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+      const lf = { ino: `ino-${name}`, isSupplementary, fileType: 'ebook', metadata: { filename: name, ext: Path.extname(name), path: filePathToPOSIX(Path.join(itemDir, name)), relPath: name } }
+      li.libraryFiles = [...li.libraryFiles, lf]
+      li.changed('libraryFiles', true)
+      await li.save()
+      return lf
+    }
+
+    async function runJob() {
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'done' }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+      const reloaded = await Database.libraryItemModel.getExpandedById(bookItemId)
+      return { reloaded, placed: reloaded.libraryFiles.find((lf) => lf.metadata.filename === placedName), job: ChapterbotEpubManager.jobs.get(bookItemId) }
+    }
+
+    /** a rescan that, like the stock scanner may, ends with `file` as the primary ebook */
+    function scanPromoting(file) {
+      const fakeScan = scanItem
+      ChapterbotEpubManager.scanItem = async (libraryItemId) => {
+        await fakeScan(libraryItemId)
+        const li = await Database.libraryItemModel.getExpandedById(libraryItemId)
+        li.media.ebookFile = file ? { ino: file.ino, metadata: file.metadata, ebookFormat: file.metadata.ext.slice(1) } : null
+        li.media.changed('ebookFile', true)
+        await li.media.save()
+      }
+    }
+
+    it('a book with no ebook: ours becomes the primary ebook', async () => {
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+      expect(reloaded.media.ebookFile.metadata.filename).to.equal(placedName)
+      expect(placed.isSupplementary).to.equal(false)
+      expect(job.ebookRole).to.equal('primary')
+    })
+
+    it('a book with an existing primary ebook: it stays primary, ours is supplementary', async () => {
+      const real = await addLibraryFile('Black Ice.epub', false)
+      const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+      li.media.ebookFile = { ino: real.ino, metadata: real.metadata, ebookFormat: 'epub' }
+      li.media.changed('ebookFile', true)
+      await li.media.save()
+
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(real.ino)
+      expect(reloaded.libraryFiles.find((lf) => lf.ino === real.ino).isSupplementary).to.equal(false)
+      expect(placed.isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('supplementary')
+      expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done', sinon.match({ ebookRole: 'supplementary' }))).to.equal(true)
+    })
+
+    it('a book with only supplementary ebooks (a .mobi marked supplementary): ours becomes primary', async () => {
+      const mobi = await addLibraryFile('Black Ice.mobi', true)
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+      expect(placed.isSupplementary).to.equal(false)
+      expect(reloaded.libraryFiles.find((lf) => lf.ino === mobi.ino).isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('primary')
+    })
+
+    it('takes over when the rescan promoted another file the user had marked supplementary', async () => {
+      const other = await addLibraryFile('Black Ice.epub', true)
+      scanPromoting(other)
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+      expect(reloaded.libraryFiles.find((lf) => lf.ino === other.ino).isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('primary')
+    })
+
+    it('never takes over from a real ebook the rescan made primary', async () => {
+      const other = await addLibraryFile('Black Ice.epub', null)
+      scanPromoting(other)
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(other.ino)
+      expect(placed.isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('supplementary')
+    })
+
+    it('stays supplementary in an audiobooks-only library', async () => {
+      const library = await Database.libraryModel.findByPk(libraryId)
+      library.settings = { ...library.settings, audiobooksOnly: true }
+      library.changed('settings', true)
+      await library.save()
+      // the stock scanner promotes no ebook there
+      scanPromoting(null)
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile).to.equal(null)
+      expect(placed.isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('supplementary')
+    })
+
+    it('a job started by the auto pipeline follows the same rule', async () => {
+      const ended = []
+      ChapterbotEpubManager.on('ended', (job) => ended.push(job))
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      await ChapterbotEpubManager.start(libraryItem, null, { origin: 'pipeline' })
+      sidecar.state = { ...sidecar.state, status: 'done' }
+      await until(() => ended.length === 1)
+      expect(ended[0]).to.include({ status: 'done', origin: 'pipeline', ebookRole: 'primary' })
+      const reloaded = await Database.libraryItemModel.getExpandedById(bookItemId)
+      expect(reloaded.media.ebookFile.metadata.filename).to.equal(placedName)
+    })
   })
 
   it('cancels a job', async () => {
@@ -826,7 +939,8 @@ describe('Chapterbot EPUB endpoints', () => {
       try {
         await restarted.init({ persistPath })
         await until(() => ended.length === 1)
-        expect(ended[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub', origin: 'user', userId: 'user-1' })
+        expect(ended[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub', origin: 'user', userId: 'user-1', ebookRole: 'primary' })
+        expect((await Database.libraryItemModel.getExpandedById(bookItemId)).media.ebookFile.metadata.filename).to.equal('Black Ice (from audio).epub')
         expect(fs.existsSync(Path.join(itemDir, 'Black Ice (from audio).epub'))).to.equal(true)
         expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done')).to.equal(true)
         expect((await restarted.getCurrent(bookItemId)).status).to.equal('done')

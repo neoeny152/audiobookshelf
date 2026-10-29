@@ -1061,7 +1061,8 @@ class LibraryItemController {
    * POST: /api/items/:id/epub
    * Build an EPUB from the book's audio with the chapterbot sidecar (optional, see utils/chapterbotClient.js).
    * The server follows the job, writes "<Title> (from audio).epub" into the item folder (never overwriting),
-   * rescans the item and emits chapterbot_epub_done / chapterbot_epub_failed to the requesting user, and
+   * rescans the item (the EPUB becomes the primary ebook only when the book has none, else it is supplementary)
+   * and emits chapterbot_epub_done / chapterbot_epub_failed to the requesting user, and
    * chapterbot_epub_updated to everyone who can access the item.
    * One job per item; running jobs are persisted and followed again after a server restart.
    *

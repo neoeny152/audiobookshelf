@@ -3,6 +3,7 @@ const EventEmitter = require('events')
 const fs = require('../libs/fsExtra')
 const Logger = require('../Logger')
 const Database = require('../Database')
+const globals = require('../utils/globals')
 const SocketAuthority = require('../SocketAuthority')
 const chapterbotClient = require('../utils/chapterbotClient')
 const chapterSnap = require('../utils/chapterSnap')
@@ -15,7 +16,11 @@ const { writeJsonAtomic, readJson } = require('../utils/autoPipeline/store')
  *
  * The server, not the client, follows each job: it polls the sidecar, downloads the finished EPUB, writes
  * "<Title> (from audio).epub" into the library item's folder (never overwriting: an existing name gets " (2)", " (3)", ...),
- * rescans the item so the file shows up as a supplementary ebook, and emits a socket event to the user who started it.
+ * rescans the item and emits a socket event to the user who started it. The EPUB becomes the book's PRIMARY ebook when
+ * the book had none (no ebook at all, or only supplementary ones), so the web client shows Read and the mobile apps see
+ * it; a book that already has a primary ebook (a real published one) keeps it, and this EPUB stays supplementary.
+ * The same rule applies to jobs started by the auto pipeline and to jobs followed again after a restart (one finish
+ * path). The job's ebookRole ('primary' | 'supplementary', null until done) says which it became.
  *
  * One job per library item. Running jobs, and the latest finished job of an item for FINISHED_TTL_MS, are persisted to
  * MetadataPath/pipeline/epub-jobs.json once init() has run. On boot every running entry is adopted and followed again
@@ -70,6 +75,8 @@ function xmlText(value, max) {
 
 const JOB_ID_RE = /^[A-Za-z0-9_-]{1,128}$/
 const ORIGINS = new Set(['user', 'pipeline'])
+/** what the placed EPUB became (job.ebookRole) */
+const EBOOK_ROLES = new Set(['primary', 'supplementary'])
 
 class ChapterbotEpubManager extends EventEmitter {
   constructor() {
@@ -149,6 +156,7 @@ class ChapterbotEpubManager extends EventEmitter {
         chaptersTotal: Number.isInteger(entry.chaptersTotal) ? entry.chaptersTotal : 0,
         error: text(entry.error, MAX_TEXT),
         fileName: text(entry.fileName, 1024),
+        ebookRole: EBOOK_ROLES.has(entry.ebookRole) ? entry.ebookRole : null,
         createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : entry.finishedAt,
         finishedAt: entry.finishedAt,
         access
@@ -209,7 +217,7 @@ class ChapterbotEpubManager extends EventEmitter {
       const base = { libraryItemId: r.libraryItemId, jobId: r.jobId, origin: r.origin, userId: r.userId, createdAt: r.createdAt }
       if (ACTIVE.has(r.status)) entries.push(base)
       else if (FINISHED.has(r.status) && r.finishedAt && now - r.finishedAt <= FINISHED_TTL_MS) {
-        entries.push({ ...base, status: r.status, finishedAt: r.finishedAt, fileName: r.fileName, error: r.error, title: r.title, progress: r.progress, chaptersDone: r.chaptersDone, chaptersTotal: r.chaptersTotal, access: r.access })
+        entries.push({ ...base, status: r.status, finishedAt: r.finishedAt, fileName: r.fileName, ebookRole: r.ebookRole, error: r.error, title: r.title, progress: r.progress, chaptersDone: r.chaptersDone, chaptersTotal: r.chaptersTotal, access: r.access })
       }
     }
     for (const entry of this.deferred) if (!this.jobs.has(entry.libraryItemId)) entries.push(entry)
@@ -236,6 +244,7 @@ class ChapterbotEpubManager extends EventEmitter {
       chaptersTotal: 0,
       error: null,
       fileName: null,
+      ebookRole: null,
       cancelRequested: false,
       createdAt: this.now(),
       finishedAt: null,
@@ -510,9 +519,8 @@ class ChapterbotEpubManager extends EventEmitter {
 
     const staging = this.stagingDir()
     const temp = Path.join(staging, `${record.jobId}.epub`)
-    // The folder watcher would rescan the item about 10 s after the file appears and, finding no primary ebook,
-    // promote this EPUB to one (stock scanner rule), undoing keepSupplementary(). Keep the watcher off this folder
-    // from the copy until our own rescan is done (released 5 s later, as for podcast downloads).
+    // Keep the folder watcher off this folder from the copy until our own rescan and setEbookRole() are done
+    // (released 5 s later, as for podcast downloads), so its own rescan does not race ours.
     const watcher = this.getWatcher()
     let ignoring = false
     try {
@@ -566,7 +574,7 @@ class ChapterbotEpubManager extends EventEmitter {
 
     try {
       await this.scanItem(record.libraryItemId)
-      if (!hadPrimaryEbook) await this.keepSupplementary(record.libraryItemId, finalPath)
+      record.ebookRole = await this.setEbookRole(record.libraryItemId, finalPath, hadPrimaryEbook)
     } catch (error) {
       // the file is in place; a later scan will pick it up
       Logger.error(`[ChapterbotEpubManager] Rescan of "${record.libraryItemId}" after EPUB job ${record.jobId} failed`, error)
@@ -609,26 +617,73 @@ class ChapterbotEpubManager extends EventEmitter {
   }
 
   /**
-   * A rescan makes the first ebook of a book without one its primary ebook. This EPUB is a by-product of the audio,
-   * so turn it back into a supplementary ebook (as PATCH /api/items/:id/ebook/:fileid/status does).
-   * The folder watcher is kept off the folder meanwhile (see finish()). A later library or item scan, while the book
-   * still has no primary ebook, may promote it again (stock scanner rule, unchanged here).
+   * After the rescan, give the placed EPUB its role (as PATCH /api/items/:id/ebook/:fileid/status would):
+   * - the book had a primary ebook before (a real published ebook): it stays primary, this EPUB is supplementary;
+   * - the book had none (no ebook, or only supplementary ones): this EPUB becomes the primary ebook, so the web client
+   *   shows Read and the mobile apps see it. The rescan usually did that already (stock scanner rule: a book without a
+   *   primary ebook takes its first epub), but it may have promoted another file the user had marked supplementary
+   *   instead; that one goes back to supplementary. A file that is primary now and was not marked supplementary (a real
+   *   ebook added meanwhile) is never taken over. In an audiobooks-only library the EPUB stays supplementary.
+   * The folder watcher is kept off the folder meanwhile (see finish()).
+   *
+   * @param {string} libraryItemId
+   * @param {string} finalPath - the EPUB in the library item folder
+   * @param {boolean} hadPrimaryEbook - whether the book had a primary ebook when the job finished on the sidecar
+   * @returns {Promise<'primary'|'supplementary'|null>} null when the rescan did not pick the file up
    */
-  async keepSupplementary(libraryItemId, finalPath) {
+  async setEbookRole(libraryItemId, finalPath, hadPrimaryEbook) {
     const libraryItem = await Database.libraryItemModel.getExpandedById(libraryItemId)
-    if (!libraryItem?.media?.ebookFile) return
+    if (!libraryItem?.media) return null
     const posixPath = filePathToPOSIX(finalPath)
-    const libraryFile = (libraryItem.libraryFiles || []).find((lf) => lf.metadata?.path === posixPath)
-    if (!libraryFile || libraryItem.media.ebookFile.ino !== libraryFile.ino) return
+    const libraryFiles = libraryItem.libraryFiles || []
+    const libraryFile = libraryFiles.find((lf) => lf.metadata?.path === posixPath)
+    if (!libraryFile) return null
 
-    libraryItem.media.ebookFile = null
-    libraryItem.media.changed('ebookFile', true)
-    await libraryItem.media.save()
-    libraryItem.libraryFiles = libraryItem.libraryFiles.map((lf) => (lf.ino === libraryFile.ino ? { ...lf, isSupplementary: true } : lf))
+    const current = libraryItem.media.ebookFile
+    if (current?.ino === libraryFile.ino) {
+      // the stock scanner keeps an existing primary ebook, so this means the book had none
+      if (libraryFile.isSupplementary === false) return 'primary'
+      return this.applyEbookRole(libraryItem, libraryFile, true)
+    }
+
+    let makePrimary = !hadPrimaryEbook
+    if (makePrimary && current) {
+      // the rescan promoted another file: take over only from one the user had marked supplementary
+      const currentFile = libraryFiles.find((lf) => lf.ino === current.ino)
+      makePrimary = currentFile?.isSupplementary === true
+    }
+    if (makePrimary) {
+      const library = await Database.libraryModel.findByPk(libraryItem.libraryId)
+      if (library?.settings?.audiobooksOnly) makePrimary = false
+    }
+    if (!makePrimary && libraryFile.isSupplementary === true) return 'supplementary'
+    return this.applyEbookRole(libraryItem, libraryFile, makePrimary)
+  }
+
+  /**
+   * @param {import('../models/LibraryItem')} libraryItem - expanded
+   * @param {Object} libraryFile - the placed EPUB's library file
+   * @param {boolean} primary - make it the primary ebook (every other ebook file supplementary), or a supplementary one
+   * @returns {Promise<'primary'|'supplementary'>}
+   */
+  async applyEbookRole(libraryItem, libraryFile, primary) {
+    const isEbook = (lf) => globals.SupportedEbookTypes.includes(lf.metadata?.ext?.slice(1).toLowerCase() || '')
+    if (primary) {
+      const { isSupplementary, fileType, ...ebookFile } = libraryFile
+      ebookFile.ebookFormat = libraryFile.metadata.ext.slice(1).toLowerCase()
+      libraryItem.media.ebookFile = ebookFile
+      libraryItem.media.changed('ebookFile', true)
+      await libraryItem.media.save()
+      libraryItem.libraryFiles = libraryItem.libraryFiles.map((lf) => (isEbook(lf) ? { ...lf, isSupplementary: lf.ino !== libraryFile.ino } : lf))
+    } else {
+      libraryItem.libraryFiles = libraryItem.libraryFiles.map((lf) => (lf.ino === libraryFile.ino ? { ...lf, isSupplementary: true } : lf))
+    }
     libraryItem.changed('libraryFiles', true)
     libraryItem.isMissing = !libraryItem.media.hasMediaFiles
     await libraryItem.save()
     SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+    Logger.info(`[ChapterbotEpubManager] "${libraryFile.metadata.filename}" is ${primary ? 'the primary' : 'a supplementary'} ebook of "${libraryItem.id}"`)
+    return primary ? 'primary' : 'supplementary'
   }
 
   fail(record, message) {
@@ -757,6 +812,7 @@ class ChapterbotEpubManager extends EventEmitter {
       cancelRequested: record.cancelRequested,
       error: record.error,
       fileName: record.fileName,
+      ebookRole: record.ebookRole,
       createdAt: record.createdAt,
       finishedAt: record.finishedAt
     }
