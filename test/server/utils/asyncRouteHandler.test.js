@@ -8,6 +8,8 @@ const ApiRouter = require('../../../server/routers/ApiRouter')
 const MiscController = require('../../../server/controllers/MiscController')
 const ApiCacheManager = require('../../../server/managers/ApiCacheManager')
 const Auth = require('../../../server/Auth')
+const Server = require('../../../server/Server')
+const cookieParser = require('cookie-parser')
 const { wrapAsyncRoutes, apiErrorHandler } = require('../../../server/utils/asyncRouteHandler')
 
 /**
@@ -121,6 +123,39 @@ describe('asyncRouteHandler (#5215: a failed request must not crash the server)'
 
     const res = await request(app, 'GET', '/early')
     expect(res.status).to.equal(200)
+    await new Promise((resolve) => setImmediate(resolve))
+    expect(unhandled).to.have.length(0)
+  })
+
+  it('the top-level router (login/refresh/logout routes from Auth) answers 500 instead of an unhandled rejection', async () => {
+    const auth = new Auth()
+    sinon.stub(auth.tokenManager, 'handleRefreshToken').rejects(new Error('SQLITE_BUSY: database is locked'))
+    const router = Server.createRootRouter()
+    router.use(cookieParser())
+    await auth.initAuthRoutes(router)
+    Server.addRootErrorHandler(router)
+    const app = express()
+    app.use(router)
+
+    const res = await new Promise((resolve, reject) => {
+      const server = http.createServer(app).listen(0, '127.0.0.1', () => {
+        const timer = setTimeout(() => {
+          server.close()
+          reject(new Error('request timed out'))
+        }, 2000)
+        const req = http.request({ host: '127.0.0.1', port: server.address().port, path: '/auth/refresh', method: 'POST', headers: { 'x-refresh-token': 'abc' } }, (r) => {
+          r.resume()
+          r.on('end', () => {
+            clearTimeout(timer)
+            server.close()
+            resolve({ status: r.statusCode })
+          })
+        })
+        req.on('error', reject)
+        req.end()
+      })
+    })
+    expect(res.status).to.equal(500)
     await new Promise((resolve) => setImmediate(resolve))
     expect(unhandled).to.have.length(0)
   })

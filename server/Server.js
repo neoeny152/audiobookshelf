@@ -18,6 +18,7 @@ const fileUtils = require('./utils/fileUtils')
 const { toNumber } = require('./utils/index')
 const { getRequestOrigin } = require('./utils/requestUtils')
 const { createJsonBodyParser } = require('./utils/jsonBodyParser')
+const { wrapAsyncRoutes, apiErrorHandler } = require('./utils/asyncRouteHandler')
 const Logger = require('./Logger')
 
 const Auth = require('./Auth')
@@ -78,6 +79,26 @@ function getPreparedNextBasePath(nextApp) {
 }
 
 class Server {
+  /**
+   * Top-level router (auth, init, status, feeds, client). Async handlers registered on it
+   * (login, token refresh, logout, OIDC) pass a rejection to the error handler instead of
+   * reaching the unhandledRejection listener, which exits the process (#5215).
+   *
+   * @returns {import('express').Router}
+   */
+  static createRootRouter() {
+    return wrapAsyncRoutes(express.Router())
+  }
+
+  /**
+   * Must be registered after every route on the root router
+   *
+   * @param {import('express').Router} router
+   */
+  static addRootErrorHandler(router) {
+    router.use(apiErrorHandler('Server'))
+  }
+
   constructor(SOURCE, PORT, HOST, CONFIG_PATH, METADATA_PATH, ROUTER_BASE_PATH) {
     this.Port = PORT
     this.Host = HOST
@@ -324,7 +345,7 @@ class Server {
     // config passport.js
     await this.auth.initPassportJs()
 
-    const router = express.Router()
+    const router = Server.createRootRouter()
 
     // if RouterBasePath is set, modify all requests to include the base path
     app.use((req, res, next) => {
@@ -386,7 +407,8 @@ class Server {
         Logger.error(`[Server] attempt to init server when server already has a root user`)
         return res.sendStatus(500)
       }
-      this.initializeServer(req, res)
+      // Returned so a failure reaches the error handler instead of an unhandled rejection
+      return this.initializeServer(req, res)
     })
     router.get('/status', (req, res) => {
       // status check for client to see if server has been initialized (see utils/serverFeatures.js)
@@ -458,6 +480,7 @@ class Server {
         handle(req, res)
       })
     }
+    Server.addRootErrorHandler(router)
 
     const unixSocketPrefix = 'unix/'
     if (this.Host?.startsWith(unixSocketPrefix)) {
