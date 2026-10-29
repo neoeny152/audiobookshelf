@@ -328,12 +328,116 @@ describe('chapterbotClient', () => {
       expect(fake.requests).to.have.length(1)
 
       // a result older than the freshness window is not advertised
-      expect(chapterbotClient.advertisedFeatures(Date.now() + 10 * 60000)).to.deep.equal([])
+      expect(chapterbotClient.advertisedFeatures(Date.now() + chapterbotClient.HEALTH_FRESH_MS + 60000)).to.deep.equal([])
       await chapterbotClient._health.inflight
 
       healthy = false
       await chapterbotClient.checkHealth()
       expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+    })
+
+    describe('feature advertisement while the sidecar is busy', () => {
+      const ALL = ['chapterbotVerify', 'chapterbotEpub']
+
+      it('probes /healthz with a timeout that tolerates a busy (CPU-bound) sidecar', () => {
+        expect(chapterbotClient.HEALTH_TIMEOUT_MS).to.be.at.least(15000)
+        expect(chapterbotClient.HEALTH_FRESH_MS).to.be.at.least(10 * 60000)
+      })
+
+      it('keeps the features when a probe times out after a healthy one (busy transcribing)', async () => {
+        let slowMs = 0
+        fake = await startFakeServer((req, res) => {
+          setTimeout(() => sendJson(res, 200, { ok: true, epubWorkers: 1 }), slowMs)
+        })
+        configureFor(fake.url)
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+
+        slowMs = 300
+        expect(await chapterbotClient.checkHealth({ timeoutMs: 30 })).to.equal(true)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+        // repeated slow probes warn only once
+        await chapterbotClient.checkHealth({ timeoutMs: 30 })
+        expect(warn.callCount).to.equal(1)
+        expectNoToken(warn.firstCall.args[0])
+      })
+
+      it('keeps the features when the sidecar cannot be reached for a moment (restart)', async () => {
+        fake = await startFakeServer((req, res) => sendJson(res, 200, { ok: true, epubWorkers: 1 }))
+        const url = fake.url
+        configureFor(url)
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+        await fake.close()
+        fake = null
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+      })
+
+      it('drops the features once the last-known-good result is too old', async () => {
+        fake = await startFakeServer((req, res) => setTimeout(() => sendJson(res, 200, { ok: true }), 300))
+        configureFor(fake.url)
+        chapterbotClient._health.ok = true
+        chapterbotClient._health.okAt = Date.now() - chapterbotClient.HEALTH_FRESH_MS - 1000
+        expect(await chapterbotClient.checkHealth({ timeoutMs: 30 })).to.equal(false)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+      })
+
+      it('drops the features at once on an explicit unhealthy answer', async () => {
+        let healthy = true
+        fake = await startFakeServer((req, res) => sendJson(res, healthy ? 200 : 503, { ok: healthy, epubWorkers: healthy ? 1 : 0 }))
+        configureFor(fake.url)
+        expect(await chapterbotClient.checkHealth()).to.equal(true)
+        healthy = false
+        expect(await chapterbotClient.checkHealth()).to.equal(false)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+      })
+
+      it('counts answered /v1 calls (EPUB job polls) as proof of life while /healthz is too slow', async () => {
+        const jobId = '0123456789abcdef0123456789abcdef'
+        fake = await startFakeServer((req, res) => {
+          if (req.url === '/healthz') return setTimeout(() => sendJson(res, 200, { ok: true }), 300)
+          sendJson(res, 200, { jobId, status: 'running' })
+        })
+        configureFor(fake.url)
+        // the healthy probe was long ago, every recent probe timed out
+        chapterbotClient._health.ok = true
+        chapterbotClient._health.okAt = Date.now() - chapterbotClient.HEALTH_FRESH_MS - 1000
+        expect(await chapterbotClient.checkHealth({ timeoutMs: 30 })).to.equal(false)
+        await chapterbotClient.getJob(jobId)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+      })
+
+      it('counts a "busy" 503 from /v1 as proof of life, but not after /healthz said unhealthy', async () => {
+        let healthy = true
+        fake = await startFakeServer((req, res) => {
+          if (req.url === '/healthz') return sendJson(res, healthy ? 200 : 503, { ok: healthy })
+          sendJson(res, 503, { detail: { code: 'busy', message: 'try later' } })
+        })
+        configureFor(fake.url)
+        chapterbotClient._health.okAt = 0
+        await chapterbotClient.getInfo().catch(() => null)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+
+        healthy = false
+        await chapterbotClient.checkHealth()
+        await chapterbotClient.getInfo().catch(() => null)
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal([])
+      })
+
+      it('warms up at start so the first /status already has the answer', async () => {
+        fake = await startFakeServer((req, res) => sendJson(res, 200, { ok: true, epubWorkers: 1 }))
+        configureFor(fake.url)
+        const pending = chapterbotClient.warmUp()
+        expect(pending).to.be.instanceOf(Promise)
+        await pending
+        expect(chapterbotClient.advertisedFeatures()).to.deep.equal(ALL)
+        // the warm-up counts as the recent check: no second probe
+        expect(fake.requests).to.have.length(1)
+      })
+
+      it('warmUp does nothing when chapterbot is not configured', () => {
+        chapterbotClient.configure({})
+        expect(chapterbotClient.warmUp()).to.equal(null)
+      })
     })
   })
 })

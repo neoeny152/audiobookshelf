@@ -210,6 +210,9 @@ class Server {
     await this.cronManager.init(libraries)
     this.apiCacheManager.init()
 
+    // Probe the optional chapterbot sidecar in the background so the first GET /status already knows its features
+    chapterbotClient.warmUp()
+
     if (Database.serverSettings.scannerDisableWatcher) {
       Logger.info(`[Server] Watcher is disabled`)
       Watcher.disabled = true

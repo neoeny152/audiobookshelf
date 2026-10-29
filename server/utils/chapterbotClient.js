@@ -20,11 +20,19 @@ const Logger = require('../Logger')
 const FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub'])
 const MIN_TOKEN_LENGTH = 16
 const DEFAULT_TIMEOUT_MS = 30000
-const HEALTH_TIMEOUT_MS = 5000
+/**
+ * /healthz is cheap, but a sidecar busy transcribing (CPU-bound Whisper threads) can take many seconds to answer it.
+ * The probe runs in the background, so a generous timeout costs nothing.
+ */
+const HEALTH_TIMEOUT_MS = 20000
 /** Health is re-checked at most this often (in the background, never blocking /status) */
 const HEALTH_RECHECK_MS = 60000
-/** The features are advertised while the last health check succeeded and is at most this old */
-const HEALTH_FRESH_MS = 5 * 60000
+/**
+ * Last-known-good window: the features stay advertised while the sidecar was last seen working at most this long ago.
+ * A probe that times out or cannot connect does not drop them on its own (a busy or restarting sidecar is still the
+ * sidecar); only an explicit unhealthy answer from /healthz does, or this window running out.
+ */
+const HEALTH_FRESH_MS = 15 * 60000
 const MAX_JSON_BYTES = 2 * 1024 * 1024
 const MAX_ERROR_BYTES = 64 * 1024
 const JOB_ID_RE = /^[0-9a-f]{32}$/
@@ -166,7 +174,11 @@ function loadConfig(env) {
 
 /** @type {ChapterbotConfig|null|undefined} undefined = not loaded yet */
 let config
-const health = { checkedAt: 0, okAt: 0, ok: false, inflight: null }
+/**
+ * ok: the last verdict /healthz gave (null = none yet, or only failed probes since configure)
+ * okAt: when the sidecar was last seen working (a healthy /healthz, or any answered /v1 call while not unhealthy)
+ */
+const health = { checkedAt: 0, okAt: 0, ok: null, inflight: null, failing: false }
 
 function getConfig() {
   if (config === undefined) config = loadConfig(process.env)
@@ -186,8 +198,9 @@ function configure(env = process.env) {
   config = loadConfig(env)
   health.checkedAt = 0
   health.okAt = 0
-  health.ok = false
+  health.ok = null
   health.inflight = null
+  health.failing = false
   return config
 }
 
@@ -269,6 +282,9 @@ function request(method, path, opts = {}) {
     req.on('response', (res) => {
       const status = res.statusCode || 0
       const ok = status >= 200 && status < 300
+      // A /v1 answer proves the sidecar is up even while /healthz is too slow (busy) to answer in time.
+      // 429/503 are its "busy" answers. /healthz itself is judged by checkHealth.
+      if (target.pathname !== `${cfg.basePath}/healthz` && (ok || status === 429 || status === 503)) noteAlive()
       const limit = ok ? maxBytes : MAX_ERROR_BYTES
 
       if (ok && sink) {
@@ -324,23 +340,75 @@ function request(method, path, opts = {}) {
   })
 }
 
+/** The sidecar answered a /v1 call: refresh the last-known-good time unless /healthz said it is broken */
+function noteAlive() {
+  if (health.ok !== false) health.okAt = Date.now()
+}
+
 /**
  * GET /healthz (no token sent). Updates the cached health used for /status.
  *
- * @returns {Promise<boolean>}
+ * - 200 {ok: true}: healthy
+ * - any other answer (503 {ok: false} when an EPUB worker died, 401, garbage): unhealthy, features drop at once
+ * - timeout / connection error: no verdict, the last-known-good result is kept (see HEALTH_FRESH_MS)
+ *
+ * @param {Object} [opts]
+ * @param {number} [opts.timeoutMs]
+ * @returns {Promise<boolean>} whether the features are advertised afterwards
  */
-async function checkHealth() {
-  const now = Date.now()
-  health.checkedAt = now
+async function checkHealth({ timeoutMs = HEALTH_TIMEOUT_MS } = {}) {
+  health.checkedAt = Date.now()
   try {
-    const { json } = await request('GET', '/healthz', { auth: false, timeoutMs: HEALTH_TIMEOUT_MS, maxBytes: 4096 })
-    health.ok = json?.ok === true
-    if (health.ok) health.okAt = Date.now()
+    const { json } = await request('GET', '/healthz', { auth: false, timeoutMs, maxBytes: 4096 })
+    const ok = json?.ok === true
+    if (!ok && health.ok !== false) Logger.warn(`[Chapterbot] Health check says the sidecar is unhealthy`)
+    health.ok = ok
+    if (ok) health.okAt = Date.now()
+    health.failing = false
   } catch (error) {
-    if (health.ok) Logger.warn(`[Chapterbot] Health check failed: ${error.message}`)
-    health.ok = false
+    if (error.code === 'http_error' || error.code === 'bad_response' || error.code === 'too_large') {
+      if (health.ok !== false) Logger.warn(`[Chapterbot] Health check failed: ${error.message}`)
+      health.ok = false
+    } else if (!health.failing) {
+      // busy or restarting: keep the last verdict, warn once per run of failures
+      Logger.warn(`[Chapterbot] Health check failed, keeping the last result for now: ${error.message}`)
+    }
+    health.failing = true
   }
-  return health.ok
+  return isAdvertised()
+}
+
+function isAdvertised(now = Date.now()) {
+  return health.ok !== false && health.okAt > 0 && now - health.okAt <= HEALTH_FRESH_MS
+}
+
+/**
+ * Start a background health check when the last one is older than HEALTH_RECHECK_MS (or `force`).
+ *
+ * @param {number} [now]
+ * @param {boolean} [force]
+ * @returns {Promise<boolean>|null} the running check, if any
+ */
+function refreshHealth(now = Date.now(), force = false) {
+  if (!getConfig()) return null
+  if (!health.inflight && (force || now - health.checkedAt >= HEALTH_RECHECK_MS)) {
+    health.inflight = checkHealth()
+      .catch(() => false)
+      .finally(() => {
+        health.inflight = null
+      })
+  }
+  return health.inflight
+}
+
+/**
+ * Probe the sidecar once at server start, so the first GET /status after a restart already has an answer.
+ * Never throws and never blocks startup.
+ *
+ * @returns {Promise<boolean>|null}
+ */
+function warmUp() {
+  return refreshHealth(Date.now(), true)
 }
 
 /**
@@ -352,14 +420,8 @@ async function checkHealth() {
  */
 function advertisedFeatures(now = Date.now()) {
   if (!getConfig()) return []
-  if (!health.inflight && now - health.checkedAt >= HEALTH_RECHECK_MS) {
-    health.inflight = checkHealth()
-      .catch(() => false)
-      .finally(() => {
-        health.inflight = null
-      })
-  }
-  return health.ok && now - health.okAt <= HEALTH_FRESH_MS ? [...FEATURES] : []
+  refreshHealth(now)
+  return isAdvertised(now) ? [...FEATURES] : []
 }
 
 /**
@@ -484,6 +546,7 @@ module.exports = {
   getConfig,
   request,
   checkHealth,
+  warmUp,
   advertisedFeatures,
   mapFiles,
   mapOnePath,
@@ -493,6 +556,8 @@ module.exports = {
   downloadJobResult,
   deleteJob,
   getInfo,
+  HEALTH_TIMEOUT_MS,
+  HEALTH_FRESH_MS,
   /** for tests */
   _health: health
 }
