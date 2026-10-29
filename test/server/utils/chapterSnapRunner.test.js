@@ -313,6 +313,32 @@ describe('chapterSnapRunner', () => {
       expect(result.stats.pausesFound).to.equal(2)
     })
 
+    it('keeps every chapter of a chapter-per-file book on its file start, also with anchorInsidePause', async () => {
+      // Each part ends with 1.2 s of silence and the next one starts with speech: the pause ends exactly at the joint
+      const durations = [3932.4996, 4152.9208, 4029.649]
+      const files = chapterSnap.buildTimeline(durations.map((duration, i) => ({ duration, metadata: { path: `/books/bi/part${i}.mp3` } })))
+      const total = durations.reduce((sum, d) => sum + d, 0)
+      const detect = async ({ path, startSec, durationSec }) => {
+        const track = files.find((t) => t.path === path)
+        const s = Math.max(0, track.duration - 1.2 - startSec)
+        const e = Math.min(durationSec, track.duration - startSec)
+        if (e - s <= 0) return { lines: [] }
+        return { lines: [`[silencedetect @ 0x1] silence_start: ${s.toFixed(6)}`, `[silencedetect @ 0x1] silence_end: ${e.toFixed(6)} | silence_duration: ${(e - s).toFixed(6)}`] }
+      }
+      for (const anchorInsidePause of [false, true]) {
+        const result = await run({
+          timeline: files,
+          T: total,
+          chapters: files.map((t, i) => ({ id: i, start: t.offset })),
+          detect,
+          options: { ...chapterSnap.DEFAULT_OPTIONS, anchorInsidePause }
+        })
+        expect(result.chapters.map((c) => c.trackIndex), `anchor ${anchorInsidePause}`).to.deep.equal([0, 1, 2])
+        expect(result.chapters.slice(1).map((c) => c.reason)).to.deep.equal([REASONS.INSIDE_PAUSE, REASONS.INSIDE_PAUSE])
+        expect(result.stats.moved, `anchor ${anchorInsidePause}`).to.equal(0)
+      }
+    })
+
     it('decodes a 0.5 s head piece of the next file and still finds the joint pause', async () => {
       const result = await run({
         timeline: jointTimeline,

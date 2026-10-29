@@ -115,7 +115,7 @@ function clamp(value, min, max) {
  * @property {number} headingLookbackSec - how far before the chosen pause a longer pause may sit to win (0 = off)
  * @property {boolean} snapToFileStart
  * @property {boolean} anchorInsidePause - opt-in: move a start that is already inside a pause to leadSec before its end
- *   (same pause, reason stays inside-pause; a start on a file start is kept)
+ *   (same pause, reason stays inside-pause; never into an earlier file)
  * @property {boolean} [verify] - run the chapterbot speech check (only present when true)
  */
 
@@ -265,7 +265,8 @@ function computeDuration(timeline, mediaDuration) {
 }
 
 /**
- * Index of the track that holds book time `t`
+ * Index of the track that holds book time `t`. Offsets are summed float durations and starts are rounded to 3 decimals,
+ * so a start within CLIP_EPS before a file offset counts as that file's start.
  *
  * @param {TimelineTrack[]} timeline
  * @param {number} t
@@ -274,9 +275,20 @@ function computeDuration(timeline, mediaDuration) {
 function trackIndexAt(timeline, t) {
   if (!timeline.length) return 0
   for (let k = timeline.length - 1; k >= 0; k--) {
-    if (timeline[k].offset <= t + EPS && timeline[k].duration > 0) return timeline[k].index
+    if (timeline[k].offset <= t + CLIP_EPS && timeline[k].duration > 0) return timeline[k].index
   }
   return timeline[0].index
+}
+
+/**
+ * True when `t` sits on the start of a file after the first (within CLIP_EPS)
+ *
+ * @param {TimelineTrack[]} timeline
+ * @param {number} t
+ * @returns {boolean}
+ */
+function onFileStart(timeline, t) {
+  return timeline.some((track) => track.offset > 0 && track.duration > 0 && Math.abs(t - track.offset) <= CLIP_EPS)
 }
 
 /**
@@ -637,14 +649,17 @@ function snapOne({ index, t, pauses, timeline, options, bounds, skipReason = nul
     proposal.pause = inside
     // Anchor on the same spot of the pause as a moved start (leadSec before speech resumes), so an early start in the
     // pause before the chapter and a start already placed in it end up in the same place. The original start stays
-    // the fallback for the order pass. A pause end cut by the analysed window is not a real edge: keep the start.
+    // the fallback for the order pass. A pause end cut by the analysed window is not a real edge: keep the start. The
+    // anchor never moves a start into an earlier file (a pause that ends right after a joint).
     if (options.anchorInsidePause && !inside.endClipped) {
       const target = pauseTarget(inside, options.leadSec)
-      if (inBounds(target, bounds) && Math.abs(target - t) > EPS) {
+      if (inBounds(target, bounds) && Math.abs(target - t) > EPS && trackIndexAt(timeline, target) >= trackIndexAt(timeline, t)) {
         proposal.proposedStart = target
         proposal.alternatives = [{ pause: inside, target: t, score: 0 }]
       }
     }
+    // A start on a file start (books split one chapter per file) is never looked back into the previous file
+    if (onFileStart(timeline, t)) return proposal
     return applyHeadingLookback(proposal, pauses, options)
   }
 
@@ -911,6 +926,7 @@ module.exports = {
   buildTimeline,
   computeDuration,
   trackIndexAt,
+  onFileStart,
   chapterWindow,
   planSegments,
   parseSilencedetect,

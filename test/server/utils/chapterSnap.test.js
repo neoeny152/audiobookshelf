@@ -195,6 +195,15 @@ describe('chapterSnap', () => {
       ])
       expect(timeline.map((t) => t.offset)).to.deep.equal(getTracklistOffsets(files))
     })
+
+    it('trackIndexAt puts a start rounded to 3 decimals on its file start', () => {
+      // Black Ice: 10 mp3 parts, one chapter per file; the API rounds starts to 3 decimals (8085.4204 -> 8085.42)
+      const durations = [3932.4996, 4152.9208, 4029.649, 4684.5649, 4142.0539, 2998.9355, 4493.5576, 4116.3494, 3834.2792, 4422.9747]
+      const timeline = chapterSnap.buildTimeline(durations.map((duration, i) => ({ duration, metadata: { path: `/b/${i}.mp3` } })))
+      expect(timeline.map((t) => chapterSnap.trackIndexAt(timeline, chapterSnap.round3(t.offset)))).to.deep.equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(timeline.map((t) => chapterSnap.trackIndexAt(timeline, t.offset))).to.deep.equal([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+      expect(chapterSnap.trackIndexAt(timeline, 3932.25)).to.equal(0)
+    })
   })
 
   describe('planSegments', () => {
@@ -621,6 +630,35 @@ describe('chapterSnap', () => {
         chapterSnap.resolveOrder(starts, proposals)
         expect(proposals[1]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 93.95 })
         expect(proposals[2]).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 94.4 })
+      })
+
+      describe('at a file joint', () => {
+        // Two files split at a chapter: part 0 ends with 1.5 s of silence, part 1 starts with speech
+        const joint = [track(0, 0, 600), track(1, 600, 600)]
+        const tail = pause(598.5, 600)
+        const snapAt = (t, pauses, options) => chapterSnap.snapOne({ index: 1, t, pauses, timeline: joint, options: opts(options), bounds: WIDE })
+
+        it('keeps a start on a file start when the pause ends exactly at the joint (anchor would be in the previous file)', () => {
+          const r = snapAt(600, [tail], ANCHOR)
+          expect(r).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 600, pause: tail })
+          expect(chapterSnap.trackIndexAt(joint, r.proposedStart)).to.equal(1)
+          // within CLIP_EPS of the summed-float offset counts as on the file start
+          expect(snapAt(600.01, [tail], ANCHOR).proposedStart).to.equal(600.01)
+        })
+
+        it('never anchors a start back into an earlier file', () => {
+          // pause runs 0.1 s into part 1: the anchor (599.85) would sit in part 0
+          expect(snapAt(600.1, [pause(598.5, 600.1)], ANCHOR)).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 600.1 })
+          // a pause that ends well inside part 1 still anchors there
+          expect(snapAt(600.1, [pause(598.5, 601)], ANCHOR).proposedStart).to.equal(600.75)
+        })
+
+        it('does not let the heading look-back move a file start into the previous file', () => {
+          const longer = pause(590, 594)
+          expect(snapAt(600, [longer, tail])).to.include({ reason: REASONS.INSIDE_PAUSE, proposedStart: 600, pause: tail })
+          // the same pauses inside one file do look back
+          expect(snap(600, [longer, tail])).to.include({ reason: REASONS.HEADING_LOOKBACK, proposedStart: 593.75 })
+        })
       })
 
       it('is accepted as a boolean option and echoed in the response', () => {
