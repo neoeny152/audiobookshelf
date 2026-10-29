@@ -17,9 +17,12 @@ const { writeJsonAtomic, readJson } = require('../utils/autoPipeline/store')
  * "<Title> (from audio).epub" into the library item's folder (never overwriting: an existing name gets " (2)", " (3)", ...),
  * rescans the item so the file shows up as a supplementary ebook, and emits a socket event to the user who started it.
  *
- * One job per library item. Running jobs are persisted to MetadataPath/pipeline/epub-jobs.json once init() has run;
- * on boot every entry is adopted and followed again (a job the sidecar no longer knows is marked failed), so the EPUB
- * of a job that was running across a restart still lands in the library.
+ * One job per library item. Running jobs, and the latest finished job of an item for FINISHED_TTL_MS, are persisted to
+ * MetadataPath/pipeline/epub-jobs.json once init() has run. On boot every running entry is adopted and followed again
+ * (a job the sidecar no longer knows is marked failed), so the EPUB of a job that was running across a restart still
+ * lands in the library, and a finished one still answers GET. An entry that cannot be adopted for a passing reason
+ * (chapterbot not configured at boot, a database error) stays in the file for the next boot.
+ * A job started by a build without this file (before the fork's persistence) cannot be recovered: start it again.
  *
  * Progress is broadcast as chapterbot_epub_updated (the toJSON record) to every connected user who can access the
  * item, on start, on every poll that changes it and at the end, so anyone who opens the book sees the job (GET
@@ -28,6 +31,7 @@ const { writeJsonAtomic, readJson } = require('../utils/autoPipeline/store')
  */
 
 const ACTIVE = new Set(['starting', 'queued', 'running', 'downloading'])
+const FINISHED = new Set(['done', 'failed', 'cancelled'])
 const POLL_MS = 15000
 /** Give up following a job after this many failed status polls in a row (about 10 minutes at POLL_MS) */
 const MAX_POLL_FAILURES = 40
@@ -85,6 +89,8 @@ class ChapterbotEpubManager extends EventEmitter {
     this.persistPath = null
     /** @type {Promise<void>} serialises writes of persistPath */
     this.persistChain = Promise.resolve()
+    /** @type {Object[]} persisted running entries not adopted for a passing reason, written back until a later boot */
+    this.deferred = []
   }
 
   /**
@@ -96,15 +102,60 @@ class ChapterbotEpubManager extends EventEmitter {
     this.persistPath = persistPath || Path.join(global.MetadataPath, 'pipeline', 'epub-jobs.json')
     const entries = await readJson(this.persistPath)
     let adopted = 0
+    this.deferred = []
     for (const entry of Array.isArray(entries) ? entries : []) {
+      if (entry && FINISHED.has(entry.status)) {
+        this.restoreFinished(entry)
+        continue
+      }
       try {
         if (await this.adopt(entry)) adopted++
+        else if (!this.isConfigured && this.isEntry(entry)) this.deferred.push(entry)
       } catch (error) {
-        Logger.error(`[ChapterbotEpubManager] Adopting EPUB job ${entry?.jobId} failed`, error)
+        Logger.error(`[ChapterbotEpubManager] Adopting EPUB job ${entry?.jobId} failed, kept for the next start`, error)
+        if (this.isEntry(entry)) this.deferred.push(entry)
       }
     }
     if (adopted) Logger.info(`[ChapterbotEpubManager] Following ${adopted} EPUB job(s) again after the restart`)
     await this.persist()
+  }
+
+  isEntry(entry) {
+    return !!entry && typeof entry.libraryItemId === 'string' && typeof entry.jobId === 'string' && JOB_ID_RE.test(entry.jobId)
+  }
+
+  /**
+   * Put back the latest finished job of an item (so GET still answers after a restart). Nothing is polled.
+   *
+   * @param {Object} entry - persisted finished entry
+   * @returns {boolean}
+   */
+  restoreFinished(entry) {
+    if (!this.isEntry(entry) || !Number.isFinite(entry.finishedAt) || this.now() - entry.finishedAt > FINISHED_TTL_MS) return false
+    if (this.jobs.has(entry.libraryItemId)) return false
+    const access = entry.access && typeof entry.access.libraryId === 'string' ? { libraryId: entry.access.libraryId, media: { explicit: !!entry.access.media?.explicit, tags: Array.isArray(entry.access.media?.tags) ? entry.access.media.tags.filter((t) => typeof t === 'string') : [] } } : null
+    const text = (value, max) => (typeof value === 'string' ? value.slice(0, max) : null)
+    const record = this.newRecord(
+      { id: entry.libraryItemId, libraryId: access?.libraryId, media: access?.media },
+      {
+        jobId: entry.jobId,
+        userId: typeof entry.userId === 'string' ? entry.userId : null,
+        origin: ORIGINS.has(entry.origin) ? entry.origin : 'user',
+        title: text(entry.title, MAX_TEXT) || 'Untitled',
+        status: entry.status,
+        stage: entry.status === 'done' ? 'done' : null,
+        progress: entry.status === 'done' ? 1 : Number.isFinite(entry.progress) ? Math.min(1, Math.max(0, entry.progress)) : 0,
+        chaptersDone: Number.isInteger(entry.chaptersDone) ? entry.chaptersDone : 0,
+        chaptersTotal: Number.isInteger(entry.chaptersTotal) ? entry.chaptersTotal : 0,
+        error: text(entry.error, MAX_TEXT),
+        fileName: text(entry.fileName, 1024),
+        createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : entry.finishedAt,
+        finishedAt: entry.finishedAt,
+        access
+      }
+    )
+    this.jobs.set(entry.libraryItemId, record)
+    return true
   }
 
   /**
@@ -151,7 +202,17 @@ class ChapterbotEpubManager extends EventEmitter {
   persist() {
     if (!this.persistPath) return Promise.resolve()
     const file = this.persistPath
-    const entries = [...this.jobs.values()].filter((r) => r.jobId && ACTIVE.has(r.status)).map((r) => ({ libraryItemId: r.libraryItemId, jobId: r.jobId, origin: r.origin, userId: r.userId, createdAt: r.createdAt }))
+    const now = this.now()
+    const entries = []
+    for (const r of this.jobs.values()) {
+      if (!r.jobId) continue
+      const base = { libraryItemId: r.libraryItemId, jobId: r.jobId, origin: r.origin, userId: r.userId, createdAt: r.createdAt }
+      if (ACTIVE.has(r.status)) entries.push(base)
+      else if (FINISHED.has(r.status) && r.finishedAt && now - r.finishedAt <= FINISHED_TTL_MS) {
+        entries.push({ ...base, status: r.status, finishedAt: r.finishedAt, fileName: r.fileName, error: r.error, title: r.title, progress: r.progress, chaptersDone: r.chaptersDone, chaptersTotal: r.chaptersTotal, access: r.access })
+      }
+    }
+    for (const entry of this.deferred) if (!this.jobs.has(entry.libraryItemId)) entries.push(entry)
     this.persistChain = this.persistChain.then(() => writeJsonAtomic(file, entries)).catch((error) => Logger.warn(`[ChapterbotEpubManager] Saving the EPUB job list failed: ${error.message}`))
     return this.persistChain
   }
@@ -707,6 +768,7 @@ class ChapterbotEpubManager extends EventEmitter {
     this.jobs.clear()
     this.persistPath = null
     this.persistChain = Promise.resolve()
+    this.deferred = []
     this.removeAllListeners('ended')
   }
 }
@@ -716,3 +778,4 @@ module.exports = manager
 module.exports.ChapterbotEpubManager = ChapterbotEpubManager
 module.exports.EpubJobError = EpubJobError
 module.exports.ACTIVE = ACTIVE
+module.exports.FINISHED = FINISHED

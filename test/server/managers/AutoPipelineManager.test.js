@@ -148,9 +148,14 @@ describe('AutoPipelineManager', () => {
     throw new Error('runAll: still busy')
   }
 
-  async function addItems(ids) {
+  /**
+   * Queue items as a scan would. Unless `fresh`, the queue time is moved back past the settle wait (the books were
+   * found a while ago), so the tests start at the fingerprint check.
+   */
+  async function addItems(ids, { fresh = false } = {}) {
     const library = await Database.libraryModel.findByPk(libraryId)
     await manager.onItemsAdded(library, ids)
+    if (!fresh) for (const id of ids) if (stateOf(id)) stateOf(id).queuedAt -= 10 * 60 * 1000
   }
 
   const stateOf = (id) => manager.states.get(id)
@@ -225,7 +230,8 @@ describe('AutoPipelineManager', () => {
     sinon.stub(SocketAuthority, 'libraryItemEmitter').callsFake((evt, li) => emitted.push([evt, { id: li.id }]))
 
     const settings = { ...Database.libraryModel.getDefaultLibrarySettingsForMediaType('book'), autoPipeline: { ...defaultAutoPipelineSettings(), mode: 'on', autoEpub: true } }
-    const library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book', provider: 'audible', settings })
+    // scanned before: the first scan of a library queues nothing
+    const library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book', provider: 'audible', settings, lastScan: clock - 24 * 3600 * 1000 })
     const folder = await Database.libraryFolderModel.create({ path: metadataDir, libraryId: library.id })
     libraryId = library.id
     folderId = folder.id
@@ -864,7 +870,8 @@ describe('AutoPipelineManager', () => {
       await manager.drain()
       clock += 60 * 1000
       const stuck = manager.drain()
-      await new Promise((r) => setTimeout(r, 50))
+      // wait for the snap to start (a fixed sleep was flaky under load)
+      for (let i = 0; i < 100 && !hung; i++) await new Promise((r) => setTimeout(r, 10))
       expect(hung).to.be.a('function')
       const onDisk = JSON.parse(fs.readFileSync(Path.join(root, id, 'state.json'), 'utf8'))
       expect(onDisk).to.include({ status: 'chapters', step: 'chapters' })
@@ -998,6 +1005,183 @@ describe('AutoPipelineManager', () => {
       const spy = sinon.stub(AutoPipelineManager, 'onItemsAdded').resolves()
       LibraryScanner.queueForAutoPipeline(library, [{ id }])
       expect(spy.calledOnceWith(library, [id])).to.equal(true)
+    })
+
+    it('the first scan of a library queues nothing', async () => {
+      const id = await createItem()
+      const library = await Database.libraryModel.findByPk(libraryId)
+      library.lastScan = null
+      await manager.onItemsAdded(library, [id])
+      expect(manager.states.has(id)).to.equal(false)
+    })
+  })
+
+  describe('library mode changes', () => {
+    const MODES_BEFORE = () => ({ ...defaultAutoPipelineSettings(), mode: 'on', autoEpub: true })
+
+    it('turning the library off stops the queued books; a manual run goes on; "unprocessed" picks them up again', async () => {
+      const id1 = await createItem()
+      const id2 = await createItem({ dir: makeDir('two') })
+      await addItems([id1])
+      await manager.runItem(await getItem(id2), await Database.libraryModel.findByPk(libraryId))
+      const library = await setLibrarySettings({ mode: 'off' })
+      await manager.onLibrarySettingsChanged(library, MODES_BEFORE())
+      expect(stateOf(id1)).to.include({ status: 'skipped', stopped: 'mode-off' })
+      await runAll()
+      expect(bookFinder.search.callCount).to.equal(1)
+      expect((await getItem(id1)).media.asin).to.equal(null)
+      expect((await getItem(id2)).media.asin).to.equal(ASIN)
+      expect(await manager.runLibrary(library, 'unprocessed')).to.deep.equal({ queued: 1 })
+    })
+
+    it('a queued book that is processed after the library was turned off is stopped even without the settings hook', async () => {
+      const id = await createItem()
+      await addItems([id])
+      await setLibrarySettings({ mode: 'off' })
+      await runAll()
+      expect(stateOf(id)).to.include({ status: 'skipped' })
+      expect(bookFinder.search.called).to.equal(false)
+    })
+
+    it('switching to dry run makes the rest of a queued book a dry run', async () => {
+      const id = await createItem()
+      await addItems([id])
+      const library = await setLibrarySettings({ mode: 'dryRun' })
+      await manager.onLibrarySettingsChanged(library, MODES_BEFORE())
+      expect(stateOf(id).dryRun).to.equal(true)
+      await runAll()
+      expect(stateOf(id)).to.include({ status: 'done', dryRun: true })
+      const li = await getItem(id)
+      expect(li.media.asin).to.equal(null)
+      expect(li.media.chapters).to.have.length(4)
+      expect(epub.start.called).to.equal(false)
+    })
+
+    it('a change while a step runs: nothing is written, the step runs again under the new mode', async () => {
+      const id = await createItem()
+      await addItems([id])
+      const search = bookFinder.search
+      bookFinder.search = sinon.spy(async (...args) => {
+        // the user switches to dry run while the Audible search is in flight
+        await setLibrarySettings({ mode: 'dryRun' })
+        return search(...args)
+      })
+      await runAll()
+      expect((await getItem(id)).media.asin).to.equal(null)
+      expect(stateOf(id)).to.include({ status: 'done', dryRun: true })
+      expect(stateOf(id).would).to.match(/^would match/)
+      expect(stateOf(id).attempts).to.equal(0)
+    })
+
+    it('chapters: a switch to off during the analysis writes nothing and keeps the analysis', async () => {
+      const id = await createItem({ asin: ASIN })
+      await addItems([id])
+      const verify = speechClient.verify
+      speechClient.verify = sinon.spy(async (...args) => {
+        await setLibrarySettings({ mode: 'off' })
+        return verify(...args)
+      })
+      await runAll()
+      expect(stateOf(id)).to.include({ status: 'skipped', stopped: 'mode-off' })
+      expect((await getItem(id)).media.chapters).to.have.length(4)
+      expect(await manager.listBackups(id)).to.have.length(0)
+    })
+  })
+
+  describe('review fixes', () => {
+    it('waits settleMinutes after a book was queued, even when its files carry old modified times', async () => {
+      const id = await createItem()
+      await addItems([id], { fresh: true })
+      await manager.drain()
+      expect(stateOf(id)).to.include({ status: 'waiting', reason: 'waiting for the files to settle' })
+      expect(stateOf(id).notBefore).to.equal(clock + 5 * 60 * 1000)
+      await runAll()
+      expect(stateOf(id).match).to.include({ result: 'matched' })
+    })
+
+    it('does not match a book with an ISBN when the library skips those', async () => {
+      const library = await Database.libraryModel.findByPk(libraryId)
+      library.settings = { ...library.settings, skipMatchingMediaWithIsbn: true }
+      library.changed('settings', true)
+      await library.save()
+      const id = await createItem()
+      const li = await getItem(id)
+      li.media.isbn = '9781234567897'
+      await li.media.save()
+      await addItems([id])
+      await runAll()
+      expect(stateOf(id).match).to.include({ result: 'skipped', reason: 'isbn' })
+      expect(bookFinder.search.called).to.equal(false)
+      expect((await getItem(id)).media.asin).to.equal(null)
+    })
+
+    it('an EPUB step waiting for a busy lane does not arm a wake-up timer', async () => {
+      manager.autoRun = true
+      try {
+        manager.states.set('a', { libraryItemId: 'a', status: 'epub', epub: { result: 'running', jobId: 'j' }, notBefore: 0, queuedAt: 1 })
+        manager.states.set('b', { libraryItemId: 'b', status: 'epub', epub: { result: 'queued' }, notBefore: 0, queuedAt: 2 })
+        manager.scheduleWake()
+        expect(manager.wakeTimer).to.equal(null)
+        manager.states.get('a').epub.result = 'done'
+        manager.states.get('a').status = 'done'
+        manager.scheduleWake()
+        expect(manager.wakeTimer).to.not.equal(null)
+      } finally {
+        clearTimeout(manager.wakeTimer)
+        manager.wakeTimer = null
+        manager.autoRun = false
+        manager.states.clear()
+      }
+    })
+
+    it('approving without chapters refuses when the chapters were changed by hand after the proposal', async () => {
+      speech.late.add('Chapter 2')
+      const id = await createItem()
+      await addItems([id])
+      await runAll()
+      expect(stateOf(id)).to.include({ status: 'needs-review' })
+      const li = await getItem(id)
+      li.media.chapters = li.media.chapters.map((c, i) => (i === 1 ? { ...c, title: 'Edited by hand' } : c))
+      li.media.changed('chapters', true)
+      await li.media.save()
+      let error
+      try {
+        await manager.approve(id)
+      } catch (e) {
+        error = e
+      }
+      expect(error?.status).to.equal(409)
+      expect((await getItem(id)).media.chapters[1].title).to.equal('Edited by hand')
+      expect(stateOf(id)).to.include({ status: 'needs-review' })
+    })
+
+    it('approving the proposal unchanged (as the review editor sends it) counts as the pipeline\'s chapters', async () => {
+      speech.late.add('Chapter 2')
+      const id = await createItem()
+      await addItems([id])
+      await runAll()
+      const proposal = await manager.getProposal(id)
+      const approved = await manager.approve(id, proposal.proposedChapters.map((c) => ({ ...c })))
+      expect(approved.chapters).to.include({ result: 'approved', edited: false })
+      expect(approved.chapters.appliedHash).to.equal(chapterPlan.chaptersHash((await getItem(id)).media.chapters))
+      expect(approved.chapters).to.not.have.property('pendingHash')
+    })
+
+    it('chapters being applied when the server stopped still count as the pipeline\'s (pendingHash)', async () => {
+      const id = await createItem({ asin: ASIN })
+      await setLibrarySettings({ autoEpub: false })
+      await addItems([id])
+      await runAll()
+      const state = stateOf(id)
+      expect(state.chapters.result).to.equal('applied')
+      expect(state.chapters).to.not.have.property('pendingHash')
+      // what a crash between the write and the state save leaves behind
+      const hash = state.chapters.appliedHash
+      state.chapters = { pendingHash: hash }
+      state.status = 'queued'
+      state.step = 'chapters'
+      await manager.drain()
+      expect(stateOf(id).chapters).to.include({ result: 'kept', reason: 'already-correct', current: 'pipeline' })
     })
   })
 })

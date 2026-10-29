@@ -747,7 +747,7 @@ describe('Chapterbot EPUB endpoints', () => {
       return m
     }
 
-    it('persists running jobs and drops them when they end', async () => {
+    it('persists running jobs; an ended job is kept as finished (not followed again)', async () => {
       await ChapterbotEpubManager.init({ persistPath })
       expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
       expect((await call('startEpubJob')).statusCode).to.equal(202)
@@ -755,11 +755,61 @@ describe('Chapterbot EPUB endpoints', () => {
       const entries = JSON.parse(fs.readFileSync(persistPath, 'utf8'))
       expect(entries).to.have.length(1)
       expect(entries[0]).to.include({ libraryItemId: bookItemId, jobId: JOB_ID, origin: 'user', userId: 'user-1' })
+      expect(entries[0]).to.not.have.property('status')
 
       sidecar.state = { ...sidecar.state, status: 'cancelled' }
       await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'cancelled')
       await ChapterbotEpubManager.persistChain
-      expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+      const after = JSON.parse(fs.readFileSync(persistPath, 'utf8'))
+      expect(after).to.have.length(1)
+      expect(after[0]).to.include({ libraryItemId: bookItemId, jobId: JOB_ID, status: 'cancelled' })
+    })
+
+    it('the latest finished job still answers GET after a restart, until the TTL', async () => {
+      await ChapterbotEpubManager.init({ persistPath })
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+      await ChapterbotEpubManager.persistChain
+      ChapterbotEpubManager.reset()
+
+      const restarted = freshManager()
+      try {
+        await restarted.init({ persistPath })
+        const requestsBefore = sidecar.requests.length
+        const current = await restarted.getCurrent(bookItemId)
+        expect(current).to.include({ jobId: JOB_ID, status: 'done', fileName: 'Black Ice (from audio).epub', progress: 1 })
+        // finished: never polled again
+        expect(sidecar.requests.length).to.equal(requestsBefore)
+        expect(restarted.jobs.get(bookItemId).access.libraryId).to.be.a('string')
+
+        // past the TTL it is gone (and dropped from the file)
+        const later = freshManager()
+        later.now = () => Date.now() + 25 * 3600 * 1000
+        await later.init({ persistPath })
+        expect(await later.getCurrent(bookItemId)).to.equal(null)
+        await later.persistChain
+        expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+        later.reset()
+      } finally {
+        restarted.reset()
+      }
+    })
+
+    it('keeps a running entry for the next start when chapterbot is not configured at boot', async () => {
+      fs.mkdirSync(Path.dirname(persistPath), { recursive: true })
+      const entry = { libraryItemId: bookItemId, jobId: 'f'.repeat(32), origin: 'pipeline', userId: null, createdAt: 1 }
+      fs.writeFileSync(persistPath, JSON.stringify([entry]))
+      const restarted = freshManager()
+      restarted.client = { ...restarted.client, isConfigured: () => false }
+      try {
+        await restarted.init({ persistPath })
+        expect(restarted.jobs.size).to.equal(0)
+        await restarted.persistChain
+        expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([entry])
+      } finally {
+        restarted.reset()
+      }
     })
 
     it('follows a job again after a restart and writes its EPUB into the library', async () => {
@@ -781,7 +831,9 @@ describe('Chapterbot EPUB endpoints', () => {
         expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done')).to.equal(true)
         expect((await restarted.getCurrent(bookItemId)).status).to.equal('done')
         await restarted.persistChain
-        expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))).to.deep.equal([])
+        // kept as finished only
+        const left = JSON.parse(fs.readFileSync(persistPath, 'utf8'))
+        expect(left.map((e) => e.status)).to.deep.equal(['done'])
       } finally {
         restarted.reset()
       }

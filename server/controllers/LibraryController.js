@@ -337,7 +337,8 @@ class LibraryController {
             Logger.error(`[LibraryController] Invalid request. ${error.message}`)
             return res.status(400).send(`Invalid request. ${error.message}`)
           }
-          if (JSON.stringify(merged) !== JSON.stringify(updatedSettings[key])) {
+          const stored = normalizeAutoPipelineSettings(updatedSettings[key])
+          if (!updatedSettings[key] || Object.keys(merged).some((k) => merged[k] !== stored[k])) {
             hasUpdates = true
             updatedSettings[key] = merged
             Logger.debug(`[LibraryController] Library "${req.library.name}" updating setting "${key}" to ${JSON.stringify(merged)}`)

@@ -68,6 +68,18 @@ const DEFAULT_TIMING = Object.freeze({
   errorRetryMs: 5 * MIN
 })
 
+/**
+ * Thrown inside a step when a write must not happen any more (the item was dismissed, or the library mode was turned
+ * to off or dry run while the step ran). process() runs the step again, which then follows the current mode.
+ */
+class StepSuperseded extends Error {
+  constructor(why) {
+    super(`step superseded: ${why}`)
+    this.name = 'StepSuperseded'
+    this.why = why
+  }
+}
+
 class PipelineError extends Error {
   constructor(status, message) {
     super(message)
@@ -350,6 +362,11 @@ class AutoPipelineManager extends EventEmitter {
     if (!this.enabled || !library || library.mediaType !== 'book') return
     const settings = normalizeAutoPipelineSettings(library.settings?.autoPipeline)
     if (settings.mode === 'off') return
+    if (!library.lastScan) {
+      // the first scan of a library finds a whole collection, not newly added books ("Run on unprocessed" does that on purpose)
+      Logger.info(`[AutoPipeline] Not queueing ${libraryItemIds.length} item(s) from the first scan of library "${library.name}"`)
+      return
+    }
     for (const id of libraryItemIds) {
       if (this.states.has(id)) continue
       await this.createState(id, library, settings, { trigger: 'scan' })
@@ -417,7 +434,8 @@ class AutoPipelineManager extends EventEmitter {
     }
     const state = await this.createState(libraryItem.id, library, settings, { trigger: 'manual', steps, force: !!force, manual: true, title: libraryItem.media?.title || libraryItem.title })
     // a pipeline-applied chapter list stays recognisable across runs
-    if (existing?.chapters?.appliedHash) state.chapters = { appliedHash: existing.chapters.appliedHash }
+    const appliedHash = existing?.chapters?.appliedHash || existing?.chapters?.pendingHash
+    if (appliedHash) state.chapters = { appliedHash }
     this.kick()
     return this.toJSON(state)
   }
@@ -436,7 +454,8 @@ class AutoPipelineManager extends EventEmitter {
     let queued = 0
     for (const li of items) {
       const existing = this.states.get(li.id)
-      if (scope === 'unprocessed' && existing) continue
+      // books the pipeline stopped because the library was turned off count as unprocessed
+      if (scope === 'unprocessed' && existing && existing.stopped !== 'mode-off') continue
       if (this.current === li.id || (existing?.status === 'epub' && existing.epub?.result === 'running')) continue
       const settings = normalizeAutoPipelineSettings(library.settings?.autoPipeline)
       if (existing) {
@@ -445,7 +464,8 @@ class AutoPipelineManager extends EventEmitter {
         await this.store.removeAnalysis(li.id).catch(() => {})
       }
       const state = await this.createState(li.id, library, settings, { trigger: 'manual', manual: true, title: li.title })
-      if (existing?.chapters?.appliedHash) state.chapters = { appliedHash: existing.chapters.appliedHash }
+      const appliedHash = existing?.chapters?.appliedHash || existing?.chapters?.pendingHash
+      if (appliedHash) state.chapters = { appliedHash }
       queued++
     }
     this.kick()
@@ -473,7 +493,10 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   /**
-   * Library settings changed: switching from dry run to on clears the dry-run results of the library.
+   * Library settings changed. From dry run to on clears the dry-run results of the library. To off, the books still
+   * waiting in the queue are stopped (manual runs go on); to dry run, they continue as a dry run. The item being
+   * processed follows at its next step and never writes after the change (see writeBlocked). EPUB jobs already
+   * running are not cancelled.
    *
    * @param {import('../models/Library')} library
    * @param {Object|null} previous - autoPipeline settings before the change
@@ -487,8 +510,57 @@ class AutoPipelineManager extends EventEmitter {
         if (state.libraryId !== library.id || !state.dryRun || this.current === state.libraryItemId) continue
         await this.dismiss(state.libraryItemId)
       }
+    } else if (next.mode !== prev.mode && next.mode !== 'on') {
+      for (const state of [...this.states.values()]) {
+        if (state.libraryId !== library.id || this.current === state.libraryItemId || !this.isWaitingToRun(state)) continue
+        await this.followMode(state, next)
+      }
     }
     this.kick()
+  }
+
+  /** queued, waiting, or an EPUB step waiting for its lane */
+  isWaitingToRun(state) {
+    return state.status === 'queued' || state.status === 'waiting' || (state.status === 'epub' && state.epub?.result === 'queued')
+  }
+
+  /**
+   * Bring an unfinished state in line with the library mode: off stops it (unless a person started it), dry run
+   * makes the rest of it a dry run.
+   *
+   * @param {Object} state
+   * @param {Object} settings - normalized autoPipeline settings
+   * @returns {Promise<boolean>} false when the state was stopped
+   */
+  async followMode(state, settings) {
+    if (settings.mode === 'off' && !state.manual) {
+      state.stopped = 'mode-off'
+      if (state.status === 'epub') state.epub = { ...(state.epub || {}), result: 'skipped', reason: 'mode-off' }
+      await this.finish(state, 'skipped', 'automatic processing was turned off for the library')
+      return false
+    }
+    if (settings.mode === 'dryRun' && !state.dryRun) {
+      state.dryRun = true
+      this.log(state, 'mode', 'the library was switched to dry run: nothing more is written')
+      await this.save(state)
+    }
+    return true
+  }
+
+  /**
+   * Checked inside the library lock right before the pipeline writes to an item on its own (match, chapters).
+   *
+   * @param {Object} state
+   * @returns {Promise<string|null>} why the write must not happen, or null
+   */
+  async writeBlocked(state) {
+    if (this.states.get(state.libraryItemId) !== state) return 'dismissed'
+    if (state.dryRun) return 'dry-run'
+    const library = await Database.libraryModel.findByPk(state.libraryId)
+    const mode = normalizeAutoPipelineSettings(library?.settings?.autoPipeline).mode
+    if (mode === 'dryRun') return 'mode-dryRun'
+    if (mode === 'off' && !state.manual) return 'mode-off'
+    return null
   }
 
   assertEnabled() {
@@ -609,9 +681,12 @@ class AutoPipelineManager extends EventEmitter {
   scheduleWake() {
     if (!this.enabled || !this.autoRun) return
     const now = this.now()
+    const laneBusy = this.epubLaneBusy
     let next = null
     for (const s of this.states.values()) {
-      if (s.status !== 'queued' && s.status !== 'waiting' && !(s.status === 'epub' && s.epub?.result === 'queued')) continue
+      if (!this.isWaitingToRun(s)) continue
+      // an EPUB step waiting for the lane: onEpubEnded kicks the worker when the lane is free
+      if (s.status === 'epub' && laneBusy) continue
       const at = s.notBefore || now
       if (next === null || at < next) next = at
     }
@@ -654,6 +729,7 @@ class AutoPipelineManager extends EventEmitter {
       }
       const settings = normalizeAutoPipelineSettings(library.settings?.autoPipeline)
       state.title = libraryItem.media.title || state.title
+      if (!(await this.followMode(state, settings))) return
 
       if (step === 'waiting') await this.stepWaiting(state, libraryItem, library, settings)
       else if (step === 'matching') await this.stepMatching(state, libraryItem, library, settings)
@@ -664,6 +740,13 @@ class AutoPipelineManager extends EventEmitter {
       state.attempts = 0
     } catch (error) {
       if (this.states.get(id) !== state) return
+      if (error instanceof StepSuperseded) {
+        // not an error: the next run of the step follows the current mode
+        this.log(state, step, `nothing written: ${error.why}`)
+        this.queued(state, step, 'the library settings changed, running the step again')
+        await this.save(state)
+        return
+      }
       state.attempts = (state.attempts || 0) + 1
       Logger.error(`[AutoPipeline] Step ${step} of "${state.title}" failed (attempt ${state.attempts})`, error)
       if (state.attempts >= MAX_ATTEMPTS) await this.finish(state, 'failed', `${step}: ${String(error?.message || error).slice(0, 200)}`)
@@ -742,7 +825,9 @@ class AutoPipelineManager extends EventEmitter {
     if (!state.manual) {
       const disk = await this.diskSnapshot(libraryItem)
       const settleMs = settings.settleMinutes * MIN
-      const age = this.now() - disk.maxMtimeMs
+      // a copy that keeps the original modified times (Explorer, robocopy, rsync -a) looks settled at once, so the
+      // time the book was queued counts as a change too
+      const age = this.now() - Math.max(disk.maxMtimeMs, state.queuedAt || 0)
       if (age < settleMs) {
         state.waitCheck = null
         this.queued(state, 'waiting', 'waiting for the files to settle', settleMs - age)
@@ -770,6 +855,12 @@ class AutoPipelineManager extends EventEmitter {
       // never overwrite an ASIN (matched by hand, from tags or an earlier match)
       state.match = { result: 'existing-asin', asin: libraryItem.media.asin }
       this.log(state, 'matching', `existing ASIN ${libraryItem.media.asin}, not matched again`)
+      return this.advance(state, settings, 'match')
+    }
+    if (library.settings?.skipMatchingMediaWithIsbn && libraryItem.media.isbn) {
+      // the library asks not to match books that have an ISBN (as the stock library match does)
+      state.match = { result: 'skipped', reason: 'isbn' }
+      this.log(state, 'matching', 'skipped: the book has an ISBN and the library skips matching those')
       return this.advance(state, settings, 'match')
     }
     const provider = effectiveProvider(library, settings)
@@ -811,12 +902,15 @@ class AutoPipelineManager extends EventEmitter {
     }
 
     const applied = await this.getLibraryScanner().runWithLibraryLock(library.id, async () => {
+      const blocked = await this.writeBlocked(state)
+      if (blocked) return { blocked }
       const fresh = await Database.libraryItemModel.getExpandedById(libraryItem.id)
       if (!fresh?.media) return { gone: true }
       if (fresh.media.asin) return { asin: fresh.media.asin }
       const result = await this.getScanner().applyBookMatch(this.apiRouter, fresh, clone(decision.candidate), {})
       return { result }
     })
+    if (applied.blocked) throw new StepSuperseded(applied.blocked)
     if (applied.gone) return this.finish(state, 'failed', 'the library item no longer exists')
     if (applied.asin) {
       state.match = { ...state.match, result: 'existing-asin', asin: applied.asin }
@@ -932,7 +1026,8 @@ class AutoPipelineManager extends EventEmitter {
   async stepChapters(state, libraryItem, library, settings) {
     const provider = effectiveProvider(library, settings)
     const prev = state.chapters || {}
-    const keep = { appliedHash: prev.appliedHash || null }
+    // pendingHash: chapters the pipeline was applying when the server stopped (see applyProposal)
+    const keep = { appliedHash: prev.appliedHash || prev.pendingHash || null }
     if (!isAudibleProvider(provider)) {
       state.chapters = { ...keep, result: 'skipped', reason: 'provider' }
       this.log(state, 'chapters', `skipped: provider "${provider}" is not Audible`)
@@ -1022,18 +1117,22 @@ class AutoPipelineManager extends EventEmitter {
         if (state.dryRun) state.chapters.would = `would need review: ${summary}`
         return this.finish(state, 'needs-review', `chapters: ${summary}`)
       }
-      await this.store.removeAnalysis(libraryItem.id).catch(() => {})
       if (chapterPlan.chaptersEqual(proposed, current)) {
+        await this.store.removeAnalysis(libraryItem.id).catch(() => {})
         state.chapters = { ...base, result: 'kept', reason: 'already-correct' }
         if (state.dryRun) state.chapters.would = 'would keep the chapters (already correct)'
         this.log(state, 'chapters', 'kept: the chapters are already correct')
         return this.advance(state, settings, 'chapters')
       }
       if (state.dryRun) {
+        await this.store.removeAnalysis(libraryItem.id).catch(() => {})
         state.chapters = { ...base, result: 'would-apply', would: `would apply ${proposed.length} chapters` }
         return this.advance(state, settings, 'chapters')
       }
-      const applied = await this.applyProposal(state, libraryItem.id, proposed, { fingerprint, source: source.kind === 'scanner' ? 'scanner-check' : `audible:${source.kind}`, reason: 'auto' })
+      const applied = await this.applyProposal(state, libraryItem.id, proposed, { fingerprint, source: source.kind === 'scanner' ? 'scanner-check' : `audible:${source.kind}`, reason: 'auto', auto: true })
+      // the analysis is kept until here, so a step run again after a settings change does not analyse again
+      if (applied.blocked) throw new StepSuperseded(applied.blocked)
+      await this.store.removeAnalysis(libraryItem.id).catch(() => {})
       if (applied.changedAudio) {
         state.chapters = { ...keep, result: null }
         this.queued(state, 'chapters', 'the audio changed during the analysis, analysing again')
@@ -1077,14 +1176,28 @@ class AutoPipelineManager extends EventEmitter {
    * @param {Object} state
    * @param {string} libraryItemId
    * @param {{title: string, start: number, end: number}[]} chapters
-   * @param {{fingerprint: string|null, source: string, reason: string}} opts
-   * @returns {Promise<{changedAudio?: boolean, appliedHash?: string, backup?: string, updated?: boolean, gone?: boolean}>}
+   * @param {{fingerprint: string|null, source: string, reason: string, auto?: boolean, expectChapters?: Object[]|null, mine?: boolean}} opts
+   *   auto: the pipeline writes on its own (re-checks dismissal and the library mode, see writeBlocked);
+   *   expectChapters: refuse (409) when the item's chapters are no longer these;
+   *   mine: the chapters count as the pipeline's (pendingHash is saved before the write, so a crash cannot lose it)
+   * @returns {Promise<{changedAudio?: boolean, blocked?: string, appliedHash?: string, backup?: string, updated?: boolean}>}
    */
-  async applyProposal(state, libraryItemId, chapters, { fingerprint, source, reason }) {
+  async applyProposal(state, libraryItemId, chapters, { fingerprint, source, reason, auto = false, expectChapters = null, mine = true }) {
     return this.getLibraryScanner().runWithLibraryLock(state.libraryId, async () => {
+      if (auto) {
+        const blocked = await this.writeBlocked(state)
+        if (blocked) return { blocked }
+      }
       const fresh = await Database.libraryItemModel.getExpandedById(libraryItemId)
       if (!fresh?.media) throw new PipelineError(404, 'The library item no longer exists')
       if (fingerprint && chapterPlan.audioFingerprint(fresh.media.includedAudioFiles) !== fingerprint) return { changedAudio: true }
+      if (expectChapters && !chapterPlan.chaptersEqual(plainChapters(fresh.media.chapters), plainChapters(expectChapters))) {
+        throw new PipelineError(409, 'The chapters changed since the proposal was made; open the review to see them')
+      }
+      if (mine) {
+        state.chapters = { ...(state.chapters || {}), pendingHash: chapterPlan.chaptersHash(plainChapters(chapters)) }
+        await this.save(state)
+      }
       const backup = await this.store.writeBackup(libraryItemId, { chapters: plainChapters(fresh.media.chapters), source, reason }, new Date(this.now()))
       const { updated } = await applyChapters(fresh, chapters)
       return { appliedHash: chapterPlan.chaptersHash(plainChapters(fresh.media.chapters)), backup, updated }
@@ -1109,6 +1222,8 @@ class AutoPipelineManager extends EventEmitter {
       state.epub = { result: 'would', would: 'would build an EPUB' }
       return this.finish(state, 'done', this.doneReason(state))
     }
+    // dismissed while the item was being loaded: start nothing
+    if (this.states.get(state.libraryItemId) !== state) return
     state.epub = { ...(state.epub || {}), result: 'starting' }
     let job
     try {
@@ -1181,15 +1296,26 @@ class AutoPipelineManager extends EventEmitter {
     const proposal = await this.store.readProposal(libraryItemId)
     if (!proposal) throw new PipelineError(409, 'There is no chapter proposal waiting for review')
     if (chapters !== undefined && chapters !== null && !isValidChapterPayload(chapters)) throw new PipelineError(400, 'Invalid chapters')
-    const toApply = (chapters ?? proposal.proposedChapters).map((c) => ({ title: c.title, start: c.start, end: c.end }))
+    const sent = chapters !== undefined && chapters !== null
+    const toApply = (sent ? chapters : proposal.proposedChapters).map((c) => ({ title: c.title, start: c.start, end: c.end }))
     if (!toApply.length) throw new PipelineError(400, 'No chapters')
+    // the review editor always sends its chapters: they are edits only when they differ from the proposal
+    const edited = sent && !chapterPlan.chaptersEqual(toApply, plainChapters(proposal.proposedChapters))
 
-    const applied = await this.applyProposal(state, libraryItemId, toApply, { fingerprint: proposal.fingerprint, source: `review:${proposal.source?.kind || 'unknown'}`, reason: chapters ? 'approved with edits' : 'approved' })
+    const applied = await this.applyProposal(state, libraryItemId, toApply, {
+      fingerprint: proposal.fingerprint,
+      source: `review:${proposal.source?.kind || 'unknown'}`,
+      reason: edited ? 'approved with edits' : 'approved',
+      // approving without sending chapters must not overwrite chapters a person changed after the proposal was made
+      expectChapters: !sent && Array.isArray(proposal.currentChapters) ? proposal.currentChapters : null,
+      mine: !edited
+    })
     if (applied.changedAudio) throw new PipelineError(409, 'The audio changed since the analysis; run the item again')
     await this.store.removeProposal(libraryItemId).catch(() => {})
     // chapters edited in the review are a person's: no appliedHash, so a later run treats them as edited by hand
-    state.chapters = { ...state.chapters, result: 'approved', edited: !!chapters, count: toApply.length, appliedHash: chapters ? null : applied.appliedHash, backup: applied.backup }
-    this.log(state, 'review', `approved ${toApply.length} chapters${chapters ? ' (edited)' : ''}`)
+    const { pendingHash, ...chaptersState } = state.chapters || {}
+    state.chapters = { ...chaptersState, result: 'approved', edited, count: toApply.length, appliedHash: edited ? null : applied.appliedHash, backup: applied.backup }
+    this.log(state, 'review', `approved ${toApply.length} chapters${edited ? ' (edited)' : ''}`)
     const library = await Database.libraryModel.findByPk(state.libraryId)
     await this.advance(state, normalizeAutoPipelineSettings(library?.settings?.autoPipeline), 'chapters')
     this.kick()
@@ -1269,6 +1395,7 @@ const manager = new AutoPipelineManager()
 module.exports = manager
 module.exports.AutoPipelineManager = AutoPipelineManager
 module.exports.PipelineError = PipelineError
+module.exports.StepSuperseded = StepSuperseded
 module.exports.STATUSES = STATUSES
 module.exports.ACTIVE_STATUSES = ACTIVE_STATUSES
 module.exports.DEFAULT_TIMING = DEFAULT_TIMING
