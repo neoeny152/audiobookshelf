@@ -42,6 +42,8 @@ function wrapHandler(fn) {
   }
   Object.defineProperty(wrapped, 'name', { value: fn.name })
   wrapped.__asyncWrapped = true
+  /** The handler that was wrapped, for code that inspects the route stack */
+  wrapped.original = fn
   return wrapped
 }
 
