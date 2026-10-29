@@ -196,7 +196,8 @@ class LibraryScanner {
     })
 
     // Remove exact duplicate item records left by earlier concurrent scans (keeps the oldest, never touches files)
-    existingLibraryItems = await this.removeExactDuplicateLibraryItems(existingLibraryItems, libraryScan)
+    const duplicateResults = await this.removeExactDuplicateLibraryItems(existingLibraryItems, libraryScan)
+    existingLibraryItems = duplicateResults.libraryItems
 
     if (this.shouldCancelScan(libraryScan)) return true
 
@@ -287,6 +288,8 @@ class LibraryScanner {
       )
     }
 
+    await this.syncReferencedDuplicatesMissing(duplicateResults.referencedDuplicates, libraryScan)
+
     if (this.shouldCancelScan(libraryScan)) return true
 
     // Add new library items
@@ -324,12 +327,14 @@ class LibraryScanner {
   /**
    * Find library items that share the exact same path and inode (duplicates created by concurrent scans).
    * The oldest record is kept. Newer records are removed from the database only when nothing references them
-   * (progress, bookmarks, playlists, collections, feeds). Files on disk are never touched.
-   * Duplicates that cannot be removed safely are logged and left out of the scan so they are not marked missing.
+   * (progress, listening sessions, open playback, bookmarks, playlists, collections, share links, feeds).
+   * Files on disk are never touched.
+   * Duplicates that cannot be removed safely are logged and left out of the scan; they follow the kept item's missing state.
    *
    * @param {import('../models/LibraryItem')[]} libraryItems
    * @param {import('./LibraryScan')} libraryScan
-   * @returns {Promise<import('../models/LibraryItem')[]>} library items to continue scanning with
+   * @returns {Promise<{libraryItems: import('../models/LibraryItem')[], referencedDuplicates: {duplicate: import('../models/LibraryItem'), keep: import('../models/LibraryItem')}[]}>}
+   *   library items to continue scanning with, and duplicates that were kept
    */
   async removeExactDuplicateLibraryItems(libraryItems, libraryScan) {
     /** @type {Map<string, import('../models/LibraryItem')[]>} */
@@ -342,6 +347,8 @@ class LibraryScanner {
     }
 
     const idsToSkip = new Set()
+    /** @type {{duplicate: import('../models/LibraryItem'), keep: import('../models/LibraryItem')}[]} */
+    const referencedDuplicates = []
     for (const group of groups.values()) {
       if (group.length < 2) continue
 
@@ -350,9 +357,19 @@ class LibraryScanner {
       for (const duplicate of duplicates) {
         idsToSkip.add(duplicate.id)
 
+        // Removing the record also destroys its media (LibraryItem afterDestroy), so never remove one sharing media with the kept item
+        if (duplicate.mediaId === keep.mediaId || duplicate.mediaType !== keep.mediaType) {
+          libraryScan.addLog(LogLevel.WARN, `Duplicate library item "${duplicate.id}" of "${keep.id}" at path "${duplicate.path}" shares media or has a different media type - not removing, resolve manually`)
+          referencedDuplicates.push({ duplicate, keep })
+          continue
+        }
+
         const references = await getLibraryItemReferences(duplicate)
+        // Checked last and synchronously right before removing, so playback started during the database checks is seen
+        if (getOpenPlaybackSessionCount(duplicate.id)) references.push('an open playback session')
         if (references.length) {
           libraryScan.addLog(LogLevel.WARN, `Duplicate library item "${duplicate.id}" of "${keep.id}" at path "${duplicate.path}" has ${references.join(', ')} - not removing, resolve manually`)
+          referencedDuplicates.push({ duplicate, keep })
           continue
         }
 
@@ -365,8 +382,41 @@ class LibraryScanner {
       }
     }
 
-    if (!idsToSkip.size) return libraryItems
-    return libraryItems.filter((li) => !idsToSkip.has(li.id))
+    return {
+      libraryItems: idsToSkip.size ? libraryItems.filter((li) => !idsToSkip.has(li.id)) : libraryItems,
+      referencedDuplicates
+    }
+  }
+
+  /**
+   * Duplicates that had to be kept are left out of the scan, so give them the missing state of the item they duplicate
+   *
+   * @param {{duplicate: import('../models/LibraryItem'), keep: import('../models/LibraryItem')}[]} referencedDuplicates
+   * @param {import('./LibraryScan')} libraryScan
+   */
+  async syncReferencedDuplicatesMissing(referencedDuplicates, libraryScan) {
+    if (!referencedDuplicates.length) return
+
+    const keepIds = [...new Set(referencedDuplicates.map(({ keep }) => keep.id))]
+    const keptItems = await Database.libraryItemModel.findAll({ attributes: ['id', 'isMissing'], where: { id: keepIds } })
+    const keepMissing = new Map(keptItems.map((li) => [li.id, !!li.isMissing]))
+
+    const libraryItemsUpdated = []
+    for (const { duplicate, keep } of referencedDuplicates) {
+      if (!keepMissing.has(keep.id)) continue
+      const isMissing = keepMissing.get(keep.id)
+      if (!!duplicate.isMissing === isMissing) continue
+
+      libraryScan.addLog(LogLevel.INFO, `Duplicate library item "${duplicate.id}" marked ${isMissing ? 'missing' : 'present'} like "${keep.id}"`)
+      const libraryItem = await Database.libraryItemModel.getExpandedById(duplicate.id)
+      if (!libraryItem) continue
+      libraryItem.isMissing = isMissing
+      await libraryItem.save()
+      libraryItemsUpdated.push(libraryItem)
+    }
+    if (libraryItemsUpdated.length) {
+      SocketAuthority.libraryItemsEmitter('items_updated', libraryItemsUpdated)
+    }
   }
 
   shouldCancelScan(libraryScan) {
@@ -751,6 +801,12 @@ async function getLibraryItemReferences(libraryItem) {
 
     const numPlaylistItems = await Database.playlistMediaItemModel.count({ where: { mediaItemId: mediaItemIds } })
     if (numPlaylistItems) references.push(`${numPlaylistItems} playlist entries`)
+
+    const numShares = await Database.mediaItemShareModel.count({ where: { mediaItemId: mediaItemIds } })
+    if (numShares) references.push(`${numShares} share links`)
+
+    const numSessions = await Database.playbackSessionModel.count({ where: { mediaItemId: mediaItemIds } })
+    if (numSessions) references.push(`${numSessions} listening sessions`)
   }
 
   if (libraryItem.mediaType === 'book') {
@@ -766,6 +822,17 @@ async function getLibraryItemReferences(libraryItem) {
   if (numBookmarks) references.push(`${numBookmarks} bookmarks`)
 
   return references
+}
+
+/**
+ * Number of in-memory playback sessions open for a library item
+ *
+ * @param {string} libraryItemId
+ * @returns {number}
+ */
+function getOpenPlaybackSessionCount(libraryItemId) {
+  const sessions = SocketAuthority.Server?.playbackSessionManager?.sessions || []
+  return sessions.filter((session) => session.libraryItemId === libraryItemId).length
 }
 
 function ItemToFileInoMatch(libraryItem1, libraryItem2) {

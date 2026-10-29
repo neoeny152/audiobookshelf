@@ -194,4 +194,78 @@ describe('LibraryScanner duplicate library items', () => {
     expect(remaining.map((li) => li.id)).to.deep.equal([oldest.id, newer.id])
     expect(remaining.every((li) => !li.isMissing)).to.be.true
   })
+
+  async function expectBothKeptAfterScan(oldest, newer) {
+    await LibraryScanner.scan(library)
+    const remaining = await Database.libraryItemModel.findAll({ where: { libraryId: library.id, path: itemPath }, order: [['createdAt', 'ASC']] })
+    expect(remaining.map((li) => li.id)).to.deep.equal([oldest.id, newer.id])
+    expect(await Database.bookModel.findByPk(newer.mediaId)).to.not.equal(null)
+  }
+
+  it('full scan keeps a newer duplicate that has a share link', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    await Database.mediaItemShareModel.create({ mediaItemId: newer.mediaId, mediaItemType: 'book', slug: 'dup-share', pash: 'x' })
+
+    await expectBothKeptAfterScan(oldest, newer)
+  })
+
+  it('full scan keeps a newer duplicate that has listening sessions', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    await Database.playbackSessionModel.create({ mediaItemId: newer.mediaId, mediaItemType: 'book', timeListening: 60 })
+
+    await expectBothKeptAfterScan(oldest, newer)
+  })
+
+  it('full scan keeps a newer duplicate with an open playback session', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    sinon.stub(SocketAuthority, 'Server').value({ playbackSessionManager: { sessions: [{ id: 'open', libraryItemId: newer.id }] } })
+
+    await expectBothKeptAfterScan(oldest, newer)
+  })
+
+  it('full scan never removes a duplicate that shares media with the kept item', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    const orphanBookId = newer.mediaId
+    await Database.sequelize.query('UPDATE libraryItems SET mediaId = :mediaId WHERE id = :id', { replacements: { mediaId: oldest.mediaId, id: newer.id } })
+    await Database.bookModel.destroy({ where: { id: orphanBookId } })
+
+    await LibraryScanner.scan(library)
+    await delay(20)
+
+    const remaining = await Database.libraryItemModel.findAll({ where: { libraryId: library.id, path: itemPath }, order: [['createdAt', 'ASC']] })
+    expect(remaining.map((li) => li.id)).to.deep.equal([oldest.id, newer.id])
+    expect(await Database.bookModel.findByPk(oldest.mediaId)).to.not.equal(null)
+  })
+
+  it('a kept duplicate follows the missing state of the item it duplicates', async () => {
+    const ino = await fileUtils.getIno(itemPath)
+    const oldest = await createItemRecord(ino, '2026-10-01 10:00:00.000 +00:00')
+    const newer = await createItemRecord(ino, '2026-10-01 10:00:00.040 +00:00')
+    const user = await Database.userModel.create({ username: 'reader', type: 'user', isActive: true })
+    await Database.mediaProgressModel.create({ userId: user.id, mediaItemId: newer.mediaId, mediaItemType: 'book', currentTime: 100, duration: 1000 })
+
+    await fsp.rm(itemPath, { recursive: true, force: true })
+    await LibraryScanner.scan(library)
+
+    let items = await Database.libraryItemModel.findAll({ where: { id: [oldest.id, newer.id] } })
+    expect(items.map((li) => !!li.isMissing)).to.deep.equal([true, true])
+
+    // Folder comes back: both are present again (records still match by path)
+    await fsp.mkdir(itemPath, { recursive: true })
+    await fsp.writeFile(Path.posix.join(itemPath, 'track.mp3'), 'not really audio')
+    await Database.libraryItemModel.update({ ino: await fileUtils.getIno(itemPath) }, { where: { id: [oldest.id, newer.id] } })
+    await LibraryScanner.scan(library)
+
+    items = await Database.libraryItemModel.findAll({ where: { id: [oldest.id, newer.id] } })
+    expect(items.map((li) => !!li.isMissing)).to.deep.equal([false, false])
+    expect(await Database.mediaProgressModel.count({ where: { mediaItemId: newer.mediaId } })).to.equal(1)
+  })
 })
