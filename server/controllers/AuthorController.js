@@ -161,6 +161,17 @@ class AuthorController {
         SocketAuthority.libraryItemsEmitter('items_updated', libraryItems)
       }
 
+      // A case-only rename can now merge (#4033 #5278): keep the merged author's details
+      // where the kept author has none, so description, ASIN and image are not lost
+      for (const key of ['description', 'asin', 'imagePath']) {
+        if (!existingAuthor[key] && req.author[key]) existingAuthor[key] = req.author[key]
+      }
+      if (existingAuthor.changed()) {
+        const imageCopied = existingAuthor.changed('imagePath')
+        await existingAuthor.save()
+        if (imageCopied) await CacheManager.purgeImageCache(existingAuthor.id)
+      }
+
       // Remove old author
       const oldAuthorJSON = req.author.toOldJSON()
       await req.author.destroy()

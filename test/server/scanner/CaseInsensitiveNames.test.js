@@ -185,6 +185,23 @@ describe('Case-insensitive series and author names (#4255 #4033 #5278 #4934)', (
     })
   })
 
+  describe('AuthorController.update merge keeps details', () => {
+    it('copies description, ASIN and image of the merged author into empty fields of the kept one', async () => {
+      const max = await Database.authorModel.create({ name: 'Max', lastFirst: 'Max', description: 'Kept text', libraryId: library.id })
+      const lowerMax = await Database.authorModel.create({ name: 'max', lastFirst: 'max', description: 'Lost text', asin: 'B000000001', imagePath: '/metadata/authors/max.jpg', libraryId: library.id })
+
+      const res = { json: sinon.stub(), status: sinon.stub().returnsThis(), send: sinon.stub() }
+      await AuthorController.update.call({}, { author: lowerMax, body: { name: 'Max' } }, res)
+
+      const kept = await Database.authorModel.findByPk(max.id)
+      expect(kept.description).to.equal('Kept text')
+      expect(kept.asin).to.equal('B000000001')
+      expect(kept.imagePath).to.equal('/metadata/authors/max.jpg')
+      expect(res.json.firstCall.args[0]).to.have.keys(['author', 'merged'])
+      expect(res.json.firstCall.args[0].author.asin).to.equal('B000000001')
+    })
+  })
+
   describe('SeriesController.update', () => {
     it('renaming a series to a name already used in the library answers 400 instead of crashing', async () => {
       await Database.seriesModel.create({ name: 'Saga', libraryId: library.id })
