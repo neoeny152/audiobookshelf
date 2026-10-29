@@ -803,7 +803,15 @@ class LibraryItemController {
     }
 
     for (const libraryItem of libraryItems) {
-      const matchResult = await Scanner.quickMatchLibraryItem(this, libraryItem, options)
+      // The response was already sent: one failing item must not stop the batch or reject unhandled (#5215)
+      let matchResult = null
+      try {
+        matchResult = await Scanner.quickMatchLibraryItem(this, libraryItem, options)
+      } catch (error) {
+        Logger.error(`[LibraryItemController] Batch quick match failed for "${libraryItem.media?.title}"`, error)
+        itemsUnmatched++
+        continue
+      }
       if (matchResult.updated) {
         itemsUpdated++
       } else if (matchResult.warning) {
@@ -852,7 +860,12 @@ class LibraryItemController {
       if (libraryItem.isFile) {
         Logger.warn(`[LibraryItemController] Re-scanning file library items not yet supported`)
       } else {
-        await LibraryItemScanner.scanLibraryItem(libraryItem.id)
+        try {
+          await LibraryItemScanner.scanLibraryItem(libraryItem.id)
+        } catch (error) {
+          // The response was already sent: one failing item must not stop the batch (#5319)
+          Logger.error(`[LibraryItemController] Batch scan failed for library item "${libraryItem.id}"`, error)
+        }
       }
     }
 

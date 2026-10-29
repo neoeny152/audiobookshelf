@@ -239,10 +239,19 @@ class LibraryScanner {
         let libraryItemDataUpdated = await libraryItemData.checkLibraryItemData(existingLibraryItem, libraryScan)
         if (libraryItemDataUpdated || forceRescan) {
           if (forceRescan || libraryItemData.hasLibraryFileChanges || libraryItemData.hasPathChange) {
-            const { libraryItem, wasUpdated } = await LibraryItemScanner.rescanLibraryItemMedia(existingLibraryItem, libraryItemData, libraryScan.library.settings, libraryScan)
-            if (!forceRescan || wasUpdated) {
+            // One failing item must not abort the whole scan (#5319)
+            let rescanResult = null
+            try {
+              rescanResult = await LibraryItemScanner.rescanLibraryItemMedia(existingLibraryItem, libraryItemData, libraryScan.library.settings, libraryScan)
+            } catch (error) {
+              libraryScan.addLog(LogLevel.ERROR, `Failed to rescan library item "${existingLibraryItem.relPath}": ${error?.message || error}`)
+              Logger.error(`[LibraryScanner] Failed to rescan library item "${existingLibraryItem.relPath}"`, error)
+            }
+            if (!rescanResult) {
+              // Skipped - error logged above
+            } else if (!forceRescan || rescanResult.wasUpdated) {
               libraryScan.resultsUpdated++
-              libraryItemsUpdated.push(libraryItem)
+              libraryItemsUpdated.push(rescanResult.libraryItem)
             } else {
               libraryScan.addLog(LogLevel.DEBUG, `Library item "${existingLibraryItem.relPath}" is up-to-date`)
             }
@@ -297,7 +306,14 @@ class LibraryScanner {
     if (libraryItemDataFound.length) {
       let newLibraryItems = []
       for (const libraryItemData of libraryItemDataFound) {
-        const newLibraryItem = await LibraryItemScanner.scanNewLibraryItem(libraryItemData, libraryScan.library.settings, libraryScan)
+        // One failing item must not abort the whole scan or keep the other new books out (#5319)
+        let newLibraryItem = null
+        try {
+          newLibraryItem = await LibraryItemScanner.scanNewLibraryItem(libraryItemData, libraryScan.library.settings, libraryScan)
+        } catch (error) {
+          libraryScan.addLog(LogLevel.ERROR, `Failed to add new library item "${libraryItemData.relPath}": ${error?.message || error}`)
+          Logger.error(`[LibraryScanner] Failed to add new library item "${libraryItemData.relPath}"`, error)
+        }
         if (newLibraryItem) {
           newLibraryItems.push(newLibraryItem)
 
@@ -784,7 +800,13 @@ class LibraryScanner {
         }
         // Scan library item for updates
         Logger.debug(`[LibraryScanner] Folder update for relative path "${itemDir}" is in library item "${existingLibraryItem.media.title}" with id "${existingLibraryItem.id}" - scan for updates`)
-        itemGroupingResults[itemDir] = await LibraryItemScanner.scanLibraryItem(existingLibraryItem.id, updatedLibraryItemDetails)
+        try {
+          itemGroupingResults[itemDir] = await LibraryItemScanner.scanLibraryItem(existingLibraryItem.id, updatedLibraryItemDetails)
+        } catch (error) {
+          // One failing item must not stop the other folder updates (#5319)
+          Logger.error(`[LibraryScanner] Failed to scan library item "${existingLibraryItem.relPath}" for folder update "${itemDir}"`, error)
+          itemGroupingResults[itemDir] = ScanResult.NOTHING
+        }
         continue
       } else if (library.settings.audiobooksOnly && !hasAudioFiles(fileUpdateGroup, itemDir)) {
         Logger.debug(`[LibraryScanner] Folder update for relative path "${itemDir}" has no audio files`)
@@ -813,7 +835,13 @@ class LibraryScanner {
 
       Logger.debug(`[LibraryScanner] Folder update group must be a new item "${itemDir}" in library "${library.name}"`)
       const isSingleMediaItem = isSingleMediaFile(fileUpdateGroup, itemDir)
-      const newLibraryItem = await LibraryItemScanner.scanPotentialNewLibraryItem(fullPath, library, folder, isSingleMediaItem)
+      let newLibraryItem = null
+      try {
+        newLibraryItem = await LibraryItemScanner.scanPotentialNewLibraryItem(fullPath, library, folder, isSingleMediaItem)
+      } catch (error) {
+        // One failing item must not stop the other folder updates (#5319)
+        Logger.error(`[LibraryScanner] Failed to add new library item for folder update "${itemDir}"`, error)
+      }
       if (newLibraryItem) {
         SocketAuthority.libraryItemEmitter('item_added', newLibraryItem)
       }
