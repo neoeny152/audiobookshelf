@@ -24,6 +24,37 @@ class LibraryScanner {
     this.scanningFilesChanged = false
     /** @type {[import('../Watcher').PendingFileUpdate[], Task][]} */
     this.pendingFileUpdatesToScan = []
+
+    /**
+     * Tail of the per-library work queue. Full library scans and watcher folder updates
+     * for the same library run one at a time so they cannot both create the same item.
+     * @type {Map<string, Promise<void>>}
+     */
+    this.libraryLocks = new Map()
+  }
+
+  /**
+   * Run fn exclusively for a library: waits for any running full scan or watcher update of the same library
+   *
+   * @template T
+   * @param {string} libraryId
+   * @param {() => Promise<T>} fn
+   * @returns {Promise<T>}
+   */
+  async runWithLibraryLock(libraryId, fn) {
+    const previous = this.libraryLocks.get(libraryId) || Promise.resolve()
+    let release
+    const current = new Promise((resolve) => (release = resolve))
+    const tail = previous.then(() => current)
+    this.libraryLocks.set(libraryId, tail)
+
+    await previous
+    try {
+      return await fn()
+    } finally {
+      release()
+      if (this.libraryLocks.get(libraryId) === tail) this.libraryLocks.delete(libraryId)
+    }
   }
 
   /**
@@ -86,7 +117,7 @@ class LibraryScanner {
     Logger.info(`[LibraryScanner] Starting${forceRescan ? ' (forced)' : ''} library scan ${libraryScan.id} for ${libraryScan.libraryName}`)
 
     try {
-      const canceled = await this.scanLibrary(libraryScan, forceRescan)
+      const canceled = await this.runWithLibraryLock(library.id, () => this.scanLibrary(libraryScan, forceRescan))
       libraryScan.setComplete()
 
       Logger.info(`[LibraryScanner] Library scan "${libraryScan.id}" ${canceled ? 'canceled after' : 'completed in'} ${libraryScan.elapsedTimestamp} | ${libraryScan.resultStats}`)
@@ -415,7 +446,8 @@ class LibraryScanner {
         Logger.info(`[LibraryScanner] No important changes to scan for in folder "${folderId}"`)
         continue
       }
-      const folderScanResults = await this.scanFolderUpdates(library, folder, fileUpdateGroup)
+      // Wait for a running full scan of this library to finish so both do not add the same item
+      const folderScanResults = await this.runWithLibraryLock(library.id, () => this.scanFolderUpdates(library, folder, fileUpdateGroup))
       Logger.debug(`[LibraryScanner] Folder scan results`, folderScanResults)
 
       // Tally results to share with client

@@ -17,7 +17,14 @@ const LibraryFile = require('../objects/files/LibraryFile')
 const SocketAuthority = require('../SocketAuthority')
 
 class LibraryItemScanner {
-  constructor() {}
+  constructor() {
+    /**
+     * Keys ("libraryId:path") of new library items currently being created.
+     * Guards against two scans (e.g. watcher + full library scan) creating the same item concurrently.
+     * @type {Set<string>}
+     */
+    this.newItemPathsInProgress = new Set()
+  }
 
   /**
    * Scan single library item
@@ -184,16 +191,41 @@ class LibraryItemScanner {
    * @returns {Promise<LibraryItem>}
    */
   async scanNewLibraryItem(libraryItemData, librarySettings, libraryScan) {
-    let newLibraryItem = null
-    if (libraryItemData.mediaType === 'book') {
-      newLibraryItem = await BookScanner.scanNewBookLibraryItem(libraryItemData, librarySettings, libraryScan)
-    } else {
-      newLibraryItem = await PodcastScanner.scanNewPodcastLibraryItem(libraryItemData, librarySettings, libraryScan)
+    // Claim the path synchronously so a concurrent scan cannot start creating the same item
+    const pathKey = `${libraryItemData.libraryId}:${libraryItemData.path}`
+    if (this.newItemPathsInProgress.has(pathKey)) {
+      libraryScan.addLog(LogLevel.WARN, `Library item at path "${libraryItemData.path}" is already being added by another scan - skipping`)
+      return null
     }
-    if (newLibraryItem) {
-      libraryScan.addLog(LogLevel.INFO, `Created new library item "${newLibraryItem.relPath}" with id "${newLibraryItem.id}"`)
+    this.newItemPathsInProgress.add(pathKey)
+
+    try {
+      // Re-check the database: another scan may have created this item after the caller looked it up
+      const existingLibraryItem = await Database.libraryItemModel.findOne({
+        attributes: ['id', 'path'],
+        where: {
+          libraryId: libraryItemData.libraryId,
+          path: libraryItemData.path
+        }
+      })
+      if (existingLibraryItem) {
+        libraryScan.addLog(LogLevel.WARN, `Library item at path "${libraryItemData.path}" already exists with id "${existingLibraryItem.id}" - not creating a duplicate`)
+        return null
+      }
+
+      let newLibraryItem = null
+      if (libraryItemData.mediaType === 'book') {
+        newLibraryItem = await BookScanner.scanNewBookLibraryItem(libraryItemData, librarySettings, libraryScan)
+      } else {
+        newLibraryItem = await PodcastScanner.scanNewPodcastLibraryItem(libraryItemData, librarySettings, libraryScan)
+      }
+      if (newLibraryItem) {
+        libraryScan.addLog(LogLevel.INFO, `Created new library item "${newLibraryItem.relPath}" with id "${newLibraryItem.id}"`)
+      }
+      return newLibraryItem
+    } finally {
+      this.newItemPathsInProgress.delete(pathKey)
     }
-    return newLibraryItem
   }
 
   /**
