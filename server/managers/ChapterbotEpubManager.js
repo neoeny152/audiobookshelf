@@ -572,15 +572,15 @@ class ChapterbotEpubManager extends EventEmitter {
     record.fileName = Path.basename(finalPath)
     Logger.info(`[ChapterbotEpubManager] Wrote "${finalPath}" from EPUB job ${record.jobId}`)
 
+    const hasReadAlong = await this.saveReadAlong(record, finalPath)
+
     try {
       await this.scanItem(record.libraryItemId)
-      record.ebookRole = await this.setEbookRole(record.libraryItemId, finalPath, hadPrimaryEbook)
+      record.ebookRole = await this.setEbookRole(record.libraryItemId, finalPath, hadPrimaryEbook, hasReadAlong)
     } catch (error) {
       // the file is in place; a later scan will pick it up
       Logger.error(`[ChapterbotEpubManager] Rescan of "${record.libraryItemId}" after EPUB job ${record.jobId} failed`, error)
     }
-
-    await this.saveReadAlong(record, finalPath)
 
     // the sidecar keeps a finished job's files until it is deleted
     this.client.deleteJob(record.jobId).catch((error) => Logger.warn(`[ChapterbotEpubManager] Deleting finished EPUB job ${record.jobId} on chapterbot failed: ${error.message}`))
@@ -598,26 +598,32 @@ class ChapterbotEpubManager extends EventEmitter {
    *
    * @param {Object} record
    * @param {string} finalPath - the EPUB in the library item folder
+   * @returns {Promise<boolean>} whether read-along data was saved
    */
   async saveReadAlong(record, finalPath) {
     try {
       const data = await this.client.downloadJobReadAlong(record.jobId)
       if (!data) {
         Logger.warn(`[ChapterbotEpubManager] EPUB job ${record.jobId} has no read-along data (sidecar older than the feature), saved the EPUB without it`)
-        return
+        return false
       }
       const normalized = readAlong.validate(data)
       const ino = await getIno(finalPath)
       if (!ino) throw new Error('the placed EPUB could not be read')
       await readAlong.save(record.libraryItemId, ino, Path.basename(finalPath), normalized)
       Logger.info(`[ChapterbotEpubManager] Saved read-along data (${normalized.sentences.length} sentences) for "${finalPath}"`)
+      return true
     } catch (error) {
       Logger.warn(`[ChapterbotEpubManager] Saving the read-along data of EPUB job ${record.jobId} failed: ${error.message}`)
+      return false
     }
   }
 
   /**
    * After the rescan, give the placed EPUB its role (as PATCH /api/items/:id/ebook/:fileid/status would):
+   * - it has read-along data: it becomes the primary ebook even over a published one (the web reader's Read button
+   *   opens the primary ebook, and only this one highlights along with the narration); the other ebooks stay as
+   *   supplementary files;
    * - the book had a primary ebook before (a real published ebook): it stays primary, this EPUB is supplementary;
    * - the book had none (no ebook, or only supplementary ones): this EPUB becomes the primary ebook, so the web client
    *   shows Read and the mobile apps see it. The rescan usually did that already (stock scanner rule: a book without a
@@ -629,9 +635,10 @@ class ChapterbotEpubManager extends EventEmitter {
    * @param {string} libraryItemId
    * @param {string} finalPath - the EPUB in the library item folder
    * @param {boolean} hadPrimaryEbook - whether the book had a primary ebook when the job finished on the sidecar
+   * @param {boolean} [hasReadAlong] - read-along data was saved for the placed EPUB
    * @returns {Promise<'primary'|'supplementary'|null>} null when the rescan did not pick the file up
    */
-  async setEbookRole(libraryItemId, finalPath, hadPrimaryEbook) {
+  async setEbookRole(libraryItemId, finalPath, hadPrimaryEbook, hasReadAlong = false) {
     const libraryItem = await Database.libraryItemModel.getExpandedById(libraryItemId)
     if (!libraryItem?.media) return null
     const posixPath = filePathToPOSIX(finalPath)
@@ -646,8 +653,8 @@ class ChapterbotEpubManager extends EventEmitter {
       return this.applyEbookRole(libraryItem, libraryFile, true)
     }
 
-    let makePrimary = !hadPrimaryEbook
-    if (makePrimary && current) {
+    let makePrimary = hasReadAlong || !hadPrimaryEbook
+    if (makePrimary && !hasReadAlong && current) {
       // the rescan promoted another file: take over only from one the user had marked supplementary
       const currentFile = libraryFiles.find((lf) => lf.ino === current.ino)
       makePrimary = currentFile?.isSupplementary === true

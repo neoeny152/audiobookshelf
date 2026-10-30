@@ -382,7 +382,8 @@ describe('Chapterbot EPUB endpoints', () => {
     expect((await call('startEpubJob')).statusCode).to.equal(202)
   })
 
-  it('never overwrites an existing file and leaves an existing primary ebook alone', async () => {
+  it('never overwrites an existing file and, without read-along data, leaves an existing primary ebook alone', async () => {
+    sidecar.readAlong = null
     const existing = Path.join(itemDir, 'Black Ice (from audio).epub')
     fs.writeFileSync(existing, 'original')
     const li = await Database.libraryItemModel.getExpandedById(bookItemId)
@@ -446,7 +447,8 @@ describe('Chapterbot EPUB endpoints', () => {
       expect(job.ebookRole).to.equal('primary')
     })
 
-    it('a book with an existing primary ebook: it stays primary, ours is supplementary', async () => {
+    it('a book with an existing primary ebook and no read-along data: it stays primary, ours is supplementary', async () => {
+      sidecar.readAlong = null
       const real = await addLibraryFile('Black Ice.epub', false)
       const li = await Database.libraryItemModel.getExpandedById(bookItemId)
       li.media.ebookFile = { ino: real.ino, metadata: real.metadata, ebookFormat: 'epub' }
@@ -479,13 +481,37 @@ describe('Chapterbot EPUB endpoints', () => {
       expect(job.ebookRole).to.equal('primary')
     })
 
-    it('never takes over from a real ebook the rescan made primary', async () => {
+    it('without read-along data, never takes over from a real ebook the rescan made primary', async () => {
+      sidecar.readAlong = null
       const other = await addLibraryFile('Black Ice.epub', null)
       scanPromoting(other)
       const { reloaded, placed, job } = await runJob()
       expect(reloaded.media.ebookFile.ino).to.equal(other.ino)
       expect(placed.isSupplementary).to.equal(true)
       expect(job.ebookRole).to.equal('supplementary')
+    })
+
+    it('with read-along data, ours becomes primary over an existing primary ebook', async () => {
+      const real = await addLibraryFile('Black Ice.epub', false)
+      const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+      li.media.ebookFile = { ino: real.ino, metadata: real.metadata, ebookFormat: 'epub' }
+      li.media.changed('ebookFile', true)
+      await li.media.save()
+
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+      expect(placed.isSupplementary).to.equal(false)
+      expect(reloaded.libraryFiles.find((lf) => lf.ino === real.ino).isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('primary')
+    })
+
+    it('with read-along data, takes over from a real ebook the rescan made primary', async () => {
+      const other = await addLibraryFile('Black Ice.epub', null)
+      scanPromoting(other)
+      const { reloaded, placed, job } = await runJob()
+      expect(reloaded.media.ebookFile.ino).to.equal(placed.ino)
+      expect(reloaded.libraryFiles.find((lf) => lf.ino === other.ino).isSupplementary).to.equal(true)
+      expect(job.ebookRole).to.equal('primary')
     })
 
     it('stays supplementary in an audiobooks-only library', async () => {
