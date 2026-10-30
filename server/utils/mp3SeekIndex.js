@@ -11,10 +11,12 @@ const Logger = require('../Logger')
  * so the stored duration, every later track's startOffset, and byte-estimated seeking in players all drift.
  * A CBR file without a header is fine: the estimate is exact.
  *
- * Detection reads the ID3v2 header and the first 64 KB after it, so it is cheap enough for scans. It cannot tell a
- * true CBR file (estimate exact) from one with occasional smaller frames (estimate off by tens of seconds over hours,
- * seen on real files that sample as constant 128 kbps), so every file without a header is flagged; measureDuration()
- * walks all frame headers (reads the whole file, no decoding) to report the real error on demand.
+ * Detection has two steps. The header check reads the ID3v2 header and the first 64 KB after it, cheap enough for
+ * scans. A missing header is only a pre-filter: most such files are true CBR and their estimate is exact (on a real
+ * library 283 files in 16 books had no header, only 3 books drifted). measureDuration() then walks all frame headers
+ * (reads the whole file, no decoding) for the real duration; a file needs repair only when that differs from the
+ * stored duration by more than DRIFT_THRESHOLD_SEC. Checking bitrates alone is not enough: the drifting files seen
+ * so far are 128 kbps in every frame but never set the padding bit, so each frame is 417 instead of 417.96 bytes.
  * Repair remuxes with stream copy and a Xing header (audio is never re-encoded), verifies, then replaces the file.
  *
  * @typedef {'xing'|'info'|'vbri'|'none'|'unknown'} Mp3SeekIndexStatus
@@ -41,6 +43,8 @@ const SAMPLE_RATES = {
   0: [11025, 12000, 8000] // MPEG2.5
 }
 
+/** A file needs repair when its real duration differs from the stored one by more than this */
+const DRIFT_THRESHOLD_SEC = 1
 const HEAD_READ_BYTES = 64 * 1024
 const MEASURE_CHUNK_BYTES = 1024 * 1024
 const MIN_FRAME_CHAIN = 4
@@ -281,11 +285,28 @@ async function measureDuration(filePath, { signal = null } = {}) {
 }
 
 /**
- * @param {Mp3SeekIndexStatus|null|undefined} status
+ * Real minus stored duration from the measurement stored on the audio file, or null when there is none or the file
+ * changed since (size or mtime differ).
+ *
+ * @param {{duration?: number, metadata?: {size?: number, mtimeMs?: number}, mp3Measured?: {duration: number, size: number, mtimeMs: number}|null}} audioFile
+ * @returns {number|null}
+ */
+function getDrift(audioFile) {
+  const m = audioFile?.mp3Measured
+  if (!m || m.size !== audioFile.metadata?.size || m.mtimeMs !== audioFile.metadata?.mtimeMs) return null
+  return m.duration - (audioFile.duration || 0)
+}
+
+/**
+ * No seek header and a measured drift above the threshold.
+ *
+ * @param {Object} audioFile - audio file object from the database
  * @returns {boolean}
  */
-function needsRepair(status) {
-  return status === 'none'
+function needsRepair(audioFile) {
+  if (audioFile?.mp3SeekIndex !== 'none') return false
+  const drift = getDrift(audioFile)
+  return drift !== null && Math.abs(drift) > DRIFT_THRESHOLD_SEC
 }
 
 /**
@@ -434,10 +455,10 @@ function runProcess(bin, args, { signal = null, onStdout = null } = {}) {
  * @param {number} [opts.expectedDuration] - for decode progress
  * @param {(fraction: number) => void} [opts.onProgress] - 0..1
  * @param {AbortSignal} [opts.signal]
- * @param {string} [opts.backupPath] - copy the original here before replacing
+ * @param {string} [opts.backupPath] - copy the original here (outside the library) before replacing; size checked
  * @param {typeof runProcess} [opts.run] - injectable for tests
  * @param {typeof detectSeekIndex} [opts.detect] - injectable for tests
- * @param {Object} [opts.fs] - injectable for tests (copyFile, rename, stat, chmod, chown, rm)
+ * @param {Object} [opts.fs] - injectable for tests (copyFile, rename, stat, chmod, chown, rm, mkdir)
  * @returns {Promise<{oldPackets:number, newProbedDuration:number, decodedDuration:number}>}
  */
 async function repairFile(filePath, { expectedDuration = 0, onProgress = () => {}, signal = null, backupPath = null, run = runProcess, detect = detectSeekIndex, fs = fsp } = {}) {
@@ -479,10 +500,42 @@ async function repairFile(filePath, { expectedDuration = 0, onProgress = () => {
     if (typeof process.getuid === 'function') {
       await fs.chown(tempPath, stat.uid, stat.gid).catch((err) => Logger.warn(`[mp3SeekIndex] Could not keep owner of "${filePath}": ${err.message}`))
     }
-    if (backupPath) await fs.copyFile(filePath, backupPath)
+    if (backupPath) {
+      await fs.mkdir(Path.dirname(backupPath), { recursive: true })
+      await fs.copyFile(filePath, backupPath)
+      const copied = await fs.stat(backupPath)
+      if (copied.size !== stat.size) throw new Error(`Backup of "${filePath}" is incomplete`)
+    }
     await fs.rename(tempPath, filePath)
     onProgress(1)
     return { oldPackets, newProbedDuration, decodedDuration }
+  } catch (err) {
+    await fs.rm(tempPath, { force: true }).catch(() => {})
+    throw err
+  }
+}
+
+/**
+ * Put a backed up original back: copied to a temp file next to the target (same filesystem), size checked, given the
+ * target's permissions and owner, then renamed over it. The target is untouched if anything fails before the rename.
+ *
+ * @param {string} backupPath
+ * @param {string} filePath
+ * @param {{fs?: Object}} [opts] - injectable for tests
+ */
+async function restoreFile(backupPath, filePath, { fs = fsp } = {}) {
+  const tempPath = Path.join(Path.dirname(filePath), `.${Path.basename(filePath)}.seekrestore.tmp`)
+  try {
+    const backup = await fs.stat(backupPath)
+    await fs.copyFile(backupPath, tempPath)
+    const copied = await fs.stat(tempPath)
+    if (copied.size !== backup.size) throw new Error(`Copy of "${backupPath}" is incomplete`)
+    const target = await fs.stat(filePath).catch(() => backup)
+    await fs.chmod(tempPath, target.mode & 0o7777)
+    if (typeof process.getuid === 'function') {
+      await fs.chown(tempPath, target.uid, target.gid).catch((err) => Logger.warn(`[mp3SeekIndex] Could not keep owner of "${filePath}": ${err.message}`))
+    }
+    await fs.rename(tempPath, filePath)
   } catch (err) {
     await fs.rm(tempPath, { force: true }).catch(() => {})
     throw err
@@ -549,6 +602,8 @@ module.exports = {
   detectFromBuffer,
   detectSeekIndex,
   measureDuration,
+  DRIFT_THRESHOLD_SEC,
+  getDrift,
   needsRepair,
   isMp3AudioFile,
   getTempPath,
@@ -560,5 +615,6 @@ module.exports = {
   verifyRemux,
   runProcess,
   repairFile,
+  restoreFile,
   shiftChapters
 }

@@ -220,7 +220,8 @@ describe('mp3SeekIndex', () => {
         chown: sinon.stub().resolves(),
         copyFile: sinon.stub().resolves(),
         rename: sinon.stub().resolves(),
-        rm: sinon.stub().resolves()
+        rm: sinon.stub().resolves(),
+        mkdir: sinon.stub().resolves()
       }
     }
 
@@ -257,9 +258,27 @@ describe('mp3SeekIndex', () => {
 
     it('copies a backup before replacing when asked', async () => {
       const fsStub = fakeFs()
-      await mp3SeekIndex.repairFile(path, { run: fakeRun(), fs: fsStub, detect: async () => ({ status: 'xing' }), backupPath: '/meta/backup/Part 1.mp3' })
-      expect(fsStub.copyFile.calledOnceWith(path, '/meta/backup/Part 1.mp3')).to.be.true
+      const backupPath = Path.join('/meta', 'backup', 'Part 1.mp3')
+      await mp3SeekIndex.repairFile(path, { run: fakeRun(), fs: fsStub, detect: async () => ({ status: 'xing' }), backupPath })
+      expect(fsStub.mkdir.calledWith(Path.dirname(backupPath), { recursive: true })).to.be.true
+      expect(fsStub.copyFile.calledOnceWith(path, backupPath)).to.be.true
       expect(fsStub.copyFile.calledBefore(fsStub.rename)).to.be.true
+    })
+
+    it('does not replace the original when the backup copy is incomplete', async () => {
+      const fsStub = fakeFs()
+      const backupPath = Path.join('/meta', 'backup', 'Part 1.mp3')
+      fsStub.stat.withArgs(path).resolves({ mode: 0o100664, uid: 99, gid: 100, size: 1000 })
+      fsStub.stat.withArgs(backupPath).resolves({ size: 10 })
+      let error
+      try {
+        await mp3SeekIndex.repairFile(path, { run: fakeRun(), fs: fsStub, detect: async () => ({ status: 'xing' }), backupPath })
+      } catch (err) {
+        error = err
+      }
+      expect(error?.message).to.match(/incomplete/)
+      expect(fsStub.rename.called).to.be.false
+      expect(fsStub.rm.calledWith(tmp)).to.be.true
     })
 
     it('leaves the original alone and removes the temp when the frame count differs', async () => {
@@ -298,6 +317,57 @@ describe('mp3SeekIndex', () => {
       expect(error?.message).to.match(/Remux failed: boom/)
       expect(fsStub.rename.called).to.be.false
       expect(fsStub.rm.calledWith(tmp)).to.be.true
+    })
+  })
+
+  describe('restoreFile', () => {
+    let dir
+    beforeEach(() => {
+      dir = fs.mkdtempSync(Path.join(os.tmpdir(), 'abs seekrestore '))
+    })
+    afterEach(() => {
+      fs.rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('puts the backup over the file through a temp file next to it', async () => {
+      const backup = Path.join(dir, 'backup.mp3')
+      const target = Path.join(dir, 'Part 1.mp3')
+      fs.writeFileSync(backup, 'original')
+      fs.writeFileSync(target, 'repaired file')
+      await mp3SeekIndex.restoreFile(backup, target)
+      expect(fs.readFileSync(target, 'utf8')).to.equal('original')
+      expect(fs.readdirSync(dir).sort()).to.deep.equal(['Part 1.mp3', 'backup.mp3'])
+    })
+
+    it('leaves the file alone when the backup is missing', async () => {
+      const target = Path.join(dir, 'Part 1.mp3')
+      fs.writeFileSync(target, 'repaired file')
+      let error
+      try {
+        await mp3SeekIndex.restoreFile(Path.join(dir, 'nope.mp3'), target)
+      } catch (err) {
+        error = err
+      }
+      expect(error).to.exist
+      expect(fs.readFileSync(target, 'utf8')).to.equal('repaired file')
+      expect(fs.readdirSync(dir)).to.deep.equal(['Part 1.mp3'])
+    })
+  })
+
+  describe('needsRepair', () => {
+    const af = (over = {}) => ({ duration: 7571.36475, mp3SeekIndex: 'none', metadata: { size: 100, mtimeMs: 5 }, mp3Measured: { duration: 7588.78, size: 100, mtimeMs: 5 }, ...over })
+    it('needs a missing header and a measured drift above 1 s', () => {
+      expect(mp3SeekIndex.getDrift(af())).to.be.closeTo(17.415, 0.001)
+      expect(mp3SeekIndex.needsRepair(af())).to.be.true
+    })
+    it('ignores true CBR files whose estimate is right', () => {
+      expect(mp3SeekIndex.needsRepair(af({ mp3Measured: { duration: 7571.9, size: 100, mtimeMs: 5 } }))).to.be.false
+    })
+    it('ignores files with a header, or not measured yet, or measured before they changed', () => {
+      expect(mp3SeekIndex.needsRepair(af({ mp3SeekIndex: 'xing' }))).to.be.false
+      expect(mp3SeekIndex.needsRepair(af({ mp3Measured: null }))).to.be.false
+      expect(mp3SeekIndex.getDrift(af({ metadata: { size: 101, mtimeMs: 5 } }))).to.be.null
+      expect(mp3SeekIndex.needsRepair(af({ metadata: { size: 100, mtimeMs: 6 } }))).to.be.false
     })
   })
 

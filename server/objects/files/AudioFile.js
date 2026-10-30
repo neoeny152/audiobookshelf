@@ -28,6 +28,8 @@ class AudioFile {
     this.embeddedCoverArt = null
     /** @type {import('../../utils/mp3SeekIndex').Mp3SeekIndexStatus|null} MP3 only: Xing/Info/VBRI header found, or none */
     this.mp3SeekIndex = null
+    /** @type {{duration: number, size: number, mtimeMs: number}|null} MP3 without a seek header: frame count duration, for the file at that size/mtime */
+    this.mp3Measured = null
 
     // Tags scraped from the audio file
     /** @type {AudioMetaTags} */
@@ -67,6 +69,7 @@ class AudioFile {
       chapters: this.chapters,
       embeddedCoverArt: this.embeddedCoverArt,
       mp3SeekIndex: this.mp3SeekIndex || null,
+      mp3Measured: this.mp3Measured ? { ...this.mp3Measured } : null,
       metaTags: this.metaTags?.toJSON() || {},
       mimeType: this.mimeType
     }
@@ -100,6 +103,7 @@ class AudioFile {
     this.chapters = data.chapters
     this.embeddedCoverArt = data.embeddedCoverArt || null
     this.mp3SeekIndex = data.mp3SeekIndex || null
+    this.mp3Measured = data.mp3Measured ? { ...data.mp3Measured } : null
 
     this.metaTags = new AudioMetaTags(data.metaTags || {})
   }
@@ -138,6 +142,7 @@ class AudioFile {
     this.metaTags = probeData.audioMetaTags
     this.embeddedCoverArt = probeData.embeddedCoverArt
     this.mp3SeekIndex = probeData.mp3SeekIndex || null
+    this.mp3Measured = null
   }
 
   syncChapters(updatedChapters) {
@@ -187,6 +192,12 @@ class AudioFile {
       } else if (key === 'metaTags') {
         if (!this.metaTags || !this.metaTags.isEqual(scannedAudioFile.metaTags)) {
           this.metaTags = scannedAudioFile.metaTags.clone()
+          hasUpdated = true
+        }
+      } else if (key === 'mp3Measured') {
+        // A new probe means the file changed: drop the measurement taken of the old one
+        if (JSON.stringify(this.mp3Measured) !== JSON.stringify(newjson.mp3Measured)) {
+          this.mp3Measured = newjson.mp3Measured
           hasUpdated = true
         }
       } else if (key === 'chapters') {

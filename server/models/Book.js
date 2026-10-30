@@ -82,6 +82,7 @@ async function hasOtherWithSameName(model, record, name) {
  * @property {Object} metaTags
  * @property {string} mimeType
  * @property {import('../utils/mp3SeekIndex').Mp3SeekIndexStatus|null} [mp3SeekIndex] - MP3 only, see utils/mp3SeekIndex
+ * @property {{duration: number, size: number, mtimeMs: number}|null} [mp3Measured] - MP3 without a seek header: measured duration
  *
  * @typedef AudioTrackProperties
  * @property {string} title

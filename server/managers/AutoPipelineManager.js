@@ -130,6 +130,8 @@ class AutoPipelineManager extends EventEmitter {
     this.detect = undefined
     this.stat = (path) => fs.stat(path)
     this.readdir = (path) => fs.readdir(path, { withFileTypes: true })
+    /** MP3 seek index status (Mp3SeekIndexManager.getStatus), or null when that manager is not there */
+    this.seekIndexStatus = (libraryItem) => this.apiRouter?.mp3SeekIndexManager?.getStatus(libraryItem) ?? null
     this.scannerChapters = (title, audioFiles) => require('../scanner/AudioFileScanner').getBookChaptersFromAudioFiles(title, audioFiles, { addLog: () => {} })
   }
 
@@ -1076,6 +1078,17 @@ class AutoPipelineManager extends EventEmitter {
     }
     const sourceHash = chapterPlan.chaptersHash(proposedInput)
     const fingerprint = chapterPlan.audioFingerprint(media.includedAudioFiles)
+
+    // MP3s whose estimated duration is off put every later chapter off too: snapping would only fit chapters to a
+    // wrong timeline. The repair rewrites the files, so it is never run from here; a person starts it.
+    const seekIndex = await this.seekIndexStatus(libraryItem)
+    if (seekIndex?.needsRepairCount) {
+      const drift = Math.round(seekIndex.maxDrift * 10) / 10
+      state.chapters = { ...keep, result: 'needs-review', reason: 'needs-seek-index-repair', current: kind, source, seekIndex: { files: seekIndex.needsRepairCount, maxDrift: drift } }
+      if (state.dryRun) state.chapters.would = 'would need review: MP3 files need a seek index repair'
+      this.log(state, 'chapters', `not snapped: ${seekIndex.needsRepairCount} MP3 file(s) need a seek index repair (off by up to ${drift}s)`)
+      return this.finish(state, 'needs-review', `chapters: ${seekIndex.needsRepairCount} MP3 file(s) need a seek index repair (off by up to ${drift}s)`)
+    }
 
     // analysis (resumable): snap, then the speech check
     let analysis = await this.store.readAnalysis(libraryItem.id)

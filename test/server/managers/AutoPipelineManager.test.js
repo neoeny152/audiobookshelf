@@ -650,6 +650,21 @@ describe('AutoPipelineManager', () => {
       expect(stateOf(id).chapters.blockers).to.include('source-near')
     })
 
+    it('does not snap while MP3 files need a seek index repair, and never repairs them itself', async () => {
+      const getStatus = sinon.stub().resolves({ needsRepairCount: 2, maxDrift: 43.38 })
+      const startRepair = sinon.stub()
+      apiRouter.mp3SeekIndexManager = { getStatus, startRepair }
+      const id = await createItem({ asin: ASIN })
+      await addItems([id])
+      await runAll()
+      expect(stateOf(id).status).to.equal('needs-review')
+      expect(stateOf(id).chapters).to.include({ result: 'needs-review', reason: 'needs-seek-index-repair' })
+      expect(stateOf(id).chapters.seekIndex).to.deep.equal({ files: 2, maxDrift: 43.4 })
+      expect(detectCalls).to.equal(0)
+      expect(startRepair.called).to.be.false
+      expect((await getItem(id)).media.chapters).to.have.length(4)
+    })
+
     it('without chapterbot the chapters always go to review', async () => {
       speechClient.configured = false
       const id = await createItem()

@@ -13,9 +13,11 @@ const { version } = require('../../package.json')
  * - libraryDownloadPost: POST /api/libraries/:id/download with ids in the request body
  * - readAlong: GET /api/items/:id/ebook/:fileid/readalong, sentence timings of an EPUB made from the item's audio
  *   (404 when that EPUB has none; see utils/readAlong.js). Always listed: serving stored data needs no sidecar.
- * - mp3SeekIndex: GET /api/tools/item/:id/seek-index (MP3s without a Xing/Info/VBRI header, ?measure=1 for the real
- *   duration), POST/DELETE /api/tools/item/:id/repair-seek-index (remux with a Xing header, task action
- *   repair-seek-index), audioFile.mp3SeekIndex (see utils/mp3SeekIndex.js).
+ * - mp3SeekIndex: GET /api/tools/item/:id/seek-index (MP3s whose duration was estimated and is off by more than 1 s,
+ *   and the item's repair backups), POST/DELETE /api/tools/item/:id/repair-seek-index (remux with a Xing header, task
+ *   action repair-seek-index), POST /api/tools/item/:id/seek-index/backups/:backupId/restore (task action
+ *   restore-seek-index), DELETE /api/tools/item/:id/seek-index/backups/:backupId, audioFile.mp3SeekIndex and
+ *   audioFile.mp3Measured (see utils/mp3SeekIndex.js).
  * - duplicateItems: GET /api/libraries/:id/duplicates[?include=dismissed], POST /api/libraries/:id/duplicates/check,
  *   PATCH /api/libraries/:id/duplicates/:groupId { dismissed } (admin only), filterdata.numDuplicateGroups for admins
  *   and duplicate_items_updated admin socket events

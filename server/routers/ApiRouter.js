@@ -345,6 +345,8 @@ class ApiRouter {
     this.router.get('/tools/item/:id/seek-index', ToolsController.middleware.bind(this), ToolsController.getSeekIndexStatus.bind(this))
     this.router.post('/tools/item/:id/repair-seek-index', ToolsController.middleware.bind(this), ToolsController.repairSeekIndex.bind(this))
     this.router.delete('/tools/item/:id/repair-seek-index', ToolsController.middleware.bind(this), ToolsController.cancelRepairSeekIndex.bind(this))
+    this.router.post('/tools/item/:id/seek-index/backups/:backupId/restore', ToolsController.middleware.bind(this), ToolsController.restoreSeekIndexBackup.bind(this))
+    this.router.delete('/tools/item/:id/seek-index/backups/:backupId', ToolsController.middleware.bind(this), ToolsController.deleteSeekIndexBackup.bind(this))
     this.router.post('/tools/batch/embed-metadata', ToolsController.middleware.bind(this), ToolsController.batchEmbedMetadata.bind(this))
 
     //

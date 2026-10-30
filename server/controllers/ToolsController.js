@@ -157,9 +157,10 @@ class ToolsController {
 
   /**
    * GET: /api/tools/item/:id/seek-index
-   * Which included MP3 files have no Xing/Info/VBRI header (ffprobe estimated their duration).
-   * The check result is stored on the audio files. ?measure=1 also walks those files frame by frame to report
-   * how far the stored duration is off (reads each whole file).
+   * Which included MP3 files need a seek index repair: no Xing/Info/VBRI header (ffprobe estimated the duration) and
+   * a real duration, measured by walking the frames, that differs from the stored one by more than 1 s.
+   * Checks and measurements are stored on the audio files, so only the first call for a file reads it.
+   * Also lists the item's repair backups.
    *
    * @this import('../routers/ApiRouter')
    *
@@ -170,14 +171,14 @@ class ToolsController {
     if (req.libraryItem.isMissing || !req.libraryItem.isBook) {
       return res.status(400).send('Invalid library item: not a book')
     }
-    const status = await this.mp3SeekIndexManager.getStatus(req.libraryItem, { measure: req.query.measure === '1' })
+    const status = await this.mp3SeekIndexManager.getStatus(req.libraryItem)
     res.json(status)
   }
 
   /**
    * POST: /api/tools/item/:id/repair-seek-index
-   * Start a task that remuxes every included MP3 without a seek index (stream copy, Xing header written, verified,
-   * then replaced) and rescans the item. Body: { chapters?: 'keep'|'shift', backup?: boolean }
+   * Start a task that remuxes every included MP3 that needs it (stream copy, Xing header written, verified, the
+   * original kept as a backup outside the library, then replaced) and rescans the item. Body: { chapters?: 'keep'|'shift' }
    *
    * @this import('../routers/ApiRouter')
    *
@@ -202,12 +203,51 @@ class ToolsController {
 
     // Use the stored check, refreshed first so an item scanned before the check existed is covered
     await this.mp3SeekIndexManager.getStatus(req.libraryItem)
-    const task = this.mp3SeekIndexManager.startRepair(req.user.id, req.libraryItem, { chapters, backup: req.body?.backup === true })
+    const task = this.mp3SeekIndexManager.startRepair(req.user.id, req.libraryItem, { chapters })
     if (!task) {
-      return res.status(400).send('No MP3 files without a seek index')
+      return res.status(400).send('No MP3 files need a seek index repair')
     }
     Logger.info(`[ToolsController] Started seek index repair for "${req.libraryItem.media.title}"`)
     res.json({ taskId: task.id, files: task.data.audioFiles.map((af) => ({ ino: af.ino, filename: af.filename, duration: af.duration })) })
+  }
+
+  /**
+   * POST: /api/tools/item/:id/seek-index/backups/:backupId/restore
+   * Start a task that puts a repair backup's originals back and rescans; saved chapters go back to how they were
+   * before the repair when they were not changed since. The backup is deleted once every file is back.
+   *
+   * @this import('../routers/ApiRouter')
+   *
+   * @param {RequestWithLibraryItem} req
+   * @param {Response} res
+   */
+  async restoreSeekIndexBackup(req, res) {
+    const libraryItemId = req.libraryItem.id
+    if (req.libraryItem.isFile || !req.libraryItem.isBook) return res.status(400).send('Invalid library item')
+    if (!this.mp3SeekIndexManager.isValidBackupId(req.params.backupId)) return res.sendStatus(404)
+    if (this.mp3SeekIndexManager.getIsLibraryItemQueuedOrProcessing(libraryItemId) || this.audioMetadataManager.getIsLibraryItemQueuedOrProcessing(libraryItemId) || this.abMergeManager.getPendingTaskByLibraryItemId(libraryItemId)) {
+      return res.status(400).send('Library item is already in queue or processing')
+    }
+    const manifest = await this.mp3SeekIndexManager.readManifest(libraryItemId, req.params.backupId)
+    if (!manifest?.files?.length) return res.sendStatus(404)
+    const task = this.mp3SeekIndexManager.startRestore(req.user.id, req.libraryItem, manifest)
+    res.json({ taskId: task.id })
+  }
+
+  /**
+   * DELETE: /api/tools/item/:id/seek-index/backups/:backupId
+   *
+   * @this import('../routers/ApiRouter')
+   *
+   * @param {RequestWithLibraryItem} req
+   * @param {Response} res
+   */
+  async deleteSeekIndexBackup(req, res) {
+    if (this.mp3SeekIndexManager.getIsLibraryItemQueuedOrProcessing(req.libraryItem.id)) {
+      return res.status(400).send('Library item is already in queue or processing')
+    }
+    if (!(await this.mp3SeekIndexManager.deleteBackup(req.libraryItem.id, req.params.backupId))) return res.sendStatus(404)
+    res.sendStatus(200)
   }
 
   /**

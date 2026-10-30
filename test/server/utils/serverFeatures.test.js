@@ -63,7 +63,7 @@ describe('serverFeatures', () => {
       batchEpisodes: ['post /podcasts/batch/episodes/update', 'post /podcasts/batch/episodes/delete'],
       libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download'],
       readAlong: ['get /items/:id/ebook/:fileid/readalong'],
-      mp3SeekIndex: ['get /tools/item/:id/seek-index', 'post /tools/item/:id/repair-seek-index', 'delete /tools/item/:id/repair-seek-index'],
+      mp3SeekIndex: ['get /tools/item/:id/seek-index', 'post /tools/item/:id/repair-seek-index', 'delete /tools/item/:id/repair-seek-index', 'post /tools/item/:id/seek-index/backups/:backupId/restore', 'delete /tools/item/:id/seek-index/backups/:backupId'],
       duplicateItems: ['get /libraries/:id/duplicates', 'post /libraries/:id/duplicates/check', 'patch /libraries/:id/duplicates/:groupId'],
       chapterbotVerify: ['post /items/:id/chapters/snap'],
       chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId'],
