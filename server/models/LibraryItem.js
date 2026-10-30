@@ -1,5 +1,5 @@
 const Path = require('path')
-const { DataTypes, Model } = require('sequelize')
+const { DataTypes, Model, QueryTypes } = require('sequelize')
 const fsExtra = require('../libs/fsExtra')
 const Logger = require('../Logger')
 const libraryFilters = require('../utils/queries/libraryFilters')
@@ -181,6 +181,80 @@ class LibraryItem extends Model {
         [this.sequelize.models.book, this.sequelize.models.series, 'bookSeries', 'createdAt', 'ASC']
       ]
     })
+  }
+
+  /**
+   * Load library items for in-progress lists without joining every podcast episode (#5677).
+   *
+   * `findAllExpandedWhere` joins podcastEpisodes in the same query, so SQLite returns one row per
+   * episode and each row repeats the full libraryItems row (including libraryFiles, which lists
+   * every episode file). For large podcasts that grows with episodes squared and exhausts the heap.
+   *
+   * Here podcast items are loaded without episodes. Only the episodes in `episodeIds` are loaded
+   * onto `media.podcastEpisodes`, so for podcast items that list is PARTIAL. The episode count and
+   * total episode size per podcast are returned separately so callers can report `numEpisodes` and
+   * `size` unchanged.
+   *
+   * @param {string[]} libraryItemIds
+   * @param {string[]} episodeIds
+   * @returns {Promise<{libraryItems: LibraryItemExpanded[], episodeStatsByPodcastId: Map<string, {numEpisodes: number, size: number}>}>}
+   */
+  static async findAllWithSelectedEpisodes(libraryItemIds, episodeIds) {
+    const episodeStatsByPodcastId = new Map()
+    if (!libraryItemIds?.length) return { libraryItems: [], episodeStatsByPodcastId }
+
+    const libraryItems = await this.findAll({
+      where: { id: libraryItemIds },
+      include: [
+        {
+          model: this.sequelize.models.book,
+          include: [
+            {
+              model: this.sequelize.models.author,
+              through: {
+                attributes: []
+              }
+            },
+            {
+              model: this.sequelize.models.series,
+              through: {
+                attributes: ['id', 'sequence']
+              }
+            }
+          ]
+        },
+        {
+          model: this.sequelize.models.podcast
+        }
+      ],
+      order: [
+        // Ensure author & series stay in the same order
+        [this.sequelize.models.book, this.sequelize.models.author, this.sequelize.models.bookAuthor, 'createdAt', 'ASC'],
+        [this.sequelize.models.book, this.sequelize.models.series, 'bookSeries', 'createdAt', 'ASC']
+      ]
+    })
+
+    const podcastItems = libraryItems.filter((li) => li.mediaType === 'podcast' && li.media)
+    if (podcastItems.length) {
+      const podcastIds = podcastItems.map((li) => li.media.id)
+      // Same values Podcast.toOldJSONMinified() derives from the full episode list (numEpisodes, size)
+      const stats = await this.sequelize.query(
+        `SELECT podcastId, COUNT(*) AS numEpisodes, TOTAL(CASE WHEN json_valid(audioFile) THEN json_extract(audioFile, '$.metadata.size') END) AS size FROM podcastEpisodes WHERE podcastId IN (:podcastIds) GROUP BY podcastId`,
+        { replacements: { podcastIds }, type: QueryTypes.SELECT }
+      )
+      stats.forEach((row) => episodeStatsByPodcastId.set(row.podcastId, { numEpisodes: Number(row.numEpisodes) || 0, size: Number(row.size) || 0 }))
+
+      const episodes = episodeIds?.length
+        ? await this.sequelize.models.podcastEpisode.findAll({
+            where: { id: episodeIds, podcastId: podcastIds }
+          })
+        : []
+      for (const libraryItem of podcastItems) {
+        libraryItem.media.podcastEpisodes = episodes.filter((ep) => ep.podcastId === libraryItem.media.id)
+      }
+    }
+
+    return { libraryItems, episodeStatsByPodcastId }
   }
 
   /**

@@ -488,7 +488,20 @@ class MeController {
     const mediaProgressesInProgress = req.user.mediaProgresses.filter((mp) => !mp.isFinished && (mp.currentTime > 0 || mp.ebookProgress > 0))
 
     const libraryItemsIds = [...new Set(mediaProgressesInProgress.map((mp) => mp.extraData?.libraryItemId).filter((id) => id))]
-    const libraryItems = await Database.libraryItemModel.findAllExpandedWhere({ id: libraryItemsIds })
+    const episodeIds = [...new Set(mediaProgressesInProgress.filter((mp) => mp.mediaItemType === 'podcastEpisode').map((mp) => mp.mediaItemId))]
+    // Do not join every podcast episode here: that repeats the library item row per episode and runs out of memory (#5677)
+    const { libraryItems, episodeStatsByPodcastId } = await Database.libraryItemModel.findAllWithSelectedEpisodes(libraryItemsIds, episodeIds)
+
+    // media.podcastEpisodes only holds the in-progress episodes, so report the values for all episodes
+    const toMinifiedJSON = (libraryItem) => {
+      const json = libraryItem.toOldJSONMinified()
+      if (libraryItem.isPodcast) {
+        const stats = episodeStatsByPodcastId.get(libraryItem.media.id)
+        json.media.numEpisodes = stats?.numEpisodes || 0
+        json.media.size = stats?.size || 0
+      }
+      return json
+    }
 
     let itemsInProgress = []
 
@@ -500,7 +513,7 @@ class MeController {
           const episode = libraryItem.media.podcastEpisodes.find((ep) => ep.id === oldMediaProgress.episodeId)
           if (episode) {
             const libraryItemWithEpisode = {
-              ...libraryItem.toOldJSONMinified(),
+              ...toMinifiedJSON(libraryItem),
               recentEpisode: episode.toOldJSON(libraryItem.id),
               progressLastUpdate: oldMediaProgress.lastUpdate
             }
@@ -508,7 +521,7 @@ class MeController {
           }
         } else if (!oldMediaProgress.episodeId) {
           itemsInProgress.push({
-            ...libraryItem.toOldJSONMinified(),
+            ...toMinifiedJSON(libraryItem),
             progressLastUpdate: oldMediaProgress.lastUpdate
           })
         }
