@@ -111,9 +111,6 @@ class TranscriptManager {
     return chapterSnap.buildTimeline(libraryItem.media?.includedAudioFiles || []).filter((t) => t.path)
   }
 
-  // -------------------------------------------------------------------------------------------------------------
-  // Listing and loading
-
   /**
    * @param {import('../models/LibraryItem')} libraryItem - expanded
    * @param {string|null} episodeId
@@ -258,9 +255,6 @@ class TranscriptManager {
     }
     throw new TranscriptError('Transcript not found', 404)
   }
-
-  // -------------------------------------------------------------------------------------------------------------
-  // Feed transcripts
 
   async defaultFetch(url) {
     const filter = global.DisableSsrfRequestFilter?.(url) ? null : ssrfFilter(url)
@@ -419,9 +413,6 @@ class TranscriptManager {
       Logger.error(`[TranscriptManager] Handling new episode "${episode?.id}" failed`, error)
     }
   }
-
-  // -------------------------------------------------------------------------------------------------------------
-  // Generation
 
   /**
    * @returns {Object|null} job JSON

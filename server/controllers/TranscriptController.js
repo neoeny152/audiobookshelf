@@ -95,7 +95,7 @@ class TranscriptController {
         const name = sanitizeFilename(`${req.libraryItem.media.title || 'transcript'}${loaded.source === 'generated' ? ' (generated)' : ''}.${ext}`) || `transcript.${ext}`
         res.set('Content-Security-Policy', "sandbox; default-src 'none'")
         res.set('Content-Type', `${transcripts.MIME_TYPES[ext] || 'application/octet-stream'}; charset=utf-8`)
-        return res.download(path, name, { dotfiles: 'allow' }, (error) => {
+        return res.download(path, name, (error) => {
           if (error && !res.headersSent) TranscriptController.handleError(error, res, 'Sending a transcript')
         })
       }

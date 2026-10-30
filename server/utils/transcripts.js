@@ -33,7 +33,6 @@ const MIME_TYPES = Object.freeze({
   html: 'text/html',
   txt: 'text/plain'
 })
-const SOURCES = Object.freeze(['feed', 'local', 'generated'])
 /** at most this many feed transcript tags are kept per episode */
 const MAX_FEED_TRANSCRIPTS = 10
 const MAX_URL_LENGTH = 2048
@@ -141,9 +140,6 @@ function normalizeFeedTranscripts(list) {
   }
   return out
 }
-
-// ---------------------------------------------------------------------------------------------------------------
-// Parsing and writing
 
 /**
  * "01:02:03.456", "02:03.456", "01:02:03,456" (SRT) -> seconds
@@ -516,9 +512,6 @@ function mergeTrackCues(parts) {
   return cues
 }
 
-// ---------------------------------------------------------------------------------------------------------------
-// Storage
-
 /**
  * @param {string} libraryItemId
  * @returns {string} MetadataPath/items/<libraryItemId>/transcripts
@@ -712,7 +705,6 @@ module.exports = {
   FORMATS,
   TIMED_FORMATS,
   MIME_TYPES,
-  SOURCES,
   MAX_FEED_TRANSCRIPTS,
   MAX_TRANSCRIPT_BYTES,
   BOOK_KEY,
@@ -736,7 +728,6 @@ module.exports = {
   mergeTrackCues,
   dir,
   keyFor,
-  generatedPaths,
   feedCachePath,
   writeAtomic,
   saveGenerated,
