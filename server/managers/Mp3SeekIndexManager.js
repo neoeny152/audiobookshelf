@@ -54,19 +54,25 @@ const { applyChapters } = require('../utils/applyChapters')
  * @property {number|null} newDuration
  *
  * @typedef BackupManifest
- * Written when the repair starts and after every file, so a repair cut short (server restart) still has a
- * restorable backup; recoverInterrupted() finishes it on the next start.
+ * One per item: a later repair of the same item adds to it (a file already in it keeps its first, original copy), so
+ * a restore always brings back every original. Written when a repair round starts and after every file, so a round
+ * cut short (server restart) still has a restorable backup; recoverInterrupted() finishes the round on the next start
+ * and resumes the files left in `pending`.
  * @property {string} id
  * @property {string} libraryItemId
  * @property {string} title
  * @property {number} createdAt
  * @property {boolean} complete - false while the repair runs or when it was cut short
- * @property {boolean} [interrupted] - finished by recoverInterrupted()
+ * @property {boolean} [interrupted] - a round was cut short (restart or cancel) and files are left in pending
+ * @property {BackupFile[]} [pending] - files of the current round not done yet; left over when a round was cut short
+ * @property {{startedAt: number, mode: 'keep'|'shift', oldIncluded: {path: string, duration: number}[], chapters: Object[]}} [round]
+ *  the timeline and saved chapters when the current round started (its chapter step works from these)
+ * @property {string} [userId] - who started the last round (a resume runs as them)
  * @property {'keep'|'shift'} mode
  * @property {{path: string, duration: number}[]} oldIncluded - included audio files before the repair (timeline)
  * @property {BackupFile[]} files
  * @property {number} size - bytes
- * @property {Object[]} chaptersBefore - saved chapters before the repair
+ * @property {Object[]} chaptersBefore - saved chapters before the first repair (restore puts these back)
  * @property {Object[]|null} chaptersAfter - saved chapters after the repair
  *
  * @typedef RepairOptions
@@ -107,6 +113,10 @@ class Mp3SeekIndexManager {
     this.applyChapters = deps.applyChapters || applyChapters
     this.watcher = deps.watcher || null
     this.now = deps.now || Date.now
+    /** Wait before resuming an interrupted repair after a start, so a burst of restarts does not cut it short again */
+    this.resumeDelayMs = deps.resumeDelayMs ?? 60000
+    /** @type {Map<string, Promise>} resumes scheduled per item (tests await these) */
+    this.resumes = new Map()
   }
 
   getWatcher() {
@@ -184,11 +194,15 @@ class Mp3SeekIndexManager {
 
     const flagged = files.filter((f) => f.needsRepair)
     const backups = await this.listBackups(libraryItem.id)
+    const processing = this.getIsLibraryItemQueuedOrProcessing(libraryItem.id)
+    const cutShort = processing ? null : backups.find((b) => b.pending?.length)
     return {
       files,
       needsRepairCount: flagged.length,
       maxDrift: flagged.reduce((max, f) => Math.max(max, Math.abs(f.durationError || 0)), 0),
-      processing: this.getIsLibraryItemQueuedOrProcessing(libraryItem.id),
+      processing,
+      /** A repair that a restart (or cancel) cut short: these files were never done */
+      interrupted: cutShort ? { backupId: cutShort.id, pendingCount: cutShort.pending.length, files: cutShort.pending.map((f) => f.filename), mode: cutShort.round?.mode || cutShort.mode || 'keep' } : null,
       lastResult: this.lastResults.get(libraryItem.id) || null,
       backups,
       backupsTotalSize: await this.getBackupsTotalSize()
@@ -318,43 +332,52 @@ class Mp3SeekIndexManager {
 
   async recoverBackup(libraryItemId, backupId) {
     let manifest = await this.readManifest(libraryItemId, backupId)
-    if (manifest?.complete !== false && manifest) return
+    if (manifest && manifest.complete !== false) {
+      // The round finished but files were left (recovered before this start, or canceled): resume them
+      if (manifest.pending?.length && manifest.interrupted) this.scheduleResume(libraryItemId, backupId)
+      return
+    }
 
     const backupDir = Path.join(this.itemBackupsDir(libraryItemId), backupId)
     const filesDir = Path.join(backupDir, 'files')
     const onDisk = await listFilesRecursive(filesDir)
     const item = await this.getItem(libraryItemId)
-    if (!onDisk.length || !item?.media) {
-      Logger.warn(`[Mp3SeekIndexManager] Removing seek repair backup ${backupId} of item ${libraryItemId}: ${onDisk.length ? 'the item no longer exists' : 'it holds no files'}`)
-      if (!onDisk.length) await this.deleteBackup(libraryItemId, backupId)
+    if (!item?.media) {
+      Logger.warn(`[Mp3SeekIndexManager] Seek repair backup ${backupId}: item ${libraryItemId} no longer exists, leaving the backup as it is`)
+      return
+    }
+    if (!onDisk.length && !manifest?.pending?.length) {
+      Logger.warn(`[Mp3SeekIndexManager] Removing seek repair backup ${backupId} of item ${libraryItemId}: it holds no files`)
+      await this.deleteBackup(libraryItemId, backupId)
       return
     }
     Logger.info(`[Mp3SeekIndexManager] Finishing seek repair ${backupId} of "${item.media.title}" that a restart cut short`)
 
     if (!manifest) {
-      manifest = {
-        id: backupId,
-        libraryItemId,
-        title: item.media.title,
-        createdAt: this.now(),
-        complete: false,
-        mode: 'keep',
-        oldIncluded: null,
-        files: [],
-        size: 0,
-        chaptersBefore: [],
-        chaptersAfter: null
+      manifest = { id: backupId, libraryItemId, title: item.media.title, createdAt: this.now(), complete: false, mode: 'keep', oldIncluded: null, files: [], size: 0, chaptersBefore: [], chaptersAfter: null }
+    }
+
+    // Which originals really were replaced: the backup copy is made just before the rename, so a copy whose library
+    // file still has the same size was never replaced (the cut came in between) and is dropped
+    const wasReplaced = async (relPath) => {
+      const backup = await fs.stat(Path.join(filesDir, relPath)).catch(() => null)
+      const current = await fs.stat(Path.join(item.path, relPath)).catch(() => null)
+      return !!backup && (!current || current.size !== backup.size)
+    }
+    const known = new Map([...(manifest.pending || []), ...manifest.files].map((f) => [f.relPath, f]))
+    const done = []
+    for (const relPath of onDisk) {
+      const entry = known.get(relPath) || { relPath, filename: Path.posix.basename(relPath), size: null, oldDuration: null, newDuration: null }
+      const inFiles = manifest.files.some((f) => f.relPath === relPath)
+      if (inFiles || (await wasReplaced(relPath))) {
+        const stat = await fs.stat(Path.join(filesDir, relPath))
+        done.push({ ...entry, size: entry.size ?? stat.size })
+      } else {
+        await fs.remove(Path.join(filesDir, relPath)).catch(() => {})
       }
     }
-    // Every original on disk is a file that was (or was about to be) replaced; keep only complete copies
-    const known = new Map(manifest.files.map((f) => [f.relPath, f]))
-    manifest.files = []
-    for (const relPath of onDisk) {
-      const stat = await fs.stat(Path.join(filesDir, relPath))
-      const entry = known.get(relPath) || { relPath, filename: Path.basename(relPath), size: stat.size, oldDuration: null, newDuration: null }
-      if (entry.size !== stat.size) continue
-      manifest.files.push(entry)
-    }
+    manifest.files = done
+    manifest.pending = (manifest.pending || []).filter((f) => !done.some((d) => d.relPath === f.relPath))
 
     // Leftover temp files of the cut-short task (dotfiles the scanner ignores, but they take space)
     for (const name of await fs.readdir(item.path).catch(() => [])) {
@@ -364,15 +387,63 @@ class Mp3SeekIndexManager {
     await this.scanItem(libraryItemId)
     const fresh = await this.getItem(libraryItemId)
     const newByPath = new Map((fresh?.media?.includedAudioFiles || []).map((af) => [af.metadata.path, af.duration]))
-    for (const f of manifest.files) f.newDuration = newByPath.get(Path.join(item.path, f.relPath)) ?? null
-    if (manifest.oldIncluded?.length && fresh) {
-      await this.applyChapterPolicy(fresh, { oldIncluded: manifest.oldIncluded, oldChapters: manifest.chaptersBefore || [], mode: manifest.mode || 'keep' })
+    for (const f of manifest.files) f.newDuration = newByPath.get(Path.join(item.path, f.relPath)) ?? f.newDuration ?? null
+    // The chapter step of the cut round for the files it did; the files resumed later move the chapters on from there
+    // (each round maps every time from its files' old to new starts, so rounds add up to the same as one)
+    const round = manifest.round || (manifest.oldIncluded?.length ? { mode: manifest.mode, oldIncluded: manifest.oldIncluded, chapters: manifest.chaptersBefore || [] } : null)
+    if (round && fresh) {
+      await this.applyChapterPolicy(fresh, { oldIncluded: round.oldIncluded, oldChapters: round.chapters || [], mode: round.mode || 'keep' })
     }
     const after = fresh ? await this.getItem(libraryItemId) : null
     manifest.chaptersAfter = (after?.media?.chapters || []).map(plainChapter)
     manifest.complete = true
-    manifest.interrupted = true
+    manifest.interrupted = manifest.pending.length > 0
+    if (!manifest.files.length && !manifest.pending.length) {
+      await this.deleteBackup(libraryItemId, backupId)
+      return
+    }
     await this.saveManifest(manifest)
+    if (manifest.pending.length) this.scheduleResume(libraryItemId, backupId)
+  }
+
+  /**
+   * Resume the files an interrupted repair left, after resumeDelayMs, as the user who started it and with the same
+   * chapter mode. Files that no longer need repair are dropped from pending. When the item is busy or gone the backup
+   * keeps its pending files and the status reports them (the banner offers Resume).
+   *
+   * @returns {Promise<Task|null>}
+   */
+  scheduleResume(libraryItemId, backupId) {
+    if (this.resumes.has(libraryItemId)) return this.resumes.get(libraryItemId)
+    const promise = new Promise((resolve) => {
+      const timer = setTimeout(resolve, this.resumeDelayMs)
+      timer.unref?.()
+    })
+      .then(async () => {
+        const manifest = await this.readManifest(libraryItemId, backupId)
+        if (!manifest?.pending?.length || this.getIsLibraryItemQueuedOrProcessing(libraryItemId)) return null
+        const item = await this.getItem(libraryItemId)
+        if (!item?.media) return null
+        await this.getStatus(item)
+        const fresh = await this.getItem(libraryItemId)
+        const pending = new Set(manifest.pending.map((f) => f.relPath))
+        const stillNeeded = fresh.media.includedAudioFiles.filter((af) => pending.has(toRelPath(fresh.path, af.metadata.path)) && mp3SeekIndex.needsRepair(af))
+        if (!stillNeeded.length) {
+          manifest.pending = []
+          manifest.interrupted = false
+          await this.saveManifest(manifest)
+          return null
+        }
+        Logger.info(`[Mp3SeekIndexManager] Resuming the interrupted seek repair of "${fresh.media.title}": ${stillNeeded.length} file(s) left`)
+        return this.startRepair(manifest.userId || null, fresh, { chapters: manifest.round?.mode || manifest.mode || 'keep' })
+      })
+      .catch((error) => {
+        Logger.error(`[Mp3SeekIndexManager] Resuming the seek repair of item ${libraryItemId} failed`, error)
+        return null
+      })
+      .finally(() => this.resumes.delete(libraryItemId))
+    this.resumes.set(libraryItemId, promise)
+    return promise
   }
 
   //
@@ -518,26 +589,32 @@ class Mp3SeekIndexManager {
         }
       }
 
-      const backupId = isRestore ? task.data.backupId : this.uniqueBackupId(libraryItemId)
+      // A repair adds to the item's backup when there is one, so a restore brings back every original at once
+      const existing = isRestore ? null : (await this.listBackups(libraryItemId))[0] || null
+      const backupId = isRestore ? task.data.backupId : existing?.id || this.uniqueBackupId(libraryItemId)
       const backupDir = Path.join(this.itemBackupsDir(libraryItemId), backupId)
       const snapshot = this.snapshots.get(task.id)
       /** @type {BackupManifest|null} written before the first file is touched and after each one */
-      const manifest = isRestore
-        ? null
-        : {
-            id: backupId,
-            libraryItemId,
-            title: task.data.title,
-            createdAt: this.now(),
-            complete: false,
-            mode: task.data.options.chapters,
-            oldIncluded: snapshot.oldIncluded,
-            files: [],
-            size: 0,
-            chaptersBefore: snapshot.oldChapters,
-            chaptersAfter: null
-          }
-      if (manifest) await this.saveManifest(manifest)
+      let manifest = null
+      if (!isRestore) {
+        manifest = existing || {
+          id: backupId,
+          libraryItemId,
+          title: task.data.title,
+          createdAt: this.now(),
+          mode: task.data.options.chapters,
+          oldIncluded: snapshot.oldIncluded,
+          files: [],
+          size: 0,
+          chaptersBefore: snapshot.oldChapters,
+          chaptersAfter: null
+        }
+        manifest.complete = false
+        manifest.userId = task.data.userId || manifest.userId || null
+        manifest.round = { startedAt: this.now(), mode: task.data.options.chapters, oldIncluded: snapshot.oldIncluded, chapters: snapshot.oldChapters }
+        manifest.pending = task.data.audioFiles.map((af) => ({ relPath: toRelPath(libraryItemDir, af.path), filename: af.filename, size: af.size, oldDuration: af.duration, newDuration: null }))
+        await this.saveManifest(manifest)
+      }
 
       // Keep the watcher off the folder until our own rescan is done (released 5 s later, as for podcast downloads)
       watcher.addIgnoreDir(libraryItemDir)
@@ -548,7 +625,7 @@ class Mp3SeekIndexManager {
       let progressBefore = 0
       for (const af of task.data.audioFiles) {
         const weight = task.data.duration > 0 ? (af.duration || 0) / task.data.duration : 1 / task.data.audioFiles.length
-        const relPath = af.relPath || Path.relative(libraryItemDir, af.path)
+        const relPath = af.relPath || toRelPath(libraryItemDir, af.path)
         SocketAuthority.adminEmitter('track_started', { libraryItemId, ino: af.ino })
         const onProgress = (fraction) => {
           SocketAuthority.adminEmitter('task_progress', { libraryItemId, progress: Math.round((progressBefore + fraction * weight) * 1000) / 10 })
@@ -556,14 +633,17 @@ class Mp3SeekIndexManager {
         }
         try {
           if (relPath.startsWith('..') || Path.isAbsolute(relPath)) throw new Error('File is outside the item folder')
-          const backupPath = Path.join(backupDir, 'files', relPath)
+          // A file the backup already holds keeps its first copy: that one is the original
+          const alreadyBackedUp = !isRestore && manifest.files.some((f) => f.relPath === relPath)
+          const backupPath = alreadyBackedUp ? null : Path.join(backupDir, 'files', relPath)
           if (isRestore) {
             if (controller.signal.aborted) throw new Error('Canceled')
             await this.restoreFile(backupPath, af.path)
             onProgress(1)
           } else {
             await this.repairFile(af.path, { expectedDuration: af.duration, signal: controller.signal, backupPath, onProgress })
-            manifest.files.push({ relPath, filename: af.filename, size: af.size, oldDuration: af.duration, newDuration: null })
+            if (!alreadyBackedUp) manifest.files.push({ relPath, filename: af.filename, size: af.size, oldDuration: af.duration, newDuration: null })
+            manifest.pending = manifest.pending.filter((f) => f.relPath !== relPath)
             await this.saveManifest(manifest)
           }
           Logger.info(`[Mp3SeekIndexManager] ${isRestore ? 'Restored' : 'Added seek index to'} "${af.path}"`)
@@ -573,6 +653,11 @@ class Mp3SeekIndexManager {
           if (!controller.signal.aborted) Logger.error(`[Mp3SeekIndexManager] ${task.action} of "${af.path}" failed: ${message}`)
           fileResults.push({ filename: af.filename, ino: af.ino || null, relPath, status: 'failed', oldDuration: af.duration, newDuration: null, error: message })
           if (controller.signal.aborted) break
+          // Tried and failed: not left for a resume (it would fail again); the status still flags the file
+          if (manifest) {
+            manifest.pending = manifest.pending.filter((f) => f.relPath !== relPath)
+            await this.saveManifest(manifest)
+          }
         }
         SocketAuthority.adminEmitter('track_finished', { libraryItemId, ino: af.ino })
         progressBefore += weight
@@ -583,11 +668,15 @@ class Mp3SeekIndexManager {
       const result = await this.buildResult(task, fileResults, fresh)
 
       if (manifest) {
-        if (doneCount) {
-          const newByPath = new Map((fresh?.media?.includedAudioFiles || []).map((af) => [af.metadata.path, af.duration]))
-          for (const f of manifest.files) f.newDuration = newByPath.get(Path.join(libraryItemDir, f.relPath)) ?? null
-          const after = fresh ? await this.getItem(libraryItemId) : null
-          manifest.chaptersAfter = (after?.media?.chapters || []).map(plainChapter)
+        if (manifest.files.length || manifest.pending.length) {
+          if (fresh) {
+            const newByPath = new Map((fresh.media?.includedAudioFiles || []).map((af) => [af.metadata.path, af.duration]))
+            for (const f of manifest.files) f.newDuration = newByPath.get(Path.join(libraryItemDir, f.relPath)) ?? f.newDuration ?? null
+            const after = await this.getItem(libraryItemId)
+            manifest.chaptersAfter = (after?.media?.chapters || []).map(plainChapter)
+          }
+          // Canceled: what was not done stays pending (the status offers Resume)
+          manifest.interrupted = manifest.pending.length > 0
           manifest.complete = true
           await this.saveManifest(manifest)
           result.backupId = backupId
@@ -664,7 +753,8 @@ class Mp3SeekIndexManager {
     const outcome = { shifted: false, endExtended: false, maxShift: Number(maxShift.toFixed(3)), oldTotalDuration, newTotalDuration }
 
     const sameFiles = fresh && fresh.media.includedAudioFiles.length === oldIncluded.length && oldIncluded.every((f) => newByPath.has(f.path))
-    if (!oldChapters.length || !sameFiles || maxShift < 0.001) return outcome
+    // Starts may all stay (only the last file grew) while the last end still moves, so the totals count too
+    if (!oldChapters.length || !sameFiles || (maxShift < 0.001 && Math.abs(newTotalDuration - oldTotalDuration) < 0.001)) return outcome
     const current = (fresh.media.chapters || []).map(plainChapter)
     // Only an explicit request moves chapter times, and only chapters nobody changed meanwhile
     if (mode === 'shift') {
@@ -744,6 +834,11 @@ class Mp3SeekIndexManager {
       this.runTask(this.tasksQueued.shift())
     }
   }
+}
+
+/** Path inside the item folder, with / separators (also the path inside the backup's files/ folder) */
+function toRelPath(itemDir, filePath) {
+  return Path.relative(itemDir, filePath).split(Path.sep).join('/')
 }
 
 function plainChapter(c, index) {

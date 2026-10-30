@@ -66,8 +66,10 @@ describe('Mp3SeekIndexManager', () => {
       backupsDir,
       // Like the real one: the original is copied to backupPath before the file is replaced
       repairFile: sinon.stub().callsFake(async (path, { backupPath }) => {
-        fs.mkdirSync(Path.dirname(backupPath), { recursive: true })
-        fs.copyFileSync(path, backupPath)
+        if (backupPath) {
+          fs.mkdirSync(Path.dirname(backupPath), { recursive: true })
+          fs.copyFileSync(path, backupPath)
+        }
         fs.writeFileSync(path, `repaired ${Path.basename(path)}`)
       }),
       restoreFile: sinon.stub().callsFake(async (backupPath, path) => fs.copyFileSync(backupPath, path)),
@@ -353,7 +355,7 @@ describe('Mp3SeekIndexManager', () => {
         { id: 1, start: 160, end: 310, title: 'B' }
       ])
       const [backup] = await manager.listBackups('li1')
-      expect(backup).to.include({ complete: true, interrupted: true })
+      expect(backup).to.include({ complete: true, interrupted: false })
       expect(backup.files).to.deep.equal([{ relPath: 'Part 1.mp3', filename: 'Part 1.mp3', size: 1000, oldDuration: 100, newDuration: 110 }])
     })
 
@@ -380,6 +382,157 @@ describe('Mp3SeekIndexManager', () => {
       fs.writeFileSync(Path.join(dirDone, 'backup.json'), JSON.stringify({ id: '20261030T152419Z', libraryItemId: 'li1', complete: true, files: [], createdAt: 1 }))
       await manager.recoverInterrupted()
       expect(deps.scanItem.called).to.be.false
+    })
+  })
+
+  describe('restart in the middle of a repair', () => {
+    const chapters = [
+      { id: 0, start: 0, end: 150, title: 'A' },
+      { id: 1, start: 150, end: 300, title: 'B' }
+    ]
+
+    /**
+     * An item whose state follows the files on disk: a file whose content starts with "repaired" has a header and its
+     * real duration (+10 s), like after a rescan. Chapters are whatever applyChapters last saved.
+     */
+    function liveItem(deps) {
+      let saved = chapters
+      const build = () =>
+        item({
+          audioFiles: [0, 1].map((i) => {
+            const repaired = fs.readFileSync(paths[i], 'utf8').startsWith('repaired')
+            const af = audioFile(i, { mp3SeekIndex: repaired ? 'xing' : 'none', duration: repaired ? 110 * (i + 1) : 100 * (i + 1), real: 100 * (i + 1) + 10 })
+            if (!repaired) af.mp3Measured = { duration: 100 * (i + 1) + 10, size: af.metadata.size, mtimeMs: 1 }
+            return af
+          }),
+          chapters: saved
+        })
+      deps.getItem.callsFake(async () => build())
+      deps.applyChapters.callsFake(async (target, next) => {
+        saved = next
+        return { updated: true }
+      })
+      return { build, chaptersNow: () => saved }
+    }
+
+    function writeCutShortManifest({ pending }) {
+      const backupDir = Path.join(backupsDir, 'li1', '20261030T161414Z')
+      fs.mkdirSync(Path.join(backupDir, 'files'), { recursive: true })
+      // Part 1 was done: its original is in the backup and the library file was replaced
+      fs.writeFileSync(Path.join(backupDir, 'files', 'Part 1.mp3'), 'audio of Part 1.mp3')
+      fs.writeFileSync(paths[0], 'repaired Part 1.mp3')
+      const oldIncluded = [
+        { path: paths[0], duration: 100 },
+        { path: paths[1], duration: 200 }
+      ]
+      fs.writeFileSync(
+        Path.join(backupDir, 'backup.json'),
+        JSON.stringify({
+          id: '20261030T161414Z',
+          libraryItemId: 'li1',
+          title: 'Red Rising',
+          createdAt: 1,
+          complete: false,
+          userId: 'u1',
+          mode: 'shift',
+          oldIncluded,
+          round: { startedAt: 1, mode: 'shift', oldIncluded, chapters },
+          files: [{ relPath: 'Part 1.mp3', filename: 'Part 1.mp3', size: 19, oldDuration: 100, newDuration: null }],
+          pending,
+          size: 19,
+          chaptersBefore: chapters,
+          chaptersAfter: null
+        })
+      )
+      return backupDir
+    }
+
+    it('finishes what was done, then resumes the rest into the same backup; restore brings back all originals', async () => {
+      const { manager, deps } = makeManager({ resumeDelayMs: 0 })
+      const live = liveItem(deps)
+      // Cut while Part 2 was being done: its backup copy was made but the file was not replaced yet, plus a temp file
+      const backupDir = writeCutShortManifest({ pending: [{ relPath: 'Part 2.mp3', filename: 'Part 2.mp3', size: 1001, oldDuration: 200, newDuration: null }] })
+      fs.writeFileSync(Path.join(backupDir, 'files', 'Part 2.mp3'), 'audio of Part 2.mp3')
+      fs.writeFileSync(Path.join(dir, '.Part 2.mp3.seekfix.tmp'), 'partial')
+
+      await manager.recoverInterrupted()
+      expect(fs.existsSync(Path.join(dir, '.Part 2.mp3.seekfix.tmp'))).to.be.false
+      expect(deps.scanItem.calledOnceWith('li1')).to.be.true
+
+      // The resume started a repair of Part 2 only, into the same backup
+      const task = await manager.resumes.get('li1')
+      expect(task.data.audioFiles.map((af) => af.filename)).to.deep.equal(['Part 2.mp3'])
+      expect(task.data.userId).to.equal('u1')
+      expect(task.data.options.chapters).to.equal('shift')
+      await waitForFinish()
+
+      const backups = await manager.listBackups('li1')
+      expect(backups.map((b) => b.id)).to.deep.equal(['20261030T161414Z'])
+      expect(backups[0].files.map((f) => f.relPath)).to.deep.equal(['Part 1.mp3', 'Part 2.mp3'])
+      expect(backups[0]).to.include({ complete: true, interrupted: false })
+      expect(backups[0].pending).to.deep.equal([])
+      expect(fs.readFileSync(Path.join(backupDir, 'files', 'Part 2.mp3'), 'utf8')).to.equal('audio of Part 2.mp3')
+      // Chapters moved by both files' growth over the two rounds: 10 s after Part 1, 30 s at the end
+      expect(live.chaptersNow()).to.deep.equal([
+        { id: 0, start: 0, end: 160, title: 'A' },
+        { id: 1, start: 160, end: 330, title: 'B' }
+      ])
+
+      const finished = sinon.spy(TaskManager, 'taskFinished')
+      manager.startRestore('u1', live.build(), backups[0])
+      await waitForFinish()
+      expect(finished.firstCall.args[0].isFailed).to.be.false
+      expect(fs.readFileSync(paths[0], 'utf8')).to.equal('audio of Part 1.mp3')
+      expect(fs.readFileSync(paths[1], 'utf8')).to.equal('audio of Part 2.mp3')
+      expect(live.chaptersNow()).to.deep.equal(chapters)
+      expect(await manager.listBackups('li1')).to.deep.equal([])
+    })
+
+    it('reports the cut-short files in the status while they wait, and resumes nothing that no longer needs it', async () => {
+      const { manager, deps } = makeManager({ resumeDelayMs: 60000 })
+      liveItem(deps)
+      writeCutShortManifest({ pending: [{ relPath: 'Part 2.mp3', filename: 'Part 2.mp3', size: 1001, oldDuration: 200, newDuration: null }] })
+      await manager.recoverInterrupted()
+      const status = await manager.getStatus(await deps.getItem())
+      expect(status.interrupted).to.deep.equal({ backupId: '20261030T161414Z', pendingCount: 1, files: ['Part 2.mp3'], mode: 'shift' })
+      expect(status.needsRepairCount).to.equal(1)
+
+      // Repaired some other way before the resume: nothing to resume, pending cleared
+      fs.writeFileSync(paths[1], 'repaired Part 2.mp3')
+      manager.resumeDelayMs = 0
+      manager.resumes.clear()
+      expect(await manager.scheduleResume('li1', '20261030T161414Z')).to.be.null
+      const [backup] = await manager.listBackups('li1')
+      expect(backup.pending).to.deep.equal([])
+      expect((await manager.getStatus(await deps.getItem())).interrupted).to.be.null
+    })
+
+    it('a later repair adds to the existing backup and never overwrites an original it already holds', async () => {
+      const { manager, deps } = makeManager()
+      const live = liveItem(deps)
+      // First repair: Part 1 only (Part 2 measured as fine at the time)
+      const first = live.build()
+      first.media.audioFiles[1].mp3Measured.duration = 200.1
+      manager.startRepair('u1', first)
+      await waitForFinish()
+      const [backup] = await manager.listBackups('li1')
+      expect(backup.files.map((f) => f.relPath)).to.deep.equal(['Part 1.mp3'])
+
+      // Second repair (Part 2 flagged now): same backup, Part 2 added
+      manager.startRepair('u1', live.build())
+      await waitForFinish()
+      const backups = await manager.listBackups('li1')
+      expect(backups).to.have.length(1)
+      expect(backups[0].files.map((f) => f.relPath)).to.deep.equal(['Part 1.mp3', 'Part 2.mp3'])
+      expect(fs.readFileSync(Path.join(backupsDir, 'li1', backup.id, 'files', 'Part 1.mp3'), 'utf8')).to.equal('audio of Part 1.mp3')
+      // A file the backup already holds is repaired without a new backup copy
+      const again = live.build()
+      again.media.audioFiles[0] = { ...again.media.audioFiles[0], mp3SeekIndex: 'none', mp3Measured: { duration: 130, size: 1000, mtimeMs: 1 } }
+      deps.repairFile.resetHistory()
+      manager.startRepair('u1', again)
+      await waitForFinish()
+      expect(deps.repairFile.firstCall.args[1].backupPath).to.be.null
+      expect(fs.readFileSync(Path.join(backupsDir, 'li1', backup.id, 'files', 'Part 1.mp3'), 'utf8')).to.equal('audio of Part 1.mp3')
     })
   })
 
