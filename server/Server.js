@@ -238,6 +238,9 @@ class Server {
     await this.cronManager.init(libraries)
     this.apiCacheManager.init()
 
+    // Finish MP3 seek index repairs that a restart cut short (rescans the items; runs in the background)
+    this.mp3SeekIndexManager.recoverInterrupted().catch((error) => Logger.error('[Server] Recovering seek index repairs failed', error))
+
     // Probe the optional chapterbot sidecar in the background so the first GET /status already knows its features
     chapterbotClient.warmUp()
 

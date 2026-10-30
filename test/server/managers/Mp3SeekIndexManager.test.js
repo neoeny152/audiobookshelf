@@ -127,6 +127,19 @@ describe('Mp3SeekIndexManager', () => {
       expect(deps.measureDuration.calledOnce).to.be.true
     })
 
+    it('checks the header again when a measured file changed (a repair cut short before its rescan)', async () => {
+      const af = audioFile(0)
+      af.metadata.mtimeMs = 2
+      const li = item({ audioFiles: [af] })
+      const { manager, deps } = makeManager()
+      deps.detectSeekIndex.resolves({ status: 'xing' })
+      const status = await manager.getStatus(li)
+      expect(deps.detectSeekIndex.calledOnce).to.be.true
+      expect(deps.measureDuration.called).to.be.false
+      expect(status.needsRepairCount).to.equal(0)
+      expect(li.media.audioFiles[0].mp3SeekIndex).to.equal('xing')
+    })
+
     it('shares one run between concurrent calls', async () => {
       const li = item({ audioFiles: [audioFile(0, { real: null })] })
       const { manager, deps } = makeManager()
@@ -244,6 +257,29 @@ describe('Mp3SeekIndexManager', () => {
       expect((await manager.listBackups('li1'))[0].files.map((f) => f.filename)).to.deep.equal(['Part 2.mp3'])
     })
 
+    it('writes the backup manifest before the first file and after each one', async () => {
+      const li = item({ audioFiles: [audioFile(0), audioFile(1)] })
+      const { manager, deps } = makeManager()
+      const seen = []
+      const real = deps.repairFile
+      deps.repairFile = sinon.stub().callsFake(async (path, opts) => {
+        seen.push((await manager.listBackups('li1', { includeIncomplete: true }))[0])
+        return real(path, opts)
+      })
+      manager.repairFile = deps.repairFile
+      deps.getItem.resolves(li)
+      manager.startRepair('u1', li)
+      await waitForFinish()
+      expect(seen.map((m) => [m.complete, m.files.length])).to.deep.equal([
+        [false, 0],
+        [false, 1]
+      ])
+      expect(seen[0].oldIncluded).to.have.length(2)
+      const done = (await manager.listBackups('li1'))[0]
+      expect(done.complete).to.be.true
+      expect(done.files).to.have.length(2)
+    })
+
     it('keeps no backup when nothing was repaired', async () => {
       const li = item({ audioFiles: [audioFile(0)] })
       const { manager, deps } = makeManager()
@@ -269,6 +305,81 @@ describe('Mp3SeekIndexManager', () => {
       await waitForFinish()
       await waitForFinish()
       expect(deps.repairFile.callCount).to.equal(2)
+    })
+  })
+
+  describe('recoverInterrupted', () => {
+    it('finishes a repair cut short: removes temp files, rescans, applies the chapter step, completes the backup', async () => {
+      const { manager, deps } = makeManager()
+      const chapters = [
+        { id: 0, start: 0, end: 150, title: 'A' },
+        { id: 1, start: 150, end: 300, title: 'B' }
+      ]
+      // Cut short after Part 1: its original is backed up, Part 2's temp file is left in the item folder
+      const backupDir = Path.join(backupsDir, 'li1', '20261030T152419Z')
+      fs.mkdirSync(Path.join(backupDir, 'files'), { recursive: true })
+      fs.writeFileSync(Path.join(backupDir, 'files', 'Part 1.mp3'), 'x'.repeat(1000))
+      fs.writeFileSync(
+        Path.join(backupDir, 'backup.json'),
+        JSON.stringify({
+          id: '20261030T152419Z',
+          libraryItemId: 'li1',
+          title: 'Red Rising',
+          createdAt: 1,
+          complete: false,
+          mode: 'shift',
+          oldIncluded: [
+            { path: paths[0], duration: 100 },
+            { path: paths[1], duration: 200 }
+          ],
+          files: [{ relPath: 'Part 1.mp3', filename: 'Part 1.mp3', size: 1000, oldDuration: 100, newDuration: null }],
+          size: 1000,
+          chaptersBefore: chapters,
+          chaptersAfter: null
+        })
+      )
+      const temp = Path.join(dir, '.Part 2.mp3.seekfix.tmp')
+      fs.writeFileSync(temp, 'partial')
+      const fresh = item({ audioFiles: [audioFile(0, { mp3SeekIndex: 'xing', duration: 110 }), audioFile(1, { duration: 200 })], chapters })
+      deps.getItem.resolves(fresh)
+
+      await manager.recoverInterrupted()
+
+      expect(fs.existsSync(temp)).to.be.false
+      expect(fs.existsSync(paths[1])).to.be.true
+      expect(deps.scanItem.calledOnceWith('li1')).to.be.true
+      expect(deps.applyChapters.firstCall.args[1]).to.deep.equal([
+        { id: 0, start: 0, end: 160, title: 'A' },
+        { id: 1, start: 160, end: 310, title: 'B' }
+      ])
+      const [backup] = await manager.listBackups('li1')
+      expect(backup).to.include({ complete: true, interrupted: true })
+      expect(backup.files).to.deep.equal([{ relPath: 'Part 1.mp3', filename: 'Part 1.mp3', size: 1000, oldDuration: 100, newDuration: 110 }])
+    })
+
+    it('rebuilds a missing manifest from the files on disk, and drops an empty backup', async () => {
+      const { manager, deps } = makeManager()
+      const withFiles = Path.join(backupsDir, 'li1', '20261030T152419Z', 'files')
+      fs.mkdirSync(withFiles, { recursive: true })
+      fs.writeFileSync(Path.join(withFiles, 'Part 1.mp3'), 'x'.repeat(10))
+      fs.mkdirSync(Path.join(backupsDir, 'li1', '20261030T160000Z', 'files'), { recursive: true })
+      deps.getItem.resolves(item({ audioFiles: [audioFile(0, { mp3SeekIndex: 'xing', duration: 110 })] }))
+
+      await manager.recoverInterrupted()
+
+      const backups = await manager.listBackups('li1')
+      expect(backups.map((b) => b.id)).to.deep.equal(['20261030T152419Z'])
+      expect(backups[0].files).to.deep.equal([{ relPath: 'Part 1.mp3', filename: 'Part 1.mp3', size: 10, oldDuration: null, newDuration: 110 }])
+      expect(deps.applyChapters.called).to.be.false
+    })
+
+    it('leaves finished backups alone', async () => {
+      const { manager, deps } = makeManager()
+      const dirDone = Path.join(backupsDir, 'li1', '20261030T152419Z')
+      fs.mkdirSync(Path.join(dirDone, 'files'), { recursive: true })
+      fs.writeFileSync(Path.join(dirDone, 'backup.json'), JSON.stringify({ id: '20261030T152419Z', libraryItemId: 'li1', complete: true, files: [], createdAt: 1 }))
+      await manager.recoverInterrupted()
+      expect(deps.scanItem.called).to.be.false
     })
   })
 

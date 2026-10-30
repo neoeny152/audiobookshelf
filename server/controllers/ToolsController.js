@@ -230,6 +230,7 @@ class ToolsController {
     }
     const manifest = await this.mp3SeekIndexManager.readManifest(libraryItemId, req.params.backupId)
     if (!manifest?.files?.length) return res.sendStatus(404)
+    if (manifest.complete === false) return res.status(409).send('This backup belongs to a repair that has not finished')
     const task = this.mp3SeekIndexManager.startRestore(req.user.id, req.libraryItem, manifest)
     res.json({ taskId: task.id })
   }
