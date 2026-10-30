@@ -435,8 +435,7 @@ module.exports = {
         ],
         subQuery: false,
         distinct: true,
-        limit: maxResults - itemMatches.length,
-        offset
+        limit: maxResults - itemMatches.length
       })
       for (const podcast of filePodcasts) {
         const libraryItem = podcast.libraryItem

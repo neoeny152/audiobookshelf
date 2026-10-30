@@ -1211,7 +1211,7 @@ module.exports = {
         },
         library.id,
         maxResults - itemMatches.length,
-        offset,
+        0,
         query
       )
       itemMatches.push(...fileMatches)
