@@ -51,7 +51,9 @@ const DEFAULT_OPTIONS = Object.freeze({
   leadSec: 0.25,
   headingLookbackSec: 10,
   snapToFileStart: false,
-  anchorInsidePause: false
+  anchorInsidePause: false,
+  reanchor: true,
+  locate: true
 })
 
 const NUMERIC_OPTION_BOUNDS = Object.freeze({
@@ -68,6 +70,7 @@ const REASONS = Object.freeze({
   FILE_START: 'file-start',
   NEAREST_LONGEST_PAUSE: 'nearest-longest-pause',
   HEADING_LOOKBACK: 'heading-lookback',
+  HEADING_LOCATED: 'heading-located',
   NO_PAUSE_IN_WINDOW: 'no-pause-in-window',
   ORDER_CONFLICT: 'order-conflict',
   NOT_REQUESTED: 'not-requested',
@@ -116,6 +119,9 @@ function clamp(value, min, max) {
  * @property {boolean} snapToFileStart
  * @property {boolean} anchorInsidePause - opt-in: move a start that is already inside a pause to leadSec before its end
  *   (same pause, reason stays inside-pause; never into an earlier file)
+ * @property {boolean} reanchor - map the starts onto part files named like a chapter before snapping (chapterReanchor)
+ * @property {boolean} locate - with verify: search a wider transcript for headings not heard at their start, and move
+ *   the start there (chapterLocate)
  * @property {boolean} [verify] - run the chapterbot speech check (only present when true)
  */
 
@@ -144,7 +150,7 @@ function parseOptions(raw, { verifyAvailable = false } = {}) {
     options[key] = clamp(value, min, max)
   }
 
-  for (const key of ['snapToFileStart', 'anchorInsidePause']) {
+  for (const key of ['snapToFileStart', 'anchorInsidePause', 'reanchor', 'locate']) {
     if (!(key in raw) || raw[key] === undefined) continue
     if (typeof raw[key] !== 'boolean') throw new SnapInputError(`options.${key} must be a boolean`)
     options[key] = raw[key]
@@ -774,7 +780,7 @@ function resolveOrder(starts, proposals) {
  */
 function confidenceFor(proposal) {
   const { reason, pause } = proposal
-  if (reason === REASONS.FIRST_CHAPTER || reason === REASONS.FILE_START) return 'high'
+  if (reason === REASONS.FIRST_CHAPTER || reason === REASONS.FILE_START || reason === REASONS.HEADING_LOCATED) return 'high'
   if (!pause || (reason !== REASONS.INSIDE_PAUSE && reason !== REASONS.NEAREST_LONGEST_PAUSE && reason !== REASONS.HEADING_LOOKBACK)) return 'none'
 
   const duration = pause.end - pause.start
@@ -837,7 +843,7 @@ const SKIP_REASONS = new Set([REASONS.NOT_REQUESTED, REASONS.NOT_ANALYSED, REASO
  * @param {Object} params.stats
  * @param {string[]} params.warnings
  */
-function buildResponse({ libraryItemId, T, options, chapters, itemChapters, proposals, timeline, complete, stats, warnings }) {
+function buildResponse({ libraryItemId, T, options, chapters, itemChapters, proposals, timeline, complete, stats, warnings, reanchor = null }) {
   const duration = round3(T)
   const chapterEntries = proposals.map((proposal, i) => {
     const delta = round3(proposal.proposedStart - proposal.originalStart)
@@ -878,7 +884,9 @@ function buildResponse({ libraryItemId, T, options, chapters, itemChapters, prop
       leadSec: options.leadSec,
       headingLookbackSec: options.headingLookbackSec,
       snapToFileStart: options.snapToFileStart,
-      anchorInsidePause: options.anchorInsidePause
+      anchorInsidePause: options.anchorInsidePause,
+      reanchor: options.reanchor,
+      locate: options.locate
     },
     stats: {
       ...stats,
@@ -889,6 +897,7 @@ function buildResponse({ libraryItemId, T, options, chapters, itemChapters, prop
     },
     chapters: chapterEntries,
     proposedChapters,
+    ...(reanchor ? { reanchor } : {}),
     warnings
   }
 }

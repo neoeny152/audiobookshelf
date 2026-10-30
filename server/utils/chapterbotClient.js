@@ -502,6 +502,31 @@ async function verify({ files, starts, beforeSec = 8, afterSec = 10, signal = nu
   return { model: typeof json.model === 'string' ? json.model : null, results }
 }
 
+/**
+ * POST /v1/transcribe: whole ranges of the book with word timestamps on the book timeline (chapter heading search).
+ * A sidecar without the endpoint answers 404 (ChapterbotError with status 404).
+ *
+ * @param {Object} params
+ * @param {{path: string, offset: number, duration: number}[]} params.files - already mapped
+ * @param {{start: number, length: number}[]} params.ranges
+ * @param {AbortSignal} [params.signal]
+ * @param {number} [params.timeoutMs]
+ * @returns {Promise<{model: string|null, results: {start: number, length: number, text: string, words: [number, number, string][]}[]}>}
+ */
+async function transcribe({ files, ranges, signal = null, timeoutMs = 120000 }) {
+  const { json } = await request('POST', '/v1/transcribe', { body: { files, ranges, includeWords: true }, signal, timeoutMs })
+  if (!json || !Array.isArray(json.results)) throw new ChapterbotError('bad_response', 'Chapterbot transcribe returned no results')
+  const results = json.results
+    .filter((r) => r && typeof r.start === 'number' && Number.isFinite(r.start))
+    .map((r) => ({
+      start: r.start,
+      length: typeof r.length === 'number' ? r.length : 0,
+      text: typeof r.text === 'string' ? r.text : '',
+      words: (Array.isArray(r.words) ? r.words : []).filter((w) => Array.isArray(w) && w.length >= 3 && Number.isFinite(w[0]) && Number.isFinite(w[1]) && typeof w[2] === 'string')
+    }))
+  return { model: typeof json.model === 'string' ? json.model : null, results }
+}
+
 function checkJobId(jobId) {
   if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)) throw new ChapterbotError('bad_request', 'Invalid chapterbot job id')
   return jobId
@@ -597,6 +622,7 @@ module.exports = {
   mapFiles,
   mapOnePath,
   verify,
+  transcribe,
   createEpubJob,
   getJob,
   downloadJobResult,

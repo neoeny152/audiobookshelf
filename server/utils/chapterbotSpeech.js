@@ -85,6 +85,9 @@ const HEARD_NAMED = Object.freeze({ prologue: 'Prologue', epilogue: 'Epilogue', 
 /** A well-formed roman numeral from 1 to 399, so words like "civil" or "mix" are not read as numbers */
 const ROMAN_RE = /^(?=[ivxlc])c{0,3}(xc|xl|l?x{0,3})(ix|iv|v?i{0,3})$/
 
+/** A lone "i" is the numeral 1 only after these words ("Part I"); anywhere else it is the pronoun */
+const LONE_I_AFTER = new Set(['chapter', 'part', 'book', 'volume'])
+
 function romanToInt(r) {
   const v = { i: 1, v: 5, x: 10, l: 50, c: 100 }
   let n = 0
@@ -102,7 +105,8 @@ function romanToInt(r) {
 
 /**
  * Port of build-chapters.ps1 Tokens: lower case, apostrophes dropped, anything else non-alphanumeric is a space,
- * number words ("twenty one" -> "21"), roman numerals ("xii" -> "12", a lone "i" only after "chapter") and
+ * number words ("twenty one" -> "21"), roman numerals ("xii" -> "12", a lone "i" only after "chapter", "part", "book" or
+ * "volume") and
  * leading zeros normalised.
  *
  * @param {string} s
@@ -126,7 +130,7 @@ function tokens(s) {
         i++
       }
       out.push(String(n))
-    } else if ((/^[ivxlc]+$/.test(w) && w.length <= 7 && w !== 'i') || (w === 'i' && i > 0 && arr[i - 1] === 'chapter')) {
+    } else if ((/^[ivxlc]+$/.test(w) && w.length <= 7 && w !== 'i') || (w === 'i' && i > 0 && LONE_I_AFTER.has(arr[i - 1]))) {
       out.push(String(romanToInt(w)))
     } else {
       const m = w.match(/^0*(\d+)$/)

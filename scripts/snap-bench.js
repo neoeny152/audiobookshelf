@@ -65,6 +65,8 @@ const TRUTH_MAP = {
   'Anne Frasier/Play Dead': 'c9578352-d940-4286-b7a5-fff088d6db34',
   "Matt Dinnimman/Dungeon Crawler Carl/Book 2 - Carl's Doomsday Scenario": 'db66dda6-1b5c-4a17-94ce-cbe359cdc353',
   'Becca Fitzpatrick/Black Ice': 'ea268af3-c203-4262-aba4-7c8124ae982b',
+  // truth from a full transcript (every spoken heading), test server item id
+  'Pirece Brown/Red Rising': 'c1c77a16-9580-42c3-9e51-019065979fe2',
   "Matt Dinnimman/Dungeon Crawler Carl/Book 5 - The Butcher's Masquerade": 'ec441e12-e3a9-459d-86a9-4b9b4a018aec'
 }
 
@@ -151,7 +153,9 @@ function parsePauseFile(text, fileDuration) {
     }
   }
   if (pending !== null && fileDuration > pending) pauses.push({ start: pending, end: fileDuration })
-  return pauses
+  // a file can decode longer than its probed duration (bad MP3 headers): snap never reads past the duration, so the
+  // scoring must not either
+  return pauses.filter((p) => p.start < fileDuration).map((p) => ({ start: p.start, end: Math.min(p.end, fileDuration) }))
 }
 
 const asciiKey = (s) => s.normalize('NFC').replace(/[^\x20-\x7e]/g, '')

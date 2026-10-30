@@ -430,7 +430,7 @@ describe('LibraryItemController', () => {
       expect(detect.called).to.be.false
     })
 
-    it('runs the chapterbot speech check for verify:true, which may lower confidence but never moves a start', async () => {
+    it('runs the chapterbot speech check for verify:true (plain check on a sidecar without /v1/transcribe), which may lower confidence', async () => {
       const requests = []
       const server = http.createServer((req, res) => {
         const chunks = []
@@ -438,6 +438,11 @@ describe('LibraryItemController', () => {
         req.on('end', () => {
           const body = JSON.parse(Buffer.concat(chunks).toString('utf8'))
           requests.push({ url: req.url, auth: req.headers.authorization, body })
+          if (req.url === '/v1/transcribe') {
+            // a sidecar that predates the heading search
+            res.writeHead(404, { 'Content-Type': 'application/json' })
+            return res.end(JSON.stringify({ detail: 'Not Found' }))
+          }
           const results = body.starts.map((start) => {
             // chapter 2's heading is heard before its proposed start: LATE
             if (Math.abs(start - 1502.75) < 0.001) return { start, before: 'and it was over. Chapter Two.', after: 'The rain had not stopped.' }
@@ -458,11 +463,10 @@ describe('LibraryItemController', () => {
 
         expect(res.statusCode).to.equal(200)
         const result = res.json.firstCall.args[0]
-        expect(requests).to.have.length(1)
-        expect(requests[0].url).to.equal('/v1/verify')
-        expect(requests[0].auth).to.equal(`Bearer ${token}`)
-        expect(requests[0].body.files.map((f) => f.path)).to.deep.equal(['Black Ice/part0.mp3', 'Black Ice/part1.mp3', 'Black Ice/part2.mp3', 'Black Ice/part3.mp3'])
-        expect(requests[0].body.starts).to.deep.equal([502.75, 1502.75, 2502.75])
+        expect(requests.map((r) => r.url)).to.deep.equal(['/v1/transcribe', '/v1/verify'])
+        expect(requests[1].auth).to.equal(`Bearer ${token}`)
+        expect(requests[1].body.files.map((f) => f.path)).to.deep.equal(['Black Ice/part0.mp3', 'Black Ice/part1.mp3', 'Black Ice/part2.mp3', 'Black Ice/part3.mp3'])
+        expect(requests[1].body.starts).to.deep.equal([502.75, 1502.75, 2502.75])
 
         expect(result.chapters[0].speech).to.equal(null)
         expect(result.chapters[1]).to.include({ proposedStart: 502.75, confidence: 'high' })

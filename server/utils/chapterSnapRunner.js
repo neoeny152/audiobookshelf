@@ -2,6 +2,7 @@ const os = require('os')
 const Logger = require('../Logger')
 const ffmpegHelpers = require('./ffmpegHelpers')
 const chapterSnap = require('./chapterSnap')
+const chapterReanchor = require('./chapterReanchor')
 
 /** ffmpeg processes per job */
 const POOL = Math.min(3, Math.max(1, Math.floor(os.cpus().length / 2)))
@@ -101,7 +102,7 @@ async function runPool({ segments, timeline, options, detect, signal, deadlineMs
 }
 
 /**
- * Plan -> detect pool -> snap -> order -> verifier seam -> response.
+ * (Re-anchor) -> plan -> detect pool -> snap -> order -> verifier seam -> (located starts onto their pauses) -> response.
  * Never saves anything.
  *
  * @param {Object} params
@@ -115,14 +116,21 @@ async function runPool({ segments, timeline, options, detect, signal, deadlineMs
  * @param {AbortSignal} [params.signal]
  * @param {number} [params.deadlineMs]
  * @param {Function} [params.detect] - injected for tests, defaults to ffmpegHelpers.detectSilences
- * @param {{verify: Function}[]} [params.verifiers] - Whisper seam; may only set speech and lower confidence.
- *   verify() returns verdicts ([{index, speech?, confidence?}]) or {verdicts, warnings}
+ * @param {{verify: Function}[]} [params.verifiers] - Whisper seam; sets speech and may lower confidence. A verdict with
+ *   `start` (and `headingAt`) is a located heading (chapterLocate): the start moves there when it keeps the order.
+ *   verify() returns verdicts ([{index, speech?, confidence?, start?, headingAt?}]) or {verdicts, warnings}
  * @param {number} [params.pool]
  * @param {() => number} [params.now]
  */
 async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = [], indexes = null, options, signal = null, deadlineMs = DEADLINE_MS, detect = defaultDetect, verifiers = [], pool = POOL, now = Date.now }) {
   const startedAt = now()
-  const starts = chapters.map((c) => c.start)
+  const inputStarts = chapters.map((c) => c.start)
+  // Reference lists that drift against part files are mapped onto them first (options.reanchor)
+  const reanchored = options.reanchor ? chapterReanchor.reanchorStarts(chapters, timeline, T) : null
+  const starts = reanchored ? reanchored.starts : inputStarts
+  if (reanchored) {
+    Logger.info(`[ChapterSnap] Re-anchored "${libraryItemId}" on ${reanchored.anchors.length} part files: ${reanchored.anchors.map((a) => `#${a.index} ${a.from.toFixed(1)}->${a.to.toFixed(1)}`).join(', ')}, rate after the last ${reanchored.rate.toFixed(5)}`)
+  }
   const plan = chapterSnap.planSegments(starts, indexes, timeline, T, options)
 
   Logger.info(`[ChapterSnap] Start "${libraryItemId}": ${chapters.length} chapters, ${plan.segments.length} segments, ${plan.plannedSec.toFixed(1)}s planned, options ${JSON.stringify(options)}`)
@@ -184,7 +192,8 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
     proposal.speech = null
   }
 
-  // Verifier seam (chapterbot speech check): may only fill speech and lower confidence, never move a start
+  // Verifier seam (chapterbot speech check): fills speech and may lower confidence; a located heading moves a start
+  const located = []
   for (const verifier of verifiers) {
     const snapshot = proposals.map((p) => Object.freeze({ index: p.index, originalStart: p.originalStart, proposedStart: p.proposedStart, reason: p.reason, confidence: p.confidence, pause: p.pause ? Object.freeze({ ...p.pause }) : null }))
     const outcome = (await verifier.verify({ proposals: Object.freeze(snapshot), timeline, signal })) || []
@@ -196,8 +205,13 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
       if (!proposal) continue
       if (verdict.speech !== undefined) proposal.speech = verdict.speech
       if (verdict.confidence !== undefined) proposal.confidence = chapterSnap.lowerConfidence(proposal.confidence, verdict.confidence)
+      if (Number.isFinite(verdict.start) && proposal.index > 0) located.push({ proposal, start: verdict.start, headingAt: Number.isFinite(verdict.headingAt) ? verdict.headingAt : verdict.start })
     }
   }
+  if (located.length) await placeLocated({ located, proposals, starts, timeline, T, options, detect, signal, deadlineMs: Math.max(5000, deadlineMs - (now() - startedAt)), pool, now })
+
+  // the response reports moves against the caller's starts, not the re-anchored ones
+  if (reanchored) for (const proposal of proposals) proposal.originalStart = inputStarts[proposal.index]
 
   const complete = failedSegments === 0 && skippedSegments === 0
   const response = chapterSnap.buildResponse({
@@ -217,12 +231,66 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
       pausesFound: pauses.length,
       elapsedMs: now() - startedAt
     },
-    warnings
+    warnings,
+    reanchor: reanchored ? { anchors: reanchored.anchors.map((a) => ({ index: a.index, trackIndex: a.trackIndex, from: a.from, to: a.to })), rate: reanchored.rate } : null
   })
 
   const { stats } = response
   Logger.info(`[ChapterSnap] Done "${libraryItemId}" in ${stats.elapsedMs}ms: analysed ${stats.analysedSec}s, moved ${stats.moved}, unchanged ${stats.unchanged}, skipped ${stats.skipped}, complete ${complete}`)
   return response
+}
+
+/**
+ * Located headings (chapterLocate) onto the pause before the heading word: silence detection on a few seconds before
+ * each heading, then the pause that ends within LOCATE_PAUSE_BEFORE..LOCATE_PAUSE_AFTER of the word, as snap places
+ * a start (leadSec before the pause ends). Whisper often times a word that follows a silence up to ~0.8 s early (it
+ * starts inside the silence), hence the allowance after the word. Without such a pause the transcript's start stays. A start that would
+ * not stay between its neighbours is not moved.
+ */
+const LOCATE_PAUSE_BEFORE = 2.0
+const LOCATE_PAUSE_AFTER = 1.0
+const LOCATE_WINDOW = 4
+
+async function placeLocated({ located, proposals, starts, timeline, T, options, detect, signal, deadlineMs, pool, now }) {
+  const targets = located.map((l) => l.headingAt)
+  const indexes = new Set(targets.map((_, k) => k))
+  let pauses = []
+  try {
+    const windowOptions = { ...options, windowSec: LOCATE_WINDOW, headingLookbackSec: 0 }
+    const plan = chapterSnap.planSegments([0, ...targets].map((t, k) => (k === 0 ? 0 : t)), new Set([...indexes].map((k) => k + 1)), timeline, T, windowOptions)
+    const { results } = await runPool({ segments: plan.segments, timeline, options: windowOptions, detect, signal, deadlineMs, pool, now })
+    const ok = plan.segments.map((seg, k) => ({ seg, result: results[k] })).filter((x) => x.result.status === 'ok')
+    pauses = chapterSnap.toBookPauses(
+      ok.map(({ seg, result }) => ({ seg, pauses: chapterSnap.parseSilencedetect(result.lines, seg) })),
+      timeline,
+      options.minSilenceSec
+    )
+  } catch (error) {
+    Logger.warn(`[ChapterSnap] Pause detection for located headings failed: ${error.message}`)
+  }
+
+  for (const { proposal, start, headingAt } of located.sort((a, b) => a.proposal.index - b.proposal.index)) {
+    let target = start
+    let pause = null
+    const candidates = pauses.filter((p) => p.end >= headingAt - LOCATE_PAUSE_BEFORE && p.end <= headingAt + LOCATE_PAUSE_AFTER && !p.endClipped)
+    if (candidates.length) {
+      pause = candidates[candidates.length - 1]
+      target = Math.max(pause.start, pause.end - options.leadSec)
+    }
+    const i = proposal.index
+    const prev = proposals[i - 1].proposedStart
+    const next = i + 1 < proposals.length ? proposals[i + 1].proposedStart : T
+    if (!(target > prev + chapterSnap.MIN_GAP - 1e-9 && target < next - chapterSnap.MIN_GAP + 1e-9)) {
+      Logger.debug(`[ChapterSnap] Located heading of chapter ${i} at ${headingAt} would break the order, not moved`)
+      if (proposal.speech) proposal.speech = { ...proposal.speech, located: false }
+      continue
+    }
+    proposal.proposedStart = Math.round(target * 1000) / 1000
+    proposal.reason = chapterSnap.REASONS.HEADING_LOCATED
+    proposal.pause = pause
+    proposal.confidence = chapterSnap.confidenceFor(proposal)
+    if (proposal.speech?.late || proposal.speech?.early) proposal.confidence = chapterSnap.lowerConfidence(proposal.confidence, 'low')
+  }
 }
 
 module.exports = {

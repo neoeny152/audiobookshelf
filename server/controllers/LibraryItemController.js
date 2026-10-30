@@ -10,6 +10,7 @@ const Database = require('../Database')
 const zipHelpers = require('../utils/zipHelpers')
 const chapterSnap = require('../utils/chapterSnap')
 const chapterSnapRunner = require('../utils/chapterSnapRunner')
+const chapterLocate = require('../utils/chapterLocate')
 const chapterbotClient = require('../utils/chapterbotClient')
 const chapterbotSpeech = require('../utils/chapterbotSpeech')
 const readAlong = require('../utils/readAlong')
@@ -974,8 +975,11 @@ class LibraryItemController {
    * When the response has complete: false, retry with chapters = that response's proposedChapters and
    * indexes = the chapters marked not-analysed. Each chapter is bounded by its neighbours' starts in the request,
    * so retrying with the original starts could cross a neighbour the first call moved.
+   * options.reanchor (default true) first maps the starts onto part files named like a chapter ("Part II.mp3" for the
+   * chapter "Part II"), for reference lists that drift against the audio; the response then has a `reanchor` object.
    * options.verify = true adds the chapterbot speech check (only when CHAPTERBOT_* is configured, 400 otherwise):
-   * it fills each chapter's `speech` and may lower confidence, but never moves a start. It makes the request
+   * it fills each chapter's `speech` and may lower confidence. With options.locate (default true) a heading not heard
+   * at its start is searched for in a wider transcript and the start moves there (reason heading-located). It makes the request
    * longer (seconds per chapter, at most chapterbotSpeech.MAX_VERIFY_STARTS chapters, and snap plus speech check stay
    * within chapterbotSpeech.VERIFY_DEADLINE_MS so the request fits under a default 60 s proxy timeout; chapters left
    * unchecked are reported in warnings, to be resent with "indexes").
@@ -1022,7 +1026,13 @@ class LibraryItemController {
     const verifiers = []
     if (options.verify) {
       const titles = chapters.map((chapter, i) => chapterSnap.resolveTitle(chapter.title, media.chapters, i))
-      verifiers.push(chapterbotSpeech.createVerifier({ titles, skipReasons: chapterSnap.SKIP_REASONS }))
+      const plain = chapterbotSpeech.createVerifier({ titles, skipReasons: chapterSnap.SKIP_REASONS })
+      // options.locate (default on): headings not heard at their start are searched for in a wider transcript
+      verifiers.push(
+        options.locate
+          ? chapterLocate.createLocator({ titles, skipReasons: chapterSnap.SKIP_REASONS, leadSec: options.leadSec, cacheKey: `${libraryItem.id}:${T.toFixed(3)}`, fallback: plain })
+          : plain
+      )
     }
 
     try {
