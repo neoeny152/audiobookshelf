@@ -86,7 +86,7 @@ function getLibraryItemFileMatchWhere(libraryItemAlias = 'libraryItem', query = 
  * Find the library file that matched a file search query.
  * Prefers files whose name matches over files that only match by folder.
  *
- * @param {{path?:string, relPath?:string, libraryFiles?:object[]}} libraryItem
+ * @param {{path:string, relPath:string, libraryFiles:object[]}} libraryItem
  * @param {string} query
  * @returns {string|null} path of the matched file relative to the library folder, or the item's relative path
  */
@@ -94,26 +94,17 @@ function getMatchedFilePath(libraryItem, query) {
   const needle = normalizeFileQuery(query).toLowerCase()
   if (!needle) return null
 
-  const files = Array.isArray(libraryItem?.libraryFiles) ? libraryItem.libraryFiles : []
-  const fileRelPath = (file) => file.metadata?.relPath || file.metadata?.filename || file.metadata?.path
+  const files = libraryItem.libraryFiles || []
+  const byName = files.find((file) => file.metadata.filename.toLowerCase().includes(needle))
+  if (byName) return byName.metadata.relPath
 
-  const byName = files.find((file) => (file.metadata?.filename || '').toLowerCase().includes(needle))
-  if (byName) return fileRelPath(byName)
-
-  const byPath = files.find((file) => (file.metadata?.path || '').toLowerCase().includes(needle))
-  if (byPath) {
-    // A query matching the item folder is reported as the item's relative path
-    if ((libraryItem.path || '').toLowerCase().includes(needle) && libraryItem.relPath) return libraryItem.relPath
-    return fileRelPath(byPath)
-  }
-
-  if ((libraryItem?.path || '').toLowerCase().includes(needle)) return libraryItem.relPath || libraryItem.path
-  return null
+  // A query matching the item folder is reported as the item's relative path
+  if (libraryItem.path.toLowerCase().includes(needle)) return libraryItem.relPath
+  const byPath = files.find((file) => file.metadata.path.toLowerCase().includes(needle))
+  return byPath ? byPath.metadata.relPath : null
 }
 
 module.exports = {
-  SearchableFileExtensions,
-  normalizeFileQuery,
   isFileSearchQuery,
   getFileSearchLikePattern,
   canPrefilterLibraryFilesText,
