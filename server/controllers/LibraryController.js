@@ -20,6 +20,7 @@ const Database = require('../Database')
 const Watcher = require('../Watcher')
 const RssFeedManager = require('../managers/RssFeedManager')
 const AutoPipelineManager = require('../managers/AutoPipelineManager')
+const DuplicateItemManager = require('../managers/DuplicateItemManager')
 const { mergeAutoPipelineSettings, normalizeAutoPipelineSettings, AutoPipelineSettingsError } = require('../utils/autoPipeline/settings')
 
 const libraryFilters = require('../utils/queries/libraryFilters')
@@ -230,7 +231,7 @@ class LibraryController {
   async findOne(req, res) {
     const includeArray = (req.query.include || '').split(',')
     if (includeArray.includes('filterdata')) {
-      const filterdata = await libraryFilters.getFilterData(req.library.mediaType, req.library.id)
+      const filterdata = await LibraryController.withDuplicateCount(req, await libraryFilters.getFilterData(req.library.mediaType, req.library.id))
 
       return res.json({
         filterdata,
@@ -622,6 +623,7 @@ class LibraryController {
     if (Database.libraryFilterData[req.library.id]) {
       delete Database.libraryFilterData[req.library.id]
     }
+    await DuplicateItemManager.removeLibrary(req.library.id).catch((error) => Logger.error(`[LibraryController] Failed to remove duplicate groups for library`, error))
 
     return res.json(libraryJson)
   }
@@ -908,7 +910,103 @@ class LibraryController {
    */
   async getLibraryFilterData(req, res) {
     const filterData = await libraryFilters.getFilterData(req.library.mediaType, req.library.id)
-    res.json(filterData)
+    res.json(await LibraryController.withDuplicateCount(req, filterData))
+  }
+
+  /**
+   * Adds numDuplicateGroups (admins only) to a copy of the cached filter data (#5676)
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Object} filterData
+   * @returns {Promise<Object>}
+   */
+  static async withDuplicateCount(req, filterData) {
+    if (!filterData || !req.user.isAdminOrUp) return filterData
+    const numDuplicateGroups = await DuplicateItemManager.countGroups(req.library.id).catch((error) => {
+      Logger.error(`[LibraryController] Failed to count duplicate groups`, error)
+      return 0
+    })
+    return { ...filterData, numDuplicateGroups }
+  }
+
+  /**
+   * GET: /api/libraries/:id/duplicates
+   * Possible duplicate items, grouped (#5676). Admin only.
+   * Query: include=dismissed to also return groups marked "not a duplicate"
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  async getDuplicates(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[LibraryController] Non-admin user "${req.user.username}" attempted to get duplicate items`)
+      return res.sendStatus(403)
+    }
+    await DuplicateItemManager.ensureChecked(req.library.id)
+    res.json(await LibraryController.getDuplicatesPayload(req))
+  }
+
+  /**
+   * POST: /api/libraries/:id/duplicates/check
+   * Re-check the library for possible duplicates now. Admin only.
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  async checkDuplicates(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[LibraryController] Non-admin user "${req.user.username}" attempted to check for duplicate items`)
+      return res.sendStatus(403)
+    }
+    await DuplicateItemManager.checkLibrary(req.library.id)
+    res.json(await LibraryController.getDuplicatesPayload(req))
+  }
+
+  /**
+   * PATCH: /api/libraries/:id/duplicates/:groupId
+   * Body: { dismissed: boolean } marks a group as "not a duplicate" (or undoes that). Admin only.
+   *
+   * @param {LibraryControllerRequest} req
+   * @param {Response} res
+   */
+  async updateDuplicateGroup(req, res) {
+    if (!req.user.isAdminOrUp) {
+      Logger.error(`[LibraryController] Non-admin user "${req.user.username}" attempted to update a duplicate group`)
+      return res.sendStatus(403)
+    }
+    const dismissed = req.body?.dismissed
+    if (typeof dismissed !== 'boolean') {
+      return res.status(400).send('Invalid request body: dismissed must be a boolean')
+    }
+    const groupId = req.params.groupId
+    if (typeof groupId !== 'string' || !/^[0-9a-f]{1,64}$/.test(groupId)) {
+      return res.sendStatus(404)
+    }
+    const updated = await DuplicateItemManager.setGroupDismissed(req.library.id, groupId, dismissed)
+    if (!updated) return res.sendStatus(404)
+
+    const groups = await DuplicateItemManager.getGroups(req.library.id, { includeDismissed: true })
+    const group = groups.find((g) => g.id === groupId)
+    if (!group) return res.sendStatus(404)
+    res.json({
+      group,
+      numGroups: await DuplicateItemManager.countGroups(req.library.id)
+    })
+  }
+
+  /**
+   * @param {LibraryControllerRequest} req
+   */
+  static async getDuplicatesPayload(req) {
+    const includeDismissed = String(req.query.include || '')
+      .split(',')
+      .includes('dismissed')
+    const groups = await DuplicateItemManager.getGroups(req.library.id, { includeDismissed })
+    return {
+      groups,
+      numGroups: groups.filter((g) => !g.dismissed).length,
+      lastCheckedAt: DuplicateItemManager.lastCheckedAt.get(req.library.id) || null
+    }
   }
 
   /**

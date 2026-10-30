@@ -153,6 +153,11 @@ class Database {
     return this.models.mediaItemShare
   }
 
+  /** @type {typeof import('./models/LibraryItemDuplicate')} */
+  get libraryItemDuplicateModel() {
+    return this.models.libraryItemDuplicate
+  }
+
   /** @type {typeof import('./models/Device')} */
   get deviceModel() {
     return this.models.device
@@ -360,6 +365,7 @@ class Database {
     require('./models/Setting').init(this.sequelize)
     require('./models/CustomMetadataProvider').init(this.sequelize)
     require('./models/MediaItemShare').init(this.sequelize)
+    require('./models/LibraryItemDuplicate').init(this.sequelize)
 
     return this.sequelize.sync({ force, alter: false })
   }
@@ -710,6 +716,9 @@ class Database {
    * @param {string} libraryId
    */
   async resetLibraryIssuesFilterData(libraryId) {
+    // Items were added, removed or rescanned: re-check for possible duplicates (#5676, debounced)
+    require('./managers/DuplicateItemManager').scheduleCheck(libraryId)
+
     if (!this.libraryFilterData[libraryId]) return // Do nothing if filter data is not set
 
     this.libraryFilterData[libraryId].numIssues = await this.libraryItemModel.count({

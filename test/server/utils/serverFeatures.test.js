@@ -21,7 +21,7 @@ describe('serverFeatures', () => {
       language: 'en-us',
       authMethods: ['local'],
       authFormData: { authLoginCustomMessage: null },
-      serverFeatures: ['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts']
+      serverFeatures: ['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'duplicateItems', 'transcripts']
     })
   })
 
@@ -43,8 +43,8 @@ describe('serverFeatures', () => {
   })
 
   it('adds only known optional features that are currently available', () => {
-    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts'])
-    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts', 'chapterbotVerify', 'chapterbotEpub'])
+    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'duplicateItems', 'transcripts'])
+    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'duplicateItems', 'transcripts', 'chapterbotVerify', 'chapterbotEpub'])
   })
 
   it('lists chapterbotEpubCurrent with chapterbotEpub and autoPipeline only behind its gate', () => {
@@ -52,7 +52,7 @@ describe('serverFeatures', () => {
     expect(availableOptionalFeatures(['chapterbotVerify'])).to.deep.equal(['chapterbotVerify'])
     expect(availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'])).to.deep.equal(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate'])
     expect(availableOptionalFeatures([], { autoPipeline: true })).to.deep.equal(['autoPipeline'])
-    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'], { autoPipeline: true })).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts', 'chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate', 'autoPipeline'])
+    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'], { autoPipeline: true })).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'duplicateItems', 'transcripts', 'chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate', 'autoPipeline'])
     expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures([], { autoPipeline: false })).serverFeatures).to.not.include('autoPipeline')
   })
 
@@ -64,6 +64,7 @@ describe('serverFeatures', () => {
       libraryDownloadPost: ['post /libraries/:id/download', 'get /libraries/:id/download'],
       readAlong: ['get /items/:id/ebook/:fileid/readalong'],
       mp3SeekIndex: ['get /tools/item/:id/seek-index', 'post /tools/item/:id/repair-seek-index', 'delete /tools/item/:id/repair-seek-index'],
+      duplicateItems: ['get /libraries/:id/duplicates', 'post /libraries/:id/duplicates/check', 'patch /libraries/:id/duplicates/:groupId'],
       chapterbotVerify: ['post /items/:id/chapters/snap'],
       chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId'],
       chapterbotEpubCurrent: ['get /items/:id/epub'],

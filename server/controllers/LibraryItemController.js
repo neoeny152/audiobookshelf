@@ -26,6 +26,7 @@ const CacheManager = require('../managers/CacheManager')
 const CoverManager = require('../managers/CoverManager')
 const ShareManager = require('../managers/ShareManager')
 const ChapterbotEpubManager = require('../managers/ChapterbotEpubManager')
+const DuplicateItemManager = require('../managers/DuplicateItemManager')
 const { applyChapters } = require('../utils/applyChapters')
 
 /**
@@ -295,6 +296,8 @@ class LibraryItemController {
 
       Logger.debug(`[LibraryItemController] Updated library item media ${req.libraryItem.media.title}`)
       SocketAuthority.libraryItemEmitter('item_updated', req.libraryItem)
+      // Title, author, ASIN or ISBN may have changed (#5676)
+      DuplicateItemManager.scheduleCheck(req.libraryItem.libraryId)
     }
     res.json({
       updated: hasUpdates,
@@ -743,6 +746,7 @@ class LibraryItemController {
 
         Logger.debug(`[LibraryItemController] Updated library item media "${libraryItem.media.title}"`)
         SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+        DuplicateItemManager.scheduleCheck(libraryItem.libraryId)
         itemsUpdated++
       }
     }

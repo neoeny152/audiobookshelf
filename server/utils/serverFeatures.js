@@ -16,6 +16,10 @@ const { version } = require('../../package.json')
  * - mp3SeekIndex: GET /api/tools/item/:id/seek-index (MP3s without a Xing/Info/VBRI header, ?measure=1 for the real
  *   duration), POST/DELETE /api/tools/item/:id/repair-seek-index (remux with a Xing header, task action
  *   repair-seek-index), audioFile.mp3SeekIndex (see utils/mp3SeekIndex.js).
+ * - duplicateItems: GET /api/libraries/:id/duplicates[?include=dismissed], POST /api/libraries/:id/duplicates/check,
+ *   PATCH /api/libraries/:id/duplicates/:groupId { dismissed } (admin only), filterdata.numDuplicateGroups for admins
+ *   and duplicate_items_updated admin socket events
+ *   (see managers/DuplicateItemManager.js). Possible duplicates are only listed, never deleted or merged.
  * - transcripts: GET /api/items/:id/transcripts[?episodeId=] (feed, local sidecar and generated transcripts; an empty
  *   list when none), GET /api/items/:id/transcripts/:transcriptId (?format=vtt|json|original), admin POST
  *   /api/items/:id/transcripts/refresh-feed, DELETE /api/items/:id/transcripts/generated, podcast library settings
@@ -36,7 +40,7 @@ const { version } = require('../../package.json')
  *   library.settings.autoPipeline and pipeline_item_updated socket events. Listed only when the server runs with
  *   ABS_AUTO_PIPELINE=1 (see managers/AutoPipelineManager.js).
  */
-const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts'])
+const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'duplicateItems', 'transcripts'])
 const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate', 'autoPipeline'])
 
 /**

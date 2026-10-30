@@ -39,6 +39,7 @@ const PlaybackSessionManager = require('./managers/PlaybackSessionManager')
 const PodcastManager = require('./managers/PodcastManager')
 const AudioMetadataMangaer = require('./managers/AudioMetadataManager')
 const Mp3SeekIndexManager = require('./managers/Mp3SeekIndexManager')
+const DuplicateItemManager = require('./managers/DuplicateItemManager')
 const RssFeedManager = require('./managers/RssFeedManager')
 const CronManager = require('./managers/CronManager')
 const ApiCacheManager = require('./managers/ApiCacheManager')
@@ -229,6 +230,7 @@ class Server {
     await CacheManager.ensureCachePaths()
 
     await ShareManager.init()
+    DuplicateItemManager.init()
     await this.backupManager.init()
     await RssFeedManager.init()
 

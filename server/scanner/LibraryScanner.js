@@ -180,6 +180,9 @@ class LibraryScanner {
 
     TaskManager.taskFinished(task)
 
+    // Possible duplicates are re-checked after every library scan, scheduled ones included (#5676)
+    require('../managers/DuplicateItemManager').scheduleCheck(library.id)
+
     libraryScan.saveLog()
   }
 
