@@ -456,6 +456,15 @@ describe('search', () => {
         expect(results[0].matchConfidence).to.be.closeTo(expectedConfidence, 0.001)
       })
 
+      it('should score against the measured length of MP3s without a seek header', async () => {
+        const bookResults = [{ duration: 11.5, title: 'The Great Novel', author: 'John Doe' }]
+        runSearchStub.resolves(bookResults)
+        const mp3 = { codec: 'mp3', duration: 600, mp3SeekIndex: 'none', metadata: { size: 1, mtimeMs: 2 }, mp3Measured: { duration: 690, size: 1, mtimeMs: 2 } }
+        const results = await bookFinder.search({ media: { duration: 600, includedAudioFiles: [mp3] } }, provider, 'The Great Novel', 'John Doe')
+        // 11.5 min against the measured 11.5 min, not the stored 10 min (diff 1.5 min would score 0.95)
+        expect(results[0].matchConfidence).to.be.closeTo(W_DURATION * 1.0 + W_TITLE * 1.0 + W_AUTHOR * 1.0, 0.001)
+      })
+
       it('should use default duration score if libraryItem duration is missing', async () => {
         const bookResults = [{ duration: 10, title: 'The Great Novel', author: 'John Doe' }]
         runSearchStub.resolves(bookResults)

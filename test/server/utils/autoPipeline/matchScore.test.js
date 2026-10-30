@@ -211,4 +211,10 @@ describe('autoPipeline matchScore', () => {
     }
     expect(itemForScoring(li)).to.deep.equal({ title: 'Black Ice', subtitle: '', authors: ['A. Writer'], narrators: ['Jo Reader'], durationSec: 3600, series: [{ name: 'Ice', sequence: '3' }] })
   })
+
+  it('itemForScoring uses the measured length of MP3s without a seek header', () => {
+    const mp3 = { codec: 'mp3', duration: 1800, mp3SeekIndex: 'none', metadata: { size: 1, mtimeMs: 2 }, mp3Measured: { duration: 1890, size: 1, mtimeMs: 2 } }
+    const li = { media: { title: 'Black Ice', duration: 3600, includedAudioFiles: [mp3, { ...mp3, mp3SeekIndex: 'xing' }] } }
+    expect(itemForScoring(li).durationSec).to.equal(3690)
+  })
 })

@@ -9,6 +9,7 @@ const CustomProviderAdapter = require('../providers/CustomProviderAdapter')
 const Logger = require('../Logger')
 const { levenshteinDistance, levenshteinSimilarity, escapeRegExp, isValidASIN } = require('../utils/index')
 const htmlSanitizer = require('../utils/htmlSanitizer')
+const { getTotalDrift } = require('../utils/mp3SeekIndex')
 
 class BookFinder {
   #providerResponseTimeout = 10000
@@ -430,7 +431,8 @@ class BookFinder {
 
     if (books.length && libraryItem) {
       const isAudibleProvider = provider.startsWith('audible')
-      const libraryItemDurationMinutes = libraryItem?.media?.duration ? libraryItem.media.duration / 60 : null
+      // MP3s without a seek header report an estimated length; measured ones count with their real length
+      const libraryItemDurationMinutes = libraryItem?.media?.duration ? (libraryItem.media.duration + getTotalDrift(libraryItem.media.includedAudioFiles).drift) / 60 : null
 
       books.forEach((book) => {
         if (typeof book !== 'object' || !isAudibleProvider) return

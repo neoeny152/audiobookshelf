@@ -10,6 +10,7 @@
 
 const { levenshteinSimilarity } = require('../index')
 const { cleanTitleForCompares, cleanAuthorForCompares } = require('../../finders/BookFinder')
+const { getTotalDrift } = require('../mp3SeekIndex')
 
 const WEIGHTS = Object.freeze({ title: 0.35, author: 0.25, duration: 0.25, narrator: 0.1, series: 0.05 })
 /** Candidates scored per search (the search returns them sorted by duration difference) */
@@ -54,7 +55,7 @@ function itemForScoring(libraryItem) {
     subtitle: media.subtitle || '',
     authors: (media.authors || []).map((a) => a.name).filter(Boolean),
     narrators: (media.narrators || []).filter(Boolean),
-    durationSec: Number.isFinite(media.duration) && media.duration > 0 ? media.duration : null,
+    durationSec: Number.isFinite(media.duration) && media.duration > 0 ? media.duration + getTotalDrift(media.includedAudioFiles).drift : null,
     series: (media.series || []).map((s) => ({ name: s.name, sequence: s.bookSeries?.sequence ?? null }))
   }
 }

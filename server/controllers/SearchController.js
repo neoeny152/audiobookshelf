@@ -4,6 +4,7 @@ const BookFinder = require('../finders/BookFinder')
 const PodcastFinder = require('../finders/PodcastFinder')
 const AuthorFinder = require('../finders/AuthorFinder')
 const Database = require('../Database')
+const { getTotalDrift } = require('../utils/mp3SeekIndex')
 const { isValidASIN, getQueryParamAsString, ValidationError, NotFoundError } = require('../utils')
 
 // Provider name mappings for display purposes
@@ -92,6 +93,10 @@ class SearchController {
 
       // Fetch library item
       const libraryItem = id ? await SearchController.fetchLibraryItem(id) : null
+      // Audible scores lean on the length: MP3s without a seek header are measured first (once, then cached)
+      if (libraryItem?.isBook && provider.startsWith('audible') && getTotalDrift(libraryItem.media.includedAudioFiles).unmeasured) {
+        await this.mp3SeekIndexManager.getStatus(libraryItem)
+      }
 
       const results = await BookFinder.search(libraryItem, provider, title, author)
       res.json(results)

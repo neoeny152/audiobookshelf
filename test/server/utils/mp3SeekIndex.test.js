@@ -369,6 +369,13 @@ describe('mp3SeekIndex', () => {
       expect(mp3SeekIndex.getDrift(af({ metadata: { size: 101, mtimeMs: 5 } }))).to.be.null
       expect(mp3SeekIndex.needsRepair(af({ metadata: { size: 100, mtimeMs: 6 } }))).to.be.false
     })
+    it('getTotalDrift sums the measured drift and counts header-less MP3s not measured yet', () => {
+      const files = [af({ codec: 'mp3' }), af({ codec: 'mp3', mp3SeekIndex: 'xing' }), af({ codec: 'mp3', mp3Measured: null }), af({ codec: 'mp3', mp3SeekIndex: undefined }), af({ codec: 'aac' })]
+      const total = mp3SeekIndex.getTotalDrift(files)
+      expect(total.drift).to.be.closeTo(17.415, 0.001)
+      expect(total.unmeasured).to.equal(2)
+      expect(mp3SeekIndex.getTotalDrift(undefined)).to.deep.equal({ drift: 0, unmeasured: 0 })
+    })
   })
 
   describe('shiftChapters', () => {

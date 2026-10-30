@@ -320,6 +320,26 @@ function isMp3AudioFile(audioFile) {
 }
 
 /**
+ * Drift of a book's included audio files: the sum of measured minus stored duration over the MP3s that have a
+ * current measurement, and how many header-less MP3s have none yet. Files with a seek header have no drift (their
+ * stored duration is right).
+ *
+ * @param {Object[]} [audioFiles] - included audio files
+ * @returns {{drift: number, unmeasured: number}}
+ */
+function getTotalDrift(audioFiles = []) {
+  let drift = 0
+  let unmeasured = 0
+  for (const af of audioFiles) {
+    if (!isMp3AudioFile(af)) continue
+    const d = af.mp3SeekIndex === 'none' ? getDrift(af) : null
+    if (d !== null) drift += d
+    else if (!af.mp3SeekIndex || af.mp3SeekIndex === 'none') unmeasured++
+  }
+  return { drift, unmeasured }
+}
+
+/**
  * Temp file next to the original (same filesystem, so the final rename is atomic). A dotfile with a .tmp
  * extension, which the scanner and watcher both ignore.
  *
@@ -606,6 +626,7 @@ module.exports = {
   getDrift,
   needsRepair,
   isMp3AudioFile,
+  getTotalDrift,
   getTempPath,
   buildRemuxArgs,
   buildCountPacketsArgs,

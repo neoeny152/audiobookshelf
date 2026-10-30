@@ -873,6 +873,8 @@ class AutoPipelineManager extends EventEmitter {
     }
 
     const media = libraryItem.media
+    // measures MP3s without a seek header, so the scores use their real length
+    await this.seekIndexStatus(libraryItem)
     const results = await this.getBookFinder().search(libraryItem, provider, media.title, media.authorName, media.isbn, null, { maxFuzzySearches: 2 })
     const candidates = (Array.isArray(results) ? results : []).slice(0, MAX_CANDIDATES)
     const decision = pickMatch(itemForScoring(libraryItem), candidates, settings.autoMatchMinConfidence)
