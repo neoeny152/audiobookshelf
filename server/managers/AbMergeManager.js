@@ -18,23 +18,11 @@ const TrackProgressMonitor = require('../objects/TrackProgressMonitor')
  */
 
 class AbMergeManager {
-  /**
-   * @param {Object} [deps] - injectable for tests
-   * @param {(libraryItemId: string, updateLibraryItemDetails?: Object) => Promise<number>} [deps.scanItem]
-   * @param {{addIgnoreDir: Function, removeIgnoreDir: Function}} [deps.watcher]
-   */
-  constructor(deps = {}) {
+  constructor() {
     this.itemsCacheDir = Path.join(global.MetadataPath, 'cache/items')
 
     /** @type {Task[]} */
     this.pendingTasks = []
-
-    this.scanItem = deps.scanItem || ((libraryItemId, updateLibraryItemDetails) => require('../scanner/LibraryItemScanner').scanLibraryItem(libraryItemId, updateLibraryItemDetails))
-    this.watcher = deps.watcher || null
-  }
-
-  getWatcher() {
-    return this.watcher || require('../Watcher')
   }
 
   /**
@@ -216,7 +204,7 @@ class AbMergeManager {
 
     // Keep the watcher off the item folder while the tracks are swapped, we rescan the item ourselves below.
     // A single-file item lives directly in the library folder, so that folder is not ignored.
-    const watcher = this.getWatcher()
+    const watcher = require('../Watcher')
     const ignoreDir = !task.data.isFile
     if (ignoreDir) watcher.addIgnoreDir(task.data.libraryItemDir)
     try {
@@ -298,18 +286,13 @@ class AbMergeManager {
    * @param {Task} task
    */
   async rescanLibraryItem(task) {
-    const { libraryItemId, isFile, originalTrackPaths, targetFilepath } = task.data
-    if (isFile && fileUtils.filePathToPOSIX(originalTrackPaths[0]) !== fileUtils.filePathToPOSIX(targetFilepath)) {
-      // Single-file item whose file was renamed (e.g. book.mp3 -> book.m4b): the watcher reports the rename
-      // and rescans it with the new path. Scanning here too could race with the watcher's pending update.
-      Logger.debug(`[AbMergeManager] Single-file item "${libraryItemId}" was renamed, leaving the rescan to the watcher`)
-      return
-    }
+    const { libraryItemId, isFile, targetFilepath } = task.data
     // The item scanner treats the item path as a folder unless told otherwise, which would drop the
-    // single file from the item and mark it missing
+    // single file from the item and mark it missing. A renamed single file (book.mp3 -> book.m4b) is
+    // scanned at its new path, the watcher may be disabled.
     const updateLibraryItemDetails = isFile ? { path: fileUtils.filePathToPOSIX(targetFilepath), isFile: true } : null
     try {
-      await this.scanItem(libraryItemId, updateLibraryItemDetails)
+      await require('../scanner/LibraryItemScanner').scanLibraryItem(libraryItemId, updateLibraryItemDetails)
     } catch (error) {
       Logger.error(`[AbMergeManager] Failed to rescan library item "${libraryItemId}" after m4b encode`, error)
     }

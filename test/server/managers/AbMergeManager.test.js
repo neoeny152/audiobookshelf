@@ -14,6 +14,7 @@ const ffmpegHelpers = require('../../../server/utils/ffmpegHelpers')
 const AudioFileScanner = require('../../../server/scanner/AudioFileScanner')
 const BookScanner = require('../../../server/scanner/BookScanner')
 const LibraryItemScanner = require('../../../server/scanner/LibraryItemScanner')
+const Watcher = require('../../../server/Watcher')
 const AudioFile = require('../../../server/objects/files/AudioFile')
 const { filePathToPOSIX } = require('../../../server/utils/fileUtils')
 
@@ -61,6 +62,8 @@ describe('AbMergeManager', () => {
     sinon.stub(SocketAuthority, 'adminEmitter')
     sinon.stub(SocketAuthority, 'emitter')
     sinon.stub(SocketAuthority, 'libraryItemEmitter')
+    sinon.stub(Watcher, 'addIgnoreDir')
+    sinon.stub(Watcher, 'removeIgnoreDir')
     sinon.stub(ffmpegHelpers, 'writeFFMetadataFile').resolves(true)
     sinon.stub(ffmpegHelpers, 'addCoverAndMetadataToFile').resolves()
     // The encode writes the new m4b to the item cache: AAC at 96 kbit/s
@@ -103,77 +106,63 @@ describe('AbMergeManager', () => {
     return { id: 'li1', libraryId: 'lib1', path: itemPath, isFile, media }
   }
 
-  function makeManager(overrides = {}) {
-    const watcher = { addIgnoreDir: sinon.stub(), removeIgnoreDir: sinon.stub() }
-    const deps = { scanItem: sinon.stub().resolves(), watcher, ...overrides }
-    return { manager: new AbMergeManager(deps), deps }
-  }
-
   describe('rescan after encode', () => {
+    let scanItem
+
+    beforeEach(() => {
+      scanItem = sinon.stub(LibraryItemScanner, 'scanLibraryItem').resolves()
+    })
+
     it('rescans the item while the watcher ignores its folder, before the task is finished', async () => {
-      const { manager, deps } = makeManager()
       const libraryItem = stubItem()
       let taskFinishedAtScan = null
-      deps.scanItem.callsFake(async () => {
+      scanItem.callsFake(async () => {
         taskFinishedAtScan = TaskManager.tasks.length === 0
       })
 
-      await runEncode(manager, libraryItem)
+      await runEncode(new AbMergeManager(), libraryItem)
 
-      expect(deps.scanItem.calledOnceWith('li1', null)).to.be.true
+      expect(scanItem.calledOnceWith('li1', null)).to.be.true
       expect(taskFinishedAtScan).to.equal(false)
-      expect(deps.watcher.addIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
-      expect(deps.watcher.removeIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
-      expect(deps.watcher.addIgnoreDir.calledBefore(deps.scanItem)).to.be.true
-      expect(deps.watcher.removeIgnoreDir.calledAfter(deps.scanItem)).to.be.true
+      expect(Watcher.addIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
+      expect(Watcher.removeIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
+      expect(Watcher.addIgnoreDir.calledBefore(scanItem)).to.be.true
+      expect(Watcher.removeIgnoreDir.calledAfter(scanItem)).to.be.true
       expect(TaskManager.tasks).to.have.length(0)
     })
 
     it('finishes the task when the rescan fails', async () => {
-      const { manager, deps } = makeManager({ scanItem: sinon.stub().rejects(new Error('boom')) })
+      scanItem.rejects(new Error('boom'))
       const finished = sinon.spy(TaskManager, 'taskFinished')
 
-      await runEncode(manager, stubItem())
+      await runEncode(new AbMergeManager(), stubItem())
 
       expect(finished.calledOnce).to.be.true
       expect(finished.firstCall.args[0].isFailed).to.be.false
-      expect(deps.watcher.removeIgnoreDir.calledOnce).to.be.true
+      expect(Watcher.removeIgnoreDir.calledOnce).to.be.true
     })
 
     it('still rescans and releases the folder when moving the m4b fails', async () => {
-      const { manager, deps } = makeManager()
       const fsExtra = require('../../../server/libs/fsExtra')
       sinon.stub(fsExtra, 'rename').rejects(new Error('disk full'))
       const finished = sinon.spy(TaskManager, 'taskFinished')
 
-      await runEncode(manager, stubItem({ trackNames: ['Part 1.mp3', 'Part 2.mp3'] }))
+      await runEncode(new AbMergeManager(), stubItem({ trackNames: ['Part 1.mp3', 'Part 2.mp3'] }))
 
       expect(finished.calledOnce).to.be.true
       expect(finished.firstCall.args[0].isFailed).to.be.true
-      expect(deps.scanItem.calledOnce).to.be.true
-      expect(deps.watcher.removeIgnoreDir.calledOnce).to.be.true
+      expect(scanItem.calledOnce).to.be.true
+      expect(Watcher.removeIgnoreDir.calledOnce).to.be.true
     })
 
     it('single-file item kept at the same path: rescans without ignoring the library folder', async () => {
-      const { manager, deps } = makeManager()
-
       const libraryItem = stubItem({ isFile: true, trackNames: ['Book.m4b'] })
-      await runEncode(manager, libraryItem)
+      await runEncode(new AbMergeManager(), libraryItem)
 
-      expect(deps.scanItem.calledOnce).to.be.true
-      expect(deps.scanItem.firstCall.args).to.deep.equal(['li1', { path: filePathToPOSIX(libraryItem.path), isFile: true }])
-      expect(deps.watcher.addIgnoreDir.called).to.be.false
-      expect(deps.watcher.removeIgnoreDir.called).to.be.false
-    })
-
-    it('single-file item renamed to .m4b: leaves the rescan to the watcher', async () => {
-      const { manager, deps } = makeManager()
-
-      await runEncode(manager, stubItem({ isFile: true, trackNames: ['Book.mp3'] }))
-
-      expect(deps.scanItem.called).to.be.false
-      expect(deps.watcher.addIgnoreDir.called).to.be.false
-      expect(fs.existsSync(Path.join(libraryDir, 'Book.m4b'))).to.be.true
+      expect(scanItem.calledOnce).to.be.true
+      expect(scanItem.firstCall.args).to.deep.equal(['li1', { path: filePathToPOSIX(libraryItem.path), isFile: true }])
+      expect(Watcher.addIgnoreDir.called).to.be.false
+      expect(Watcher.removeIgnoreDir.called).to.be.false
     })
   })
 
@@ -242,9 +231,7 @@ describe('AbMergeManager', () => {
     }
 
     async function encodeWithRealScanner(libraryItem) {
-      const watcher = { addIgnoreDir: sinon.stub(), removeIgnoreDir: sinon.stub() }
-      const manager = new AbMergeManager({ watcher })
-      await runEncode(manager, libraryItem)
+      await runEncode(new AbMergeManager(), libraryItem)
       return Database.libraryItemModel.getExpandedById(libraryItem.id)
     }
 
@@ -302,6 +289,18 @@ describe('AbMergeManager', () => {
       expect(audioFile.codec).to.equal('aac')
       expect(updated.libraryFiles.map((lf) => lf.metadata.filename)).to.deep.equal(['Book.m4b'])
       expect(emittedItem(libraryItem.id).media.audioFiles[0].bitRate).to.equal(96000)
+    })
+
+    it('single-file mp3 renamed to .m4b with the watcher disabled: the item moves to the new file', async () => {
+      const libraryItem = await createScannedItem(['Book.mp3'], true)
+
+      const updated = await encodeWithRealScanner(libraryItem)
+
+      expect(!!updated.isMissing).to.be.false
+      expect(updated.path).to.equal(filePathToPOSIX(Path.join(libraryDir, 'Book.m4b')))
+      expect(updated.media.audioFiles).to.have.length(1)
+      expect(updated.media.audioFiles[0].metadata.filename).to.equal('Book.m4b')
+      expect(updated.media.audioFiles[0].codec).to.equal('aac')
     })
   })
 })
