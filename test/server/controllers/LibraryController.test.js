@@ -266,3 +266,92 @@ describe('LibraryController.downloadMultiple', () => {
     })
   })
 })
+
+describe('LibraryController.getNeedsWork', () => {
+  let library
+  let folder
+  let user
+
+  async function createBook(title, values = {}) {
+    const book = await Database.bookModel.create({ title, audioFiles: [], tags: [], narrators: [], genres: [], chapters: [], ...values })
+    return Database.libraryItemModel.create({ libraryFiles: [], mediaId: book.id, mediaType: 'book', libraryId: library.id, libraryFolderId: folder.id })
+  }
+
+  // One MP3 with a seek header and one chapter from the user: only the match decides what is wrong
+  function audioBook(values = {}) {
+    const audioFiles = [{ index: 1, ino: 'ino1', duration: 1000, codec: 'mp3', mp3SeekIndex: 'xing', metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/a.mp3', size: 1, mtimeMs: 2 } }]
+    return { audioFiles, duration: 1000, chapters: [{ id: 0, start: 0, end: 1000, title: 'Chapter 1' }], ...values }
+  }
+
+  async function callNeedsWork({ canUpdate = true, targetLibrary = library } = {}) {
+    const res = { status: sinon.stub().returnsThis(), json: sinon.stub().returnsThis(), sendStatus: sinon.stub().returnsThis() }
+    user.permissions = { ...user.permissions, update: canUpdate }
+    await LibraryController.getNeedsWork({ user, library: targetLibrary }, res)
+    return res
+  }
+
+  beforeEach(async () => {
+    global.ServerSettings = {}
+    Database.sequelize = new Sequelize({ dialect: 'sqlite', storage: ':memory:', logging: false })
+    Database.sequelize.uppercaseFirst = (str) => (str ? `${str[0].toUpperCase()}${str.substr(1)}` : '')
+    await Database.buildModels()
+
+    library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book' })
+    folder = await Database.libraryFolderModel.create({ path: '/books', libraryId: library.id })
+    const permissions = { ...Database.userModel.getDefaultPermissionsForUserType('user'), accessExplicitContent: false }
+    user = await Database.userModel.create({ username: 'neo', pash: 'hash', token: 'token', type: 'user', isActive: true, permissions, bookmarks: [], extraData: {} })
+    sinon.stub(Logger, 'warn')
+  })
+
+  afterEach(async () => {
+    sinon.restore()
+    await Database.sequelize.sync({ force: true })
+  })
+
+  it('needs canUpdate and a book library', async () => {
+    expect((await callNeedsWork({ canUpdate: false })).sendStatus.calledWith(403)).to.be.true
+    const podcasts = await Database.libraryModel.create({ name: 'Podcasts', mediaType: 'podcast' })
+    expect((await callNeedsWork({ targetLibrary: podcasts })).status.calledWith(400)).to.be.true
+  })
+
+  it('lists the accessible books with an issue other than unverified chapters, by title, in one query', async () => {
+    const redRising = await createBook('Red Rising', audioBook())
+    const goldenSon = await createBook('Golden Son', audioBook())
+    await createBook('Morning Star', audioBook({ asin: 'B00I2VWW5U' }))
+    await createBook('Iron Gold')
+    await createBook('Dark Age', audioBook({ explicit: true }))
+    const findAll = sinon.spy(Database.libraryItemModel, 'findAll')
+
+    const { items } = (await callNeedsWork()).json.firstCall.args[0]
+    expect(findAll.calledOnce).to.be.true
+    expect(items.map((item) => [item.libraryItemId, item.title, item.issues, item.next])).to.deep.equal([
+      [goldenSon.id, 'Golden Son', ['unmatched'], 'match'],
+      [redRising.id, 'Red Rising', ['unmatched'], 'match']
+    ])
+    expect(items[0]).to.have.keys('libraryItemId', 'title', 'issues', 'next', 'duration', 'match', 'chapters')
+  })
+
+  it('is no longer cached once a pipeline state changes (it is kept outside the database)', () => {
+    const AutoPipelineManager = require('../../../server/managers/AutoPipelineManager')
+    const ApiCacheManager = require('../../../server/managers/ApiCacheManager')
+    const SocketAuthority = require('../../../server/SocketAuthority')
+    sinon.stub(SocketAuthority, 'emitter')
+    const apiCacheManager = new ApiCacheManager()
+    const cached = { body: '{}', headers: {}, statusCode: 200 }
+    apiCacheManager.cache.set(JSON.stringify({ user: 'neo', url: `/libraries/${library.id}/needs-work` }), cached)
+    apiCacheManager.cache.set(JSON.stringify({ user: 'neo', url: `/libraries/${library.id}/series` }), cached)
+    sinon.stub(AutoPipelineManager, 'apiRouter').value({ apiCacheManager })
+
+    AutoPipelineManager.emitState({ libraryItemId: 'li-1', libraryId: library.id, status: 'done' })
+    expect([...apiCacheManager.cache.keys()].map((key) => JSON.parse(key).url)).to.deep.equal([`/libraries/${library.id}/series`])
+  })
+
+  it('is routed', () => {
+    const ApiRouter = require('../../../server/routers/ApiRouter')
+    const Auth = require('../../../server/Auth')
+    const ApiCacheManager = require('../../../server/managers/ApiCacheManager')
+    const apiRouter = new ApiRouter({ auth: new Auth(), apiCacheManager: new ApiCacheManager() })
+    const routes = apiRouter.router._router.stack.filter((layer) => layer.route?.methods.get).map((layer) => [layer.route.path, layer.route.stack[layer.route.stack.length - 1].handle.name])
+    expect(routes).to.deep.include(['/libraries/:id/needs-work', 'bound getNeedsWork'])
+  })
+})

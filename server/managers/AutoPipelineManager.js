@@ -60,6 +60,8 @@ const SWEEP_BATCH = 10
 const MAX_SNAP_ROUNDS = 3
 const SPEECH_CHUNK = chapterbotSpeech.MAX_VERIFY_STARTS
 const MIN = 60 * 1000
+/** Cached GET /api/libraries/:id/needs-work responses (ApiCacheManager keys hold the URL without /api) */
+const NEEDS_WORK_URL_RE = /^\/libraries\/[^/]+\/needs-work/
 
 const DEFAULT_TIMING = Object.freeze({
   /** the two fingerprint checks of the waiting step are this far apart */
@@ -298,6 +300,8 @@ class AutoPipelineManager extends EventEmitter {
 
   emitState(state) {
     const payload = this.toJSON(state)
+    // The library's needs-work list reads the state, which is kept outside the database the API cache watches
+    this.apiRouter?.apiCacheManager?.clearByUrlPattern(NEEDS_WORK_URL_RE)
     SocketAuthority.emitter('pipeline_item_updated', payload, (user) => !!user.canUpdate && typeof user.checkCanAccessLibrary === 'function' && user.checkCanAccessLibrary(state.libraryId))
     this.emit('updated', payload)
   }
