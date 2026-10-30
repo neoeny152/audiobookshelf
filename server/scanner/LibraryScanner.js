@@ -685,6 +685,7 @@ class LibraryScanner {
     // If something was updated then reset numIssues filter data for library
     if (resetFilterData) {
       await Database.resetLibraryIssuesFilterData(libraryId)
+      require('../managers/DuplicateItemManager').scheduleCheck(libraryId)
     }
   }
 

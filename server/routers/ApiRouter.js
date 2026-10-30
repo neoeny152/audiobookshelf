@@ -13,6 +13,7 @@ const date = require('../libs/dateAndTime')
 
 const CacheManager = require('../managers/CacheManager')
 const RssFeedManager = require('../managers/RssFeedManager')
+const DuplicateItemManager = require('../managers/DuplicateItemManager')
 
 const LibraryController = require('../controllers/LibraryController')
 const UserController = require('../controllers/UserController')
@@ -444,6 +445,7 @@ class ApiRouter {
     }
 
     await Database.libraryItemModel.removeById(libraryItemId)
+    DuplicateItemManager.scheduleCheck(libraryId)
 
     SocketAuthority.emitter('item_removed', {
       id: libraryItemId,

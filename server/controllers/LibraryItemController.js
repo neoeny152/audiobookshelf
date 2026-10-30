@@ -895,6 +895,7 @@ class LibraryItemController {
     }
 
     await Database.resetLibraryIssuesFilterData(libraryId)
+    DuplicateItemManager.scheduleCheck(libraryId)
   }
 
   /**
@@ -916,6 +917,7 @@ class LibraryItemController {
 
     const result = await LibraryItemScanner.scanLibraryItem(req.libraryItem.id)
     await Database.resetLibraryIssuesFilterData(req.libraryItem.libraryId)
+    DuplicateItemManager.scheduleCheck(req.libraryItem.libraryId)
     res.json({
       result: Object.keys(ScanResult).find((key) => ScanResult[key] == result)
     })

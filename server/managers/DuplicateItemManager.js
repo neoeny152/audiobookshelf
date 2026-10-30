@@ -7,8 +7,8 @@ const { findDuplicateGroups } = require('../utils/duplicateItems')
 /**
  * Possible duplicate items (#5676)
  *
- * After a scan (or anything else that resets the issues count) the library is re-checked:
- * one query loads the matching fields for every item, utils/duplicateItems groups them in memory,
+ * After a scan, a match, an edit or a removal the library is re-checked:
+ * two queries load the matching fields for every item, utils/duplicateItems groups them in memory,
  * and the groups are stored in libraryItemDuplicates. A group an admin dismissed ("not a duplicate") is kept, marked
  * inactive while its items are not grouped exactly like that, until one of its items is removed from the library.
  * A group with another member is a new group and is flagged again. Nothing is ever deleted or merged.
@@ -71,7 +71,7 @@ class DuplicateItemManager {
   }
 
   /**
-   * Debounced: a scan resets the issues count many times, one check runs after it settles
+   * Debounced: a batch of removals or edits schedules many checks, one runs after it settles
    * @param {string} libraryId
    */
   scheduleCheck(libraryId) {
@@ -165,7 +165,7 @@ class DuplicateItemManager {
   }
 
   /**
-   * One query for the fields duplicate matching needs. Missing and invalid items are left out:
+   * The fields duplicate matching needs, primary authors loaded separately. Missing and invalid items are left out:
    * they already show under Issues.
    *
    * @param {string} libraryId
@@ -184,13 +184,23 @@ class DuplicateItemManager {
     }
 
     const [rows] = await Database.sequelize.query(
-      `SELECT li.id, b.title, b.asin, b.isbn, b.duration, (b.ebookFile IS NOT NULL) AS hasEbook,
-        (SELECT a.name FROM bookAuthors ba INNER JOIN authors a ON a.id = ba.authorId WHERE ba.bookId = b.id ORDER BY ba.createdAt ASC LIMIT 1) AS author
+      `SELECT li.id, b.id AS bookId, b.title, b.asin, b.isbn, b.duration, (b.ebookFile IS NOT NULL) AS hasEbook
       FROM libraryItems li INNER JOIN books b ON b.id = li.mediaId
       WHERE li.libraryId = :libraryId AND li.mediaType = 'book' AND IFNULL(li.isMissing, 0) = 0 AND IFNULL(li.isInvalid, 0) = 0`,
       { replacements: { libraryId } }
     )
-    return rows.map((row) => ({ ...row, hasEbook: !!row.hasEbook }))
+    const [authorRows] = await Database.sequelize.query(
+      `SELECT ba.bookId, a.name
+      FROM bookAuthors ba INNER JOIN authors a ON a.id = ba.authorId INNER JOIN libraryItems li ON li.mediaId = ba.bookId
+      WHERE li.libraryId = :libraryId
+      ORDER BY ba.createdAt ASC`,
+      { replacements: { libraryId } }
+    )
+    const primaryAuthors = new Map()
+    for (const { bookId, name } of authorRows) {
+      if (!primaryAuthors.has(bookId)) primaryAuthors.set(bookId, name)
+    }
+    return rows.map(({ bookId, ...row }) => ({ ...row, author: primaryAuthors.get(bookId) || null, hasEbook: !!row.hasEbook }))
   }
 
   /**

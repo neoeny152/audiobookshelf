@@ -716,9 +716,6 @@ class Database {
    * @param {string} libraryId
    */
   async resetLibraryIssuesFilterData(libraryId) {
-    // Items were added, removed or rescanned: re-check for possible duplicates (#5676, debounced)
-    require('./managers/DuplicateItemManager').scheduleCheck(libraryId)
-
     if (!this.libraryFilterData[libraryId]) return // Do nothing if filter data is not set
 
     this.libraryFilterData[libraryId].numIssues = await this.libraryItemModel.count({
