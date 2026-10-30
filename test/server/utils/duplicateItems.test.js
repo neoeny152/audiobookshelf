@@ -69,8 +69,16 @@ describe('duplicateItems', () => {
       expect(findDuplicateGroups([book('a'), book('b', { duration: 50000 })])).to.deep.equal([])
     })
 
-    it('needs an author for title matching', () => {
-      expect(findDuplicateGroups([book('a', { author: null }), book('b', { author: '' })])).to.deep.equal([])
+    it('matches titles without an author only to other items without one', () => {
+      const groups = findDuplicateGroups([book('a', { author: null }), book('b', { author: '' }), book('c')])
+      expect(groups).to.have.length(1)
+      expect(groups[0].itemIds).to.deep.equal(['a', 'b'])
+    })
+
+    it('does not chain durations past 1% of the shortest copy', () => {
+      const groups = findDuplicateGroups([book('a', { duration: 36000 }), book('b', { duration: 36300 }), book('c', { duration: 36600 })])
+      expect(groups).to.have.length(1)
+      expect(groups[0].itemIds).to.deep.equal(['a', 'b'])
     })
 
     it('groups by ASIN or ISBN regardless of title and duration, strongest match type first', () => {

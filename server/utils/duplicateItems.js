@@ -8,7 +8,7 @@
  * Match types, strongest first:
  *  - asin:  same ASIN
  *  - isbn:  same ISBN (ISBN-10 and ISBN-13 compared as ISBN-13)
- *  - title: same normalized title + primary author, total duration within DURATION_TOLERANCE
+ *  - title: same normalized title + primary author (or no author on either), total duration within DURATION_TOLERANCE
  *  - feed:  podcasts with the same RSS feed URL or iTunes ID
  *
  * Books only match within the same format: two audiobooks, or two ebook-only items.
@@ -242,16 +242,19 @@ function findDuplicateGroups(candidates, mediaType = 'book') {
       if (isbn) addToBucket(byIsbn, `${format}|${isbn}`, candidate)
       const title = normalizeTitle(candidate.title)
       const author = normalizeAuthor(candidate.author)
-      if (title && author) addToBucket(byTitle, `${format}|${title}|${author}`, candidate)
+      if (title) addToBucket(byTitle, `${format}|${title}|${author}`, candidate)
     }
     linkBuckets(byAsin, 'asin')
     linkBuckets(byIsbn, 'isbn')
-    // Same title and author: only the same book when durations agree (a dramatized edition or another translation runs longer)
+    // Same title and author: only the same book when durations agree (a dramatized edition or another translation runs longer).
+    // Each run is measured from its shortest item so small steps do not chain past the tolerance.
     for (const bucket of byTitle.values()) {
       if (bucket.length < 2) continue
       bucket.sort((a, b) => (Number(a.duration) || 0) - (Number(b.duration) || 0))
+      let shortest = bucket[0]
       for (let i = 1; i < bucket.length; i++) {
-        if (durationsMatch(bucket[i - 1].duration, bucket[i].duration)) union(bucket[i - 1].id, bucket[i].id, 'title')
+        if (durationsMatch(shortest.duration, bucket[i].duration)) union(shortest.id, bucket[i].id, 'title')
+        else shortest = bucket[i]
       }
     }
   }
@@ -283,7 +286,6 @@ function findDuplicateGroups(candidates, mediaType = 'book') {
 
 module.exports = {
   MATCH_TYPES,
-  DURATION_TOLERANCE,
   normalizeTitle,
   normalizeAuthor,
   normalizeAsin,
