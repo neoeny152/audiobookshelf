@@ -693,6 +693,21 @@ describe('Chapterbot EPUB endpoints', () => {
       expect(clientEmitter.calledOnceWith('user-1', 'chapterbot_epub_done')).to.equal(true)
     })
 
+    it('a job started by the auto pipeline stores the read-along data too, before its ended event', async () => {
+      let storedAtEnd = null
+      ChapterbotEpubManager.on('ended', () => {
+        const dir = Path.join(metadataDir, 'items', bookItemId, 'readalong')
+        storedAtEnd = fs.existsSync(dir) ? fs.readdirSync(dir) : []
+      })
+      const libraryItem = await Database.libraryItemModel.getExpandedById(bookItemId)
+      await ChapterbotEpubManager.start(libraryItem, null, { origin: 'pipeline' })
+      sidecar.state = { ...sidecar.state, status: 'done', progress: 1 }
+      await until(() => ChapterbotEpubManager.jobs.get(bookItemId).status === 'done')
+      const { lf } = await placedEpub()
+      expect(JSON.parse(fs.readFileSync(storedPath(lf.ino), 'utf8'))).to.deep.equal({ epubPath: EPUB_NAME, ...READ_ALONG })
+      expect(storedAtEnd).to.deep.equal([`${lf.ino}.json`])
+    })
+
     it('saves the EPUB without read-along data when the sidecar has none (older sidecar)', async () => {
       sidecar.readAlong = null
       await runJob()
@@ -968,6 +983,10 @@ describe('Chapterbot EPUB endpoints', () => {
         expect(ended[0]).to.include({ status: 'done', fileName: 'Black Ice (from audio).epub', origin: 'user', userId: 'user-1', ebookRole: 'primary' })
         expect((await Database.libraryItemModel.getExpandedById(bookItemId)).media.ebookFile.metadata.filename).to.equal('Black Ice (from audio).epub')
         expect(fs.existsSync(Path.join(itemDir, 'Black Ice (from audio).epub'))).to.equal(true)
+        // the read-along data is saved for a job followed again after the restart too
+        const li = await Database.libraryItemModel.getExpandedById(bookItemId)
+        const ino = li.libraryFiles.find((f) => f.metadata.filename === 'Black Ice (from audio).epub').ino
+        expect(JSON.parse(fs.readFileSync(Path.join(metadataDir, 'items', bookItemId, 'readalong', `${ino}.json`), 'utf8'))).to.deep.equal({ epubPath: 'Black Ice (from audio).epub', ...READ_ALONG })
         expect(clientEmitter.calledWith('user-1', 'chapterbot_epub_done')).to.equal(true)
         expect((await restarted.getCurrent(bookItemId)).status).to.equal('done')
         await restarted.persistChain

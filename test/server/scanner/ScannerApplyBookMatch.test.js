@@ -75,6 +75,21 @@ describe('Scanner.applyBookMatch and applyChapters (shared by quick match, the c
     expect(li.media.publisher).to.equal('Pub')
   })
 
+  it('runs author/series links through the serialized queue: parallel matches of one book make no duplicate join rows (#5215 #5319)', async () => {
+    const spy = sinon.spy(Scanner, 'runBookLinkUpdate')
+    // override: the author list is replaced too. The series name differs only in case from an existing one: one series row, one link (#4255)
+    await Database.seriesModel.create({ name: 'ice', libraryId })
+    const opts = () => ({ overrideDetails: true })
+    await Promise.all([Scanner.applyBookMatch(apiRouterCtx, await item(), match({ author: 'New Author' }), opts()), Scanner.applyBookMatch(apiRouterCtx, await item(), match({ author: 'New Author' }), opts())])
+    expect(spy.callCount).to.equal(2)
+    const li = await item()
+    expect(li.media.authors.map((a) => a.name)).to.deep.equal(['New Author'])
+    expect(await Database.seriesModel.count()).to.equal(1)
+    expect((await Database.bookSeriesModel.findAll({ raw: true })).filter((r) => r.bookId === li.media.id)).to.have.length(1)
+    expect((await Database.authorModel.findAll({ raw: true })).filter((r) => r.name === 'New Author')).to.have.length(1)
+    expect((await Database.bookAuthorModel.findAll({ raw: true })).filter((r) => r.bookId === li.media.id)).to.have.length(1)
+  })
+
   it('quick match applies the first search result through applyBookMatch', async () => {
     sinon.stub(BookFinder, 'search').resolves([match({ asin: 'B0FIRST001' }), match({ asin: 'B0SECOND01' })])
     const spy = sinon.spy(Scanner, 'applyBookMatch')
