@@ -1204,11 +1204,7 @@ module.exports = {
     if (libraryItemFileSearch.isFileSearchQuery(query) && itemMatches.length < maxResults) {
       const matchedBookIds = itemMatches.map((match) => match.libraryItem.media.id)
       const fileMatches = await this.findBookSearchItems(
-        [
-          libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem'),
-          ...(matchedBookIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedBookIds } }] : []),
-          ...userPermissionBookWhere.bookWhere
-        ],
+        [libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem', query), ...(matchedBookIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedBookIds } }] : []), ...userPermissionBookWhere.bookWhere],
         {
           ...userPermissionBookWhere.replacements,
           fileSearchPattern: libraryItemFileSearch.getFileSearchLikePattern(query)

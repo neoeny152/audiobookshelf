@@ -50,17 +50,34 @@ function getFileSearchLikePattern(query) {
 }
 
 /**
+ * libraryFiles is stored as JSON text written with JSON.stringify, which only escapes
+ * double quotes, backslashes and control characters. For any other query, a match in a
+ * file path is also a match in the raw column text, so a plain LIKE on the column can
+ * skip parsing the JSON of rows that cannot match.
+ *
+ * @param {string} query
+ * @returns {boolean}
+ */
+function canPrefilterLibraryFilesText(query) {
+  // Backslashes are already converted to "/" by normalizeFileQuery
+  return !/["\u0000-\u001f]/.test(normalizeFileQuery(query))
+}
+
+/**
  * Sequelize where clause matching a library item by its folder/file path or any of its library file paths.
  * Uses the replacement :fileSearchPattern (see getFileSearchLikePattern).
  *
  * @param {string} [libraryItemAlias=libraryItem] table alias of the libraryItems table in the query
+ * @param {string} [query] the search query, used to skip JSON parsing of rows that cannot match
  * @returns {import('sequelize').WhereOptions}
  */
-function getLibraryItemFileMatchWhere(libraryItemAlias = 'libraryItem') {
+function getLibraryItemFileMatchWhere(libraryItemAlias = 'libraryItem', query = null) {
   const li = `\`${libraryItemAlias}\``
-  const literal = Sequelize.literal(
-    `(${li}.path LIKE :fileSearchPattern ESCAPE '!' OR EXISTS (SELECT 1 FROM json_each(${li}.libraryFiles) WHERE json_valid(${li}.libraryFiles) AND json_extract(json_each.value, '$.metadata.path') LIKE :fileSearchPattern ESCAPE '!'))`
-  )
+  let filesMatch = `EXISTS (SELECT 1 FROM json_each(${li}.libraryFiles) WHERE json_valid(${li}.libraryFiles) AND json_extract(json_each.value, '$.metadata.path') LIKE :fileSearchPattern ESCAPE '!')`
+  if (query && canPrefilterLibraryFilesText(query)) {
+    filesMatch = `(${li}.libraryFiles LIKE :fileSearchPattern ESCAPE '!' AND ${filesMatch})`
+  }
+  const literal = Sequelize.literal(`(${li}.path LIKE :fileSearchPattern ESCAPE '!' OR ${filesMatch})`)
   // Wrapped so it can be used as an element of a where array
   return { [Sequelize.Op.and]: [literal] }
 }
@@ -99,6 +116,7 @@ module.exports = {
   normalizeFileQuery,
   isFileSearchQuery,
   getFileSearchLikePattern,
+  canPrefilterLibraryFilesText,
   getLibraryItemFileMatchWhere,
   getMatchedFilePath
 }

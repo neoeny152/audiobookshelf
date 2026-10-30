@@ -37,14 +37,21 @@ describe('libraryItemFileSearch helpers', () => {
     })
   })
 
+  describe('canPrefilterLibraryFilesText', () => {
+    it('is false for queries containing characters JSON.stringify escapes', () => {
+      expect(libraryItemFileSearch.canPrefilterLibraryFilesText('golden son.mp3')).to.be.true
+      expect(libraryItemFileSearch.canPrefilterLibraryFilesText('Café/Ünïcode.mp3')).to.be.true
+      expect(libraryItemFileSearch.canPrefilterLibraryFilesText('Pierce Brown\\Golden Son')).to.be.true
+      expect(libraryItemFileSearch.canPrefilterLibraryFilesText('say "hi".mp3')).to.be.false
+      expect(libraryItemFileSearch.canPrefilterLibraryFilesText('tab\there.mp3')).to.be.false
+    })
+  })
+
   describe('getMatchedFilePath', () => {
     const libraryItem = {
       path: '/books/Pierce Brown/Golden Son',
       relPath: 'Pierce Brown/Golden Son',
-      libraryFiles: [
-        { metadata: { filename: 'cover.jpg', path: '/books/Pierce Brown/Golden Son/cover.jpg', relPath: 'cover.jpg' } },
-        { metadata: { filename: 'Golden Son 01.mp3', path: '/books/Pierce Brown/Golden Son/Golden Son 01.mp3', relPath: 'Golden Son 01.mp3' } }
-      ]
+      libraryFiles: [{ metadata: { filename: 'cover.jpg', path: '/books/Pierce Brown/Golden Son/cover.jpg', relPath: 'cover.jpg' } }, { metadata: { filename: 'Golden Son 01.mp3', path: '/books/Pierce Brown/Golden Son/Golden Son 01.mp3', relPath: 'Golden Son 01.mp3' } }]
     }
 
     it('returns the matching file relative path', () => {
@@ -200,6 +207,22 @@ describe('library search by file name or path (#5680)', () => {
   it('keeps the existing response shape', async () => {
     const results = await libraryItemFilters.search(adminUser, library, 'lalalalala.mp3', 12)
     expect(results).to.have.all.keys('book', 'narrators', 'tags', 'genres', 'series', 'authors')
+  })
+
+  it('matches file names containing double quotes and non-ASCII characters', async () => {
+    await createBook('Quote Book', 'Quotes/Book', ['Say "Hi".mp3'])
+    await createBook('Cafe Book', 'Cafe/Book', ['Café Ünïcode.mp3'])
+    const quoted = await libraryItemFilters.search(adminUser, library, 'say "hi".mp3', 12)
+    expect(titles(quoted)).to.deep.equal(['Quote Book'])
+    expect(quoted.book[0].matchText).to.equal('Say "Hi".mp3')
+    const unicode = await libraryItemFilters.search(adminUser, library, 'Café Ünïcode.mp3', 12)
+    expect(titles(unicode)).to.deep.equal(['Cafe Book'])
+  })
+
+  it('only matches file paths, not other stored file fields', async () => {
+    // "Singer/Songbook-0" is the ino of a file in the raw libraryFiles JSON, but not part of any path
+    const results = await libraryItemFilters.search(adminUser, library, 'Singer/Songbook-0', 12)
+    expect(results.book).to.have.length(0)
   })
 
   it('finds podcasts by episode file name', async () => {

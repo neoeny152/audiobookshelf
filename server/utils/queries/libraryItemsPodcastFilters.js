@@ -420,11 +420,7 @@ module.exports = {
     if (libraryItemFileSearch.isFileSearchQuery(query) && itemMatches.length < maxResults) {
       const matchedPodcastIds = itemMatches.map((match) => match.libraryItem.media.id)
       const filePodcasts = await Database.podcastModel.findAll({
-        where: [
-          libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem'),
-          ...(matchedPodcastIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedPodcastIds } }] : []),
-          ...userPermissionPodcastWhere.podcastWhere
-        ],
+        where: [libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem', query), ...(matchedPodcastIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedPodcastIds } }] : []), ...userPermissionPodcastWhere.podcastWhere],
         replacements: {
           ...userPermissionPodcastWhere.replacements,
           fileSearchPattern: libraryItemFileSearch.getFileSearchLikePattern(query)
