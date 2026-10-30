@@ -27,7 +27,10 @@ const CoverManager = require('../managers/CoverManager')
 const ShareManager = require('../managers/ShareManager')
 const ChapterbotEpubManager = require('../managers/ChapterbotEpubManager')
 const DuplicateItemManager = require('../managers/DuplicateItemManager')
+const AutoPipelineManager = require('../managers/AutoPipelineManager')
 const { applyChapters } = require('../utils/applyChapters')
+const { getItemHealth } = require('../utils/itemHealth')
+const { normalizeAutoPipelineSettings, effectiveProvider, isAudibleProvider } = require('../utils/autoPipeline/settings')
 
 /**
  * @typedef RequestUserObject
@@ -1071,6 +1074,47 @@ class LibraryItemController {
     } finally {
       slot.release()
     }
+  }
+
+  /**
+   * GET: /api/items/:id/health[?measure=1]
+   * Fork only: what is probably wrong with a book (MP3 lengths, match, chapters) and the step that comes first in
+   * fixing it, see utils/itemHealth.js. Reads only the database and memory; measure=1 (admin) first measures MP3s
+   * without a seek header (reads those files once, the result is cached on the audio files).
+   *
+   * @this {import('../routers/ApiRouter')}
+   *
+   * @param {LibraryItemControllerRequest} req
+   * @param {Response} res
+   */
+  async getHealth(req, res) {
+    if (!req.user.canUpdate) {
+      Logger.warn(`[LibraryItemController] User "${req.user.username}" attempted to get the health of an item without update permission`)
+      return res.sendStatus(403)
+    }
+    const libraryItem = req.libraryItem
+    if (!libraryItem.isBook) return res.status(400).json({ error: 'Item is not a book' })
+    const media = libraryItem.media
+    if (req.query.measure === '1') {
+      if (!req.user.isAdminOrUp) return res.sendStatus(403)
+      if (media.hasAudioTracks) await this.mp3SeekIndexManager.getStatus(libraryItem)
+    }
+
+    const library = await Database.libraryModel.findByPk(libraryItem.libraryId)
+    const settings = normalizeAutoPipelineSettings(library?.settings?.autoPipeline)
+    res.json(
+      getItemHealth({
+        libraryItem,
+        pipelineState: AutoPipelineManager.getState(libraryItem.id),
+        scannerChapters: AutoPipelineManager.getScannerChapters(media.title, media.includedAudioFiles),
+        processing: this.mp3SeekIndexManager.getIsLibraryItemQueuedOrProcessing(libraryItem.id),
+        autoFix: {
+          available: AutoPipelineManager.enabled && media.hasAudioTracks && isAudibleProvider(effectiveProvider(library, settings)),
+          autoRepair: settings.autoRepairSeekIndex,
+          minConfidence: AutoPipelineManager.FIX_MIN_CONFIDENCE
+        }
+      })
+    )
   }
 
   /**

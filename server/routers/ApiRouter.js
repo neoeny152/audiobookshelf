@@ -137,6 +137,7 @@ class ApiRouter {
     this.router.get('/items/:id/metadata-object', LibraryItemController.middleware.bind(this), LibraryItemController.getMetadataObject.bind(this))
     this.router.post('/items/:id/chapters', LibraryItemController.middleware.bind(this), LibraryItemController.updateMediaChapters.bind(this))
     this.router.post('/items/:id/chapters/snap', LibraryItemController.middleware.bind(this), LibraryItemController.snapMediaChapters.bind(this))
+    this.router.get('/items/:id/health', LibraryItemController.middleware.bind(this), LibraryItemController.getHealth.bind(this))
     this.router.post('/items/:id/epub', LibraryItemController.middleware.bind(this), LibraryItemController.startEpubJob.bind(this))
     this.router.get('/items/:id/epub', LibraryItemController.middleware.bind(this), LibraryItemController.getCurrentEpubJob.bind(this))
     this.router.get('/items/:id/epub/:jobId', LibraryItemController.middleware.bind(this), LibraryItemController.getEpubJob.bind(this))

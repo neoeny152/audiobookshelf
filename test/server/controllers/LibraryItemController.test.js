@@ -591,4 +591,58 @@ describe('LibraryItemController', () => {
       expect(res500.sendStatus.calledWith(500)).to.be.true
     })
   })
+
+  describe('getHealth', () => {
+    let library
+    let folder
+
+    async function createItem(mediaType, mediaValues = {}) {
+      const media = mediaType === 'book' ? await Database.bookModel.create({ title: 'Red Rising', audioFiles: [], tags: [], narrators: [], genres: [], chapters: [], ...mediaValues }) : await Database.podcastModel.create({ title: 'Podcast', tags: [], genres: [] })
+      const li = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: media.id, mediaType, libraryId: library.id, libraryFolderId: folder.id })
+      return Database.libraryItemModel.getExpandedById(li.id)
+    }
+
+    async function callHealth(libraryItem, { query = {}, canUpdate = true, isAdminOrUp = true } = {}) {
+      const res = { status: sinon.stub().returnsThis(), json: sinon.stub().returnsThis(), sendStatus: sinon.stub().returnsThis() }
+      await LibraryItemController.getHealth.bind(apiRouter)({ user: { username: 'neo', canUpdate, isAdminOrUp }, libraryItem, query }, res)
+      return res
+    }
+
+    beforeEach(async () => {
+      library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book', provider: 'audible' })
+      folder = await Database.libraryFolderModel.create({ path: '/books', libraryId: library.id })
+      sinon.stub(Logger, 'warn')
+    })
+
+    it('needs canUpdate, an admin to measure, and a book', async () => {
+      apiRouter.mp3SeekIndexManager = { getIsLibraryItemQueuedOrProcessing: () => false }
+      const book = await createItem('book')
+      expect((await callHealth(book, { canUpdate: false })).sendStatus.calledWith(403)).to.be.true
+      expect((await callHealth(book, { query: { measure: '1' }, isAdminOrUp: false })).sendStatus.calledWith(403)).to.be.true
+      expect((await callHealth(await createItem('podcast'))).status.calledWith(400)).to.be.true
+    })
+
+    it('measures only with measure=1, and reports a book without audio as healthy', async () => {
+      const getStatus = sinon.stub().resolves({})
+      apiRouter.mp3SeekIndexManager = { getStatus, getIsLibraryItemQueuedOrProcessing: () => false }
+      const audioFiles = [{ index: 1, ino: 'ino1', duration: 1000, codec: 'mp3', mp3SeekIndex: 'none', metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/a.mp3', size: 1, mtimeMs: 2 }, mp3Measured: { duration: 1090, size: 1, mtimeMs: 2 } }]
+      const book = await createItem('book', { audioFiles, duration: 1000 })
+      const health = (await callHealth(book)).json.firstCall.args[0]
+      expect(getStatus.called).to.be.false
+      expect(health).to.include({ libraryItemId: book.id, next: 'repair' })
+      expect(health.duration).to.deep.equal({ stored: 1000, drift: 90, unmeasured: 0 })
+      expect(health.autoFix).to.deep.equal({ available: false, autoRepair: false, minConfidence: 90 })
+
+      await callHealth(book, { query: { measure: '1' } })
+      expect(getStatus.calledOnce).to.be.true
+      const empty = (await callHealth(await createItem('book'), { query: { measure: '1' } })).json.firstCall.args[0]
+      expect(getStatus.calledOnce).to.be.true
+      expect(empty.issues).to.deep.equal([])
+    })
+
+    it('is routed', () => {
+      const routes = apiRouter.router._router.stack.filter((layer) => layer.route?.methods.get).map((layer) => [layer.route.path, layer.route.stack[layer.route.stack.length - 1].handle.name])
+      expect(routes).to.deep.include(['/items/:id/health', 'bound getHealth'])
+    })
+  })
 })
