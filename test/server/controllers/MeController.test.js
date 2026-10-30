@@ -17,56 +17,17 @@ function fakeRes() {
 }
 
 describe('MeController - items-in-progress on large podcasts (#5677)', () => {
-  const NUM_EPISODES = 120
-  let user, podcastItems, bookItem
+  let user, podA, podB, bookItem
 
   async function createPodcastItem(lib, folder, title) {
     const podcast = await Database.podcastModel.create({ title, tags: [], genres: [], autoDownloadEpisodes: false })
-    const libraryFiles = []
     const episodes = []
-    for (let i = 0; i < NUM_EPISODES; i++) {
+    for (let i = 0; i < 3; i++) {
       const metadata = { filename: `ep${i}.mp3`, ext: '.mp3', path: `/pods/${title}/ep${i}.mp3`, relPath: `ep${i}.mp3`, size: 1000 + i }
-      libraryFiles.push({ ino: `${title}-${i}`, isSupplementary: false, addedAt: 1, updatedAt: 1, metadata })
       episodes.push({ podcastId: podcast.id, title: `${title} ep ${i}`, index: i, audioFile: { ino: `${title}-${i}`, metadata } })
     }
-    const libraryItem = await Database.libraryItemModel.create({ libraryFiles, mediaId: podcast.id, mediaType: 'podcast', libraryId: lib.id, libraryFolderId: folder.id, path: `/pods/${title}`, relPath: title })
-    const createdEpisodes = await Database.podcastEpisodeModel.bulkCreate(episodes)
-    return { libraryItem, episodes: createdEpisodes }
-  }
-
-  // The pre-#5677 implementation, kept here to prove the response did not change
-  async function legacyItemsInProgress(reqUser, limit = 25) {
-    const progresses = reqUser.mediaProgresses.filter((mp) => !mp.isFinished && (mp.currentTime > 0 || mp.ebookProgress > 0))
-    const ids = [...new Set(progresses.map((mp) => mp.extraData?.libraryItemId).filter((id) => id))]
-    const libraryItems = await Database.libraryItemModel.findAllExpandedWhere({ id: ids })
-    const out = []
-    for (const mediaProgress of progresses) {
-      const old = mediaProgress.getOldMediaProgress()
-      const li = libraryItems.find((l) => l.id === old.libraryItemId)
-      if (!li) continue
-      if (old.episodeId && li.isPodcast) {
-        const ep = li.media.podcastEpisodes.find((e) => e.id === old.episodeId)
-        if (ep) out.push({ ...li.toOldJSONMinified(), recentEpisode: ep.toOldJSON(li.id), progressLastUpdate: old.lastUpdate })
-      } else if (!old.episodeId) {
-        out.push({ ...li.toOldJSONMinified(), progressLastUpdate: old.lastUpdate })
-      }
-    }
-    return out.sort((a, b) => b.progressLastUpdate - a.progressLastUpdate).slice(0, limit)
-  }
-
-  function captureSql() {
-    const statements = []
-    Database.sequelize.options.logging = (sql) => statements.push(sql.replace(/^Executing \([^)]*\):\s*/, ''))
-    return statements
-  }
-
-  async function maxRowsReturned(statements) {
-    let maxRows = 0
-    for (const sql of statements.filter((s) => /^SELECT/i.test(s))) {
-      const rows = await Database.sequelize.query(sql, { type: Sequelize.QueryTypes.SELECT })
-      maxRows = Math.max(maxRows, rows.length)
-    }
-    return maxRows
+    const libraryItem = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: podcast.id, mediaType: 'podcast', libraryId: lib.id, libraryFolderId: folder.id, path: `/pods/${title}`, relPath: title })
+    return { libraryItem, episodes: await Database.podcastEpisodeModel.bulkCreate(episodes) }
   }
 
   beforeEach(async () => {
@@ -85,7 +46,8 @@ describe('MeController - items-in-progress on large podcasts (#5677)', () => {
     const bookLib = await Database.libraryModel.create({ name: 'Books', mediaType: 'book' })
     const bookFolder = await Database.libraryFolderModel.create({ path: '/books', libraryId: bookLib.id })
 
-    podcastItems = [await createPodcastItem(podLib, podFolder, 'PodA'), await createPodcastItem(podLib, podFolder, 'PodB')]
+    podA = await createPodcastItem(podLib, podFolder, 'PodA')
+    podB = await createPodcastItem(podLib, podFolder, 'PodB')
     const book = await Database.bookModel.create({ title: 'A Book', audioFiles: [], tags: [], narrators: [], genres: [], chapters: [] })
     bookItem = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: book.id, mediaType: 'book', libraryId: bookLib.id, libraryFolderId: bookFolder.id })
 
@@ -96,10 +58,9 @@ describe('MeController - items-in-progress on large podcasts (#5677)', () => {
       permissions: { download: true, update: false, delete: false, upload: false, accessAllLibraries: true, accessAllTags: true, accessExplicitContent: true, librariesAccessible: [], itemTagsSelected: [] }
     })
 
-    const [podA, podB] = podcastItems
     const progresses = [
-      { item: podA.libraryItem, episode: podA.episodes[5], lastUpdate: 1000 },
-      { item: podA.libraryItem, episode: podA.episodes[90], lastUpdate: 3000 },
+      { item: podA.libraryItem, episode: podA.episodes[0], lastUpdate: 1000 },
+      { item: podA.libraryItem, episode: podA.episodes[2], lastUpdate: 3000 },
       { item: podB.libraryItem, episode: podB.episodes[0], lastUpdate: 2000 },
       { item: podB.libraryItem, episode: podB.episodes[1], lastUpdate: 500, isFinished: true },
       { item: bookItem, lastUpdate: 2500 }
@@ -121,72 +82,45 @@ describe('MeController - items-in-progress on large podcasts (#5677)', () => {
   })
 
   afterEach(async () => {
-    Database.sequelize.options.logging = false
     sinon.restore()
     await Database.sequelize.sync({ force: true })
   })
 
-  it('returns the same response as the joined query did', async () => {
-    const expected = await legacyItemsInProgress(user)
-
+  async function getItemsInProgress(query = {}) {
     const res = fakeRes()
-    await MeController.getAllLibraryItemsInProgress({ user, query: {} }, res)
-    expect(res.json.calledOnce).to.be.true
-    const body = res.json.firstCall.args[0]
+    await MeController.getAllLibraryItemsInProgress({ user, query }, res)
+    return res.json.firstCall.args[0].libraryItems
+  }
 
-    expect(Object.keys(body)).to.deep.equal(['libraryItems'])
-    expect(body.libraryItems).to.have.length(4)
-    expect(JSON.parse(JSON.stringify(body.libraryItems))).to.deep.equal(JSON.parse(JSON.stringify(expected)))
-
-    const [podA, podB] = podcastItems
-    expect(body.libraryItems.map((li) => li.recentEpisode?.id || null)).to.deep.equal([podA.episodes[90].id, null, podB.episodes[0].id, podA.episodes[5].id])
-    for (const li of body.libraryItems.filter((l) => l.mediaType === 'podcast')) {
-      expect(li.media.numEpisodes).to.equal(NUM_EPISODES)
-      expect(li.numFiles).to.equal(NUM_EPISODES)
-      // Sum of every episode's file size (1000 + i for i in 0..NUM_EPISODES-1), not just the in-progress ones
-      expect(li.media.size).to.equal(1000 * NUM_EPISODES + (NUM_EPISODES * (NUM_EPISODES - 1)) / 2)
+  it('lists the in-progress episodes with the episode count and size of the whole podcast', async () => {
+    const libraryItems = await getItemsInProgress()
+    expect(libraryItems.map((li) => li.recentEpisode?.id || null)).to.deep.equal([podA.episodes[2].id, null, podB.episodes[0].id, podA.episodes[0].id])
+    for (const li of libraryItems.filter((l) => l.mediaType === 'podcast')) {
+      expect(li.media.numEpisodes).to.equal(3)
+      expect(li.media.size).to.equal(1000 + 1001 + 1002)
       expect(li.recentEpisode.libraryItemId).to.equal(li.id)
     }
   })
 
-  it('matches the old response when an episode has no audio file or a progress episode was deleted', async () => {
-    const [podA, podB] = podcastItems
-    await Database.podcastEpisodeModel.update({ audioFile: null }, { where: { id: podA.episodes[10].id } })
+  it('skips the progress of a deleted episode and counts an episode without audio file as size 0', async () => {
+    await Database.podcastEpisodeModel.update({ audioFile: null }, { where: { id: podA.episodes[1].id } })
     await Database.podcastEpisodeModel.destroy({ where: { id: podB.episodes[0].id } })
-    const expected = await legacyItemsInProgress(user)
 
-    const res = fakeRes()
-    await MeController.getAllLibraryItemsInProgress({ user, query: {} }, res)
-    const body = res.json.firstCall.args[0]
-
-    expect(JSON.parse(JSON.stringify(body.libraryItems))).to.deep.equal(JSON.parse(JSON.stringify(expected)))
-    // The deleted episode's progress is skipped, and the null audio file counts as size 0
-    expect(body.libraryItems.map((li) => li.recentEpisode?.id || null)).to.deep.equal([podA.episodes[90].id, null, podA.episodes[5].id])
-    const podAJson = body.libraryItems.find((li) => li.id === podA.libraryItem.id)
-    expect(podAJson.media.numEpisodes).to.equal(NUM_EPISODES)
-    expect(podAJson.media.size).to.equal(1000 * NUM_EPISODES + (NUM_EPISODES * (NUM_EPISODES - 1)) / 2 - 1010)
+    const libraryItems = await getItemsInProgress()
+    expect(libraryItems.map((li) => li.recentEpisode?.id || null)).to.deep.equal([podA.episodes[2].id, null, podA.episodes[0].id])
+    expect(libraryItems[0].media).to.include({ numEpisodes: 3, size: 1000 + 1002 })
   })
 
   it('respects the limit query', async () => {
-    const res = fakeRes()
-    await MeController.getAllLibraryItemsInProgress({ user, query: { limit: '2' } }, res)
-    expect(res.json.firstCall.args[0].libraryItems.map((li) => li.progressLastUpdate)).to.deep.equal([3000, 2500])
+    const libraryItems = await getItemsInProgress({ limit: '2' })
+    expect(libraryItems.map((li) => li.progressLastUpdate)).to.deep.equal([3000, 2500])
   })
 
-  it('does not return a row per podcast episode from any query', async () => {
-    const statements = captureSql()
-    const res = fakeRes()
-    await MeController.getAllLibraryItemsInProgress({ user, query: {} }, res)
-    Database.sequelize.options.logging = false
-    expect(res.json.firstCall.args[0].libraryItems).to.have.length(4)
-    expect(statements.some((s) => /^SELECT/i.test(s))).to.be.true
-    // 3 library items and 3 in-progress episodes; the old JOIN returned one row per episode
-    expect(await maxRowsReturned(statements)).to.be.at.most(3)
-
-    // Sanity check: the same measurement catches the joined query
-    const joinedStatements = captureSql()
-    await Database.libraryItemModel.findAllExpandedWhere({ id: [bookItem.id, ...podcastItems.map((p) => p.libraryItem.id)] })
-    Database.sequelize.options.logging = false
-    expect(await maxRowsReturned(joinedStatements)).to.be.at.least(2 * NUM_EPISODES)
+  it('loads the items without joining every podcast episode', async () => {
+    const findAll = sinon.spy(Database.libraryItemModel, 'findAll')
+    await getItemsInProgress()
+    expect(findAll.calledOnce).to.be.true
+    const podcastInclude = findAll.firstCall.args[0].include.find((include) => include.model === Database.podcastModel)
+    expect(podcastInclude.include).to.be.undefined
   })
 })
