@@ -238,10 +238,7 @@ class LibraryItem extends Model {
     if (podcastItems.length) {
       const podcastIds = podcastItems.map((li) => li.media.id)
       // Same values Podcast.toOldJSONMinified() derives from the full episode list (numEpisodes, size)
-      const stats = await this.sequelize.query(
-        `SELECT podcastId, COUNT(*) AS numEpisodes, TOTAL(CASE WHEN json_valid(audioFile) THEN json_extract(audioFile, '$.metadata.size') END) AS size FROM podcastEpisodes WHERE podcastId IN (:podcastIds) GROUP BY podcastId`,
-        { replacements: { podcastIds }, type: QueryTypes.SELECT }
-      )
+      const stats = await this.sequelize.query(`SELECT podcastId, COUNT(*) AS numEpisodes, TOTAL(CASE WHEN json_valid(audioFile) THEN json_extract(audioFile, '$.metadata.size') END) AS size FROM podcastEpisodes WHERE podcastId IN (:podcastIds) GROUP BY podcastId`, { replacements: { podcastIds }, type: QueryTypes.SELECT })
       stats.forEach((row) => episodeStatsByPodcastId.set(row.podcastId, { numEpisodes: Number(row.numEpisodes) || 0, size: Number(row.size) || 0 }))
 
       const episodes = episodeIds?.length

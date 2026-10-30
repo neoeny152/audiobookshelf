@@ -149,6 +149,24 @@ describe('MeController - items-in-progress on large podcasts (#5677)', () => {
     }
   })
 
+  it('matches the old response when an episode has no audio file or a progress episode was deleted', async () => {
+    const [podA, podB] = podcastItems
+    await Database.podcastEpisodeModel.update({ audioFile: null }, { where: { id: podA.episodes[10].id } })
+    await Database.podcastEpisodeModel.destroy({ where: { id: podB.episodes[0].id } })
+    const expected = await legacyItemsInProgress(user)
+
+    const res = fakeRes()
+    await MeController.getAllLibraryItemsInProgress({ user, query: {} }, res)
+    const body = res.json.firstCall.args[0]
+
+    expect(JSON.parse(JSON.stringify(body.libraryItems))).to.deep.equal(JSON.parse(JSON.stringify(expected)))
+    // The deleted episode's progress is skipped, and the null audio file counts as size 0
+    expect(body.libraryItems.map((li) => li.recentEpisode?.id || null)).to.deep.equal([podA.episodes[90].id, null, podA.episodes[5].id])
+    const podAJson = body.libraryItems.find((li) => li.id === podA.libraryItem.id)
+    expect(podAJson.media.numEpisodes).to.equal(NUM_EPISODES)
+    expect(podAJson.media.size).to.equal(1000 * NUM_EPISODES + (NUM_EPISODES * (NUM_EPISODES - 1)) / 2 - 1010)
+  })
+
   it('respects the limit query', async () => {
     const res = fakeRes()
     await MeController.getAllLibraryItemsInProgress({ user, query: { limit: '2' } }, res)
