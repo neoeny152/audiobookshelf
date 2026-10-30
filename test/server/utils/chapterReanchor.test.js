@@ -3,7 +3,8 @@ const { expect } = require('chai')
 const chapterSnap = require('../../../server/utils/chapterSnap')
 const { reanchorStarts } = require('../../../server/utils/chapterReanchor')
 
-// Red Rising shape: four part files, the reference list (Audible) runs 20 s, 47 s and 86 s long at the part starts
+// Red Rising shape: four part files; the reference list (Audible) has more material at each part start, so it runs
+// 20 s, 47 s and 86 s long at the part files
 const files = [
   ['Part  I  Slave.mp3', 7571.365],
   ['Part  II  Reborn.mp3', 13280.173],
@@ -28,24 +29,38 @@ const reference = [
 ].map(([title, start], id) => ({ id, title, start }))
 
 describe('chapterReanchor', () => {
-  it('maps the reference list onto part files named like a chapter', () => {
+  it('shifts each part by the offset of the part file named like its chapter', () => {
     const r = reanchorStarts(reference, timeline, T)
     expect(r.anchors.map((a) => [a.index, a.trackIndex])).to.deep.equal([
       [4, 1],
       [7, 2],
       [9, 3]
     ])
-    // the anchored chapters sit exactly on their files
+    // the anchored chapters sit on their files
     expect(r.starts[4]).to.be.closeTo(timeline[1].offset, 0.001)
     expect(r.starts[7]).to.be.closeTo(timeline[2].offset, 0.001)
     expect(r.starts[9]).to.be.closeTo(timeline[3].offset, 0.001)
-    // in between, linear: Chapter 7 keeps its 18 s after Part II, shrunk by the span's rate
-    expect(r.starts[5] - r.starts[4]).to.be.closeTo(18 * ((timeline[2].offset - timeline[1].offset) / (20898.459 - 7591.459)), 0.001)
-    // past the last anchor the average rate of the anchored spans applies
-    expect(r.rate).to.be.within(0.997, 0.999)
-    expect(r.starts[11]).to.be.closeTo(timeline[3].offset + (56633.7 - 39354.1) * r.rate, 0.001)
+    // the rest of a part keeps its distance to the part start
+    expect(r.starts[5] - r.starts[4]).to.be.closeTo(18, 0.001)
+    expect(r.starts[6] - r.starts[4]).to.be.closeTo(20116.6 - 7591.459, 0.001)
+    expect(r.starts[11] - r.starts[9]).to.be.closeTo(56633.7 - 39354.1, 0.001)
+    // before the first anchor: scaled between the book start and it
+    expect(r.starts[3]).to.be.closeTo((6449.7 * timeline[1].offset) / 7591.459, 0.001)
     expect(r.starts[0]).to.equal(0)
     for (let i = 1; i < r.starts.length; i++) expect(r.starts[i]).to.be.greaterThan(r.starts[i - 1])
+  })
+
+  it('leaves a list alone that is already aligned (a part heading a few seconds into its file)', () => {
+    const aligned = reference.map((c) => ({ ...c }))
+    for (const [i, k] of [
+      [4, 1],
+      [7, 2],
+      [9, 3]
+    ]) {
+      aligned[i].start = timeline[k].offset + 4.6
+      aligned[i + 1].start = aligned[i].start + 18
+    }
+    expect(reanchorStarts(aligned, timeline, T)).to.equal(null)
   })
 
   it('leaves a book alone when the file names do not name chapters', () => {
@@ -66,24 +81,9 @@ describe('chapterReanchor', () => {
     ])
     const list = [
       { id: 0, title: '1', start: 0 },
-      { id: 1, title: '2', start: 103 }
+      { id: 1, title: '2', start: 115 }
     ]
     expect(reanchorStarts(list, named, 200)).to.equal(null)
-  })
-
-  it('maps past a single anchor with the rate of the span before it', () => {
-    const two = chapterSnap.buildTimeline([
-      { duration: 1000, metadata: { path: '/b/Prologue.mp3' } },
-      { duration: 1000, metadata: { path: '/b/Chapter 1.mp3' } }
-    ])
-    const list = [
-      { id: 0, title: 'Prologue', start: 0 },
-      { id: 1, title: 'Chapter 1', start: 1010 },
-      { id: 2, title: 'Chapter 2', start: 1500 }
-    ]
-    const r = reanchorStarts(list, two, 2000)
-    expect(r.rate).to.be.closeTo(1000 / 1010, 1e-9)
-    expect(r.starts).to.deep.equal([0, 1000, Math.round((1000 + 490 * r.rate) * 1000) / 1000])
   })
 
   it('gives up when the mapped list would run past the end of the book', () => {
@@ -93,8 +93,8 @@ describe('chapterReanchor', () => {
     ])
     const list = [
       { id: 0, title: 'Part One', start: 0 },
-      { id: 1, title: 'Part Two', start: 1040 },
-      { id: 2, title: 'Chapter 9', start: 1145 }
+      { id: 1, title: 'Part Two', start: 980 },
+      { id: 2, title: 'Chapter 9', start: 1085 }
     ]
     expect(reanchorStarts(list, two, 1100)).to.equal(null)
   })

@@ -13,6 +13,13 @@
  * named title of at least two words, and never front or back matter (isHeadingExpected). Anything else gets the plain
  * verdict from the same transcript. A found heading moves the start to `leadSec` before the heading word (or half
  * the gap to the previous word when that is shorter); chapterSnapRunner then puts it on the pause before the word.
+ *
+ * A chapter whose heading is not found (not read out, or Whisper missed its words) is predicted from the headings
+ * found around it (their offsets interpolated by reference time): when that prediction is more than PREDICT_MIN_MOVE
+ * from where it was proposed, the verdict carries `start` with `predicted: true`, and chapterSnapRunner moves it onto
+ * the longest pause near the prediction (reason aligned-to-headings), or leaves it when there is none. A closer
+ * prediction is sent with `predictedNear: true`: the start only moves to the end of that pause when it already lies in
+ * it (the same silence, so it plays the same).
  */
 
 const Logger = require('../Logger')
@@ -29,6 +36,8 @@ const EST_MS_PER_REQUEST = 1500
 const EST_MS_PER_AUDIO_SEC = 45
 /** A found heading this close to the proposed start does not move it (the snap already put it on the right pause) */
 const SAME_START_SEC = 0.6
+/** A chapter not heard is moved to the prediction from its neighbours only when the two disagree by more than this */
+const PREDICT_MIN_MOVE = 3
 const BEFORE_SEC = 8
 const AFTER_SEC = 10
 /** A word that ends this soon after a start is still before it */
@@ -140,6 +149,8 @@ function clipsAround(words, start) {
   return { before: pick(start - BEFORE_SEC, start + WORD_END_SLACK), after: pick(start + WORD_END_SLACK, start + AFTER_SEC) }
 }
 
+const referenceOf = (p) => (Number.isFinite(p.referenceStart) ? p.referenceStart : p.originalStart)
+
 function mergeWords(into, words) {
   const seen = new Set(into.map((w) => `${w[0]}|${w[2]}`))
   for (const w of words) if (!seen.has(`${w[0]}|${w[2]}`)) into.push(w)
@@ -191,14 +202,24 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
       }
 
       const anchors = cachedAnchors(cacheKey, now())
-      /** offset found - reference for the nearest anchor before `ref` (else after it), or null */
-      const driftAt = (ref) => {
+      const nearestAnchors = (ref) => {
         let before = null
         let after = null
         for (const [r, found] of anchors) {
           if (r <= ref && (!before || r > before.r)) before = { r, d: found - r }
           if (r > ref && (!after || r < after.r)) after = { r, d: found - r }
         }
+        return { before, after }
+      }
+      /** offset (found - reference) of the nearest anchor before `ref` (else after it), or null: for searching ahead */
+      const driftAt = (ref) => {
+        const { before, after } = nearestAnchors(ref)
+        return (before || after)?.d ?? null
+      }
+      /** offset interpolated between the anchors on both sides of `ref`, or the one side there is, or null */
+      const driftBetween = (ref) => {
+        const { before, after } = nearestAnchors(ref)
+        if (before && after) return before.d + ((ref - before.r) * (after.d - before.d)) / (after.r - before.r)
         return (before || after)?.d ?? null
       }
 
@@ -212,6 +233,8 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
       }
 
       const verdicts = []
+      /** chapters whose heading was not found, for the prediction from their neighbours */
+      const unconfirmed = []
       let notChecked = 0
       let located = 0
       for (let k = 0; k < checked.length; k++) {
@@ -219,8 +242,11 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
         if (signal?.aborted) break
         const title = titles[p.index]
         const search = searchKey(title)
-        const drift = driftAt(p.originalStart)
-        const center = drift === null ? p.proposedStart : p.originalStart + drift
+        // anchors are kept on the caller's reference times: a reference list's offsets against the audio are steadier
+        // there than on the re-anchored ones, whose rate past the last part file is only an estimate
+        const ref = referenceOf(p)
+        const drift = driftAt(ref)
+        const center = drift === null ? p.proposedStart : ref + drift
         const firstFrom = Math.min(center, p.proposedStart) - FIRST_BEFORE
         const firstTo = Math.max(center, p.proposedStart) + FIRST_AFTER
         if (deadlineAt - now() < cost(firstTo - firstFrom)) {
@@ -274,7 +300,7 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
         const verdict = { index: p.index }
         if (hit) {
           const found = startBefore(words, hit, leadSec)
-          anchors.set(Math.round(p.originalStart * 100) / 100, found)
+          anchors.set(Math.round(ref * 100) / 100, found)
           if (Math.abs(found - p.proposedStart) > SAME_START_SEC) {
             start = found
             verdict.start = found
@@ -282,16 +308,48 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
             located++
           }
         }
-        // the plain verdict, heard at the (possibly located) start
-        const clips = clipsAround(words, start)
+        // the plain verdict, heard at the (possibly located) start; a found heading word always opens the after-clip
+        const clips = clipsAround(words, hit ? Math.min(start, hit.start - 2 * WORD_END_SLACK) : start)
         const sp = speech.assessSpeech(title, clips.before, clips.after)
         if (verdict.start !== undefined) sp.located = true
         verdict.speech = sp
         if (sp.late || sp.early) verdict.confidence = 'low'
         verdicts.push(verdict)
+        if (!hit) unconfirmed.push({ p, verdict })
+      }
+
+      // chapters not heard: where the headings found around them say they should be
+      let predicted = 0
+      for (const { p, verdict } of unconfirmed) {
+        const ref = referenceOf(p)
+        const drift = driftBetween(ref)
+        if (drift === null) continue
+        const at = ref + drift
+        if (at <= 0 || at >= total) continue
+        verdict.start = at
+        verdict.headingAt = at
+        verdict.predicted = true
+        if (Math.abs(at - p.proposedStart) <= PREDICT_MIN_MOVE) {
+          verdict.predictedNear = true
+          continue
+        }
+        predicted++
+        // what is heard there (placing it on a pause moves it by a few seconds at most)
+        if (deadlineAt - now() >= cost(BEFORE_SEC + AFTER_SEC + 4)) {
+          try {
+            const near = await transcribe(at - BEFORE_SEC - 2, at + AFTER_SEC + 2)
+            const clips = clipsAround(near, at)
+            verdict.speech = { ...speech.assessSpeech(titles[p.index], clips.before, clips.after), predicted: true }
+            if (verdict.speech.late || verdict.speech.early) verdict.confidence = 'low'
+            else delete verdict.confidence
+          } catch (error) {
+            if (signal?.aborted) break
+            Logger.debug(`[ChapterLocate] Transcript at the predicted start failed: ${error.message}`)
+          }
+        }
       }
       if (notChecked > 0) warnings.push(`Speech check time limit reached: ${notChecked} chapters not checked. Resend with "indexes" set to them to check them.`)
-      if (located) Logger.info(`[ChapterLocate] Found ${located} chapter headings away from their proposed starts`)
+      if (located || predicted) Logger.info(`[ChapterLocate] Found ${located} chapter headings away from their proposed starts, predicted ${predicted} more from the headings around them`)
       return { verdicts, warnings }
     }
   }
@@ -299,6 +357,7 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
 
 module.exports = {
   LADDER,
+  PREDICT_MIN_MOVE,
   timedTokens,
   searchKey,
   findHeadings,

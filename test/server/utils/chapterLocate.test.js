@@ -127,6 +127,28 @@ describe('chapterLocate', () => {
       expect(client.transcribe.callCount).to.equal(1)
     })
 
+    it('predicts a chapter not heard from the headings found around it', async () => {
+      // chapter 2 is not read out; chapters 1 and 3 are found 100 s after their reference starts
+      const client = fakeClient(bookWords([{ n: 1, at: 1100 }, { n: 3, at: 3100 }]))
+      const { verdicts } = await createLocator({ titles, client, cacheKey: 'li-p' }).verify({ proposals: proposals([[1, 1000], [2, 2000], [3, 3000]]), timeline, signal: null })
+      expect(verdicts[1]).to.include({ index: 2, start: 2099.75, headingAt: 2099.75, predicted: true })
+      expect(verdicts[1].speech).to.include({ heading: false, predicted: true })
+      expect(verdicts[0]).to.not.have.property('predicted')
+    })
+
+    it('keys anchors on the caller reference starts when the snap re-anchored them', async () => {
+      const client = fakeClient(bookWords([{ n: 1, at: 1100 }, { n: 2, at: 2100 }]))
+      // re-anchored starts (originalStart) are off by a growing amount; the reference starts carry a steady +100 s
+      const list = Object.freeze([
+        Object.freeze({ index: 1, originalStart: 1010, referenceStart: 1000, proposedStart: 1010, reason: 'nearest-longest-pause', confidence: 'high', pause: null }),
+        Object.freeze({ index: 2, originalStart: 2050, referenceStart: 2000, proposedStart: 2050, reason: 'nearest-longest-pause', confidence: 'high', pause: null })
+      ])
+      const { verdicts } = await createLocator({ titles, client, cacheKey: 'li-k' }).verify({ proposals: list, timeline, signal: null })
+      expect(verdicts.map((v) => v.start)).to.deep.equal([1099.75, 2099.75])
+      // chapter 2 was in the first window around 2000 + 100
+      expect(client.transcribe.callCount).to.equal(3 + 1)
+    })
+
     it('reports a heading not found anywhere as not heard, without moving', async () => {
       const client = fakeClient(bookWords([]))
       const { verdicts } = await createLocator({ titles, client }).verify({ proposals: proposals([[1, 1000]]), timeline, signal: null })
@@ -198,6 +220,33 @@ describe('chapterLocate', () => {
       expect(result.chapters[1]).to.include({ originalStart: 1000, delta: 39.75, changed: true })
       expect(result.chapters[1].speech).to.include({ heading: true, located: true })
       expect(result.options).to.include({ reanchor: true, locate: true })
+    })
+
+    it('puts a predicted start on the longest pause near the prediction, and leaves it without one', async () => {
+      // chapter 2 is not read out: its pause (1.5 s) sits 40 s after the given start like the others
+      const client = fakeClient(bookWords([{ n: 1, at: 1040.05 }, { n: 3, at: 3040.05 }]))
+      const result = await chapterSnapRunner.runSnap({
+        libraryItemId: 'li-pr',
+        timeline,
+        T: 4000,
+        chapters,
+        options: { ...chapterSnap.DEFAULT_OPTIONS, verify: true },
+        detect,
+        verifiers: [createLocator({ titles, client, cacheKey: 'li-pr' })]
+      })
+      expect(result.chapters[2]).to.include({ proposedStart: 2039.75, reason: 'aligned-to-headings', confidence: 'medium' })
+      expect(result.chapters[2].speech).to.include({ predicted: true })
+
+      const noPause = await chapterSnapRunner.runSnap({
+        libraryItemId: 'li-pr2',
+        timeline,
+        T: 4000,
+        chapters,
+        options: { ...chapterSnap.DEFAULT_OPTIONS, verify: true },
+        detect: async ({ startSec, durationSec }) => (startSec < 2100 && startSec + durationSec > 1990 ? { lines: [] } : detect({ startSec, durationSec })),
+        verifiers: [createLocator({ titles, client, cacheKey: 'li-pr2' })]
+      })
+      expect(noPause.chapters[2].reason).to.not.equal('aligned-to-headings')
     })
 
     it('does not move a located start past a neighbour', async () => {

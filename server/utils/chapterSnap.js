@@ -71,6 +71,7 @@ const REASONS = Object.freeze({
   NEAREST_LONGEST_PAUSE: 'nearest-longest-pause',
   HEADING_LOOKBACK: 'heading-lookback',
   HEADING_LOCATED: 'heading-located',
+  ALIGNED_TO_HEADINGS: 'aligned-to-headings',
   NO_PAUSE_IN_WINDOW: 'no-pause-in-window',
   ORDER_CONFLICT: 'order-conflict',
   NOT_REQUESTED: 'not-requested',
@@ -781,6 +782,8 @@ function resolveOrder(starts, proposals) {
 function confidenceFor(proposal) {
   const { reason, pause } = proposal
   if (reason === REASONS.FIRST_CHAPTER || reason === REASONS.FILE_START || reason === REASONS.HEADING_LOCATED) return 'high'
+  // placed from the headings found around it, on a pause, but its own heading was not heard
+  if (reason === REASONS.ALIGNED_TO_HEADINGS) return pause ? 'medium' : 'low'
   if (!pause || (reason !== REASONS.INSIDE_PAUSE && reason !== REASONS.NEAREST_LONGEST_PAUSE && reason !== REASONS.HEADING_LOOKBACK)) return 'none'
 
   const duration = pause.end - pause.start

@@ -1,26 +1,27 @@
 /**
  * Re-anchor a reference chapter list (e.g. Audible's) to the audio before snapping: pure logic, no I/O.
  *
- * Reference times often drift against the files: Audible's own encode runs a little longer or shorter, and its brand
- * intro and outro may be missing. Over a long book that adds up to minutes, far outside snap's search window. Books
- * that are split into part files give exact anchors: a file named like a reference chapter ("Part II Reborn.mp3" for
- * the chapter "Part II") starts exactly where that chapter starts. The reference times are mapped piecewise linearly
- * between those anchors (and the book start), and past the last anchor with the average rate of the anchored spans.
+ * Reference times can be off against the files by much more than snap's search window: Audible's edition of a book
+ * split into parts often has more (or less) material at each part start than the files, so its times are off by a
+ * step that grows part by part (Red Rising: -2 s, -16 s, -43 s, -83 s). Books split into part files give anchors: a
+ * file named like a reference chapter ("Part II Reborn.mp3" for the chapter "Part II") starts where that chapter
+ * starts, give or take the few seconds of silence before the heading. Each anchored part is shifted by its anchor's
+ * offset (file start - reference start); chapters before the first anchor are scaled between the book start and it.
  *
  * An anchor needs the chapter title's words in the file name, in order, and the reference start within
  * ANCHOR_TOLERANCE of the file start, so a book split at arbitrary points (no titles in the file names) is left alone.
+ * A list that is already aligned (every anchor within MIN_SHIFT, e.g. a "Part II" a few seconds into its file) is left
+ * alone too: snap's own window handles that, and shifting it would only move correct starts.
  */
 
 const { tokens } = require('./chapterbotSpeech')
 
 /** Reference start to file start: at most this many seconds apart... */
 const ANCHOR_MIN_TOLERANCE = 60
-/** ...or this fraction of the position (drift grows with time) */
+/** ...or this fraction of the position (the offset grows through the book) */
 const ANCHOR_TOLERANCE = 0.03
-/** Rate past the last anchor comes from anchored spans at least this long */
-const RATE_MIN_SPAN = 600
-/** A rate outside this range is not drift: fall back to 1 */
-const RATE_RANGE = [0.95, 1.05]
+/** Re-anchor only when some anchor is off by more than this */
+const MIN_SHIFT = 10
 const STOP = new Set(['the', 'a', 'an', 'of', 'and'])
 
 function basename(path) {
@@ -56,8 +57,8 @@ function namesAFile(titleTokens) {
  * @param {{start: number, title?: string}[]} chapters - validated, strictly increasing
  * @param {{index: number, path: string, offset: number, duration: number}[]} timeline
  * @param {number} T
- * @returns {{starts: number[], anchors: {index: number, trackIndex: number, from: number, to: number}[], rate: number}|null}
- *   null when there is nothing to anchor on, or the mapped list would not fit the book
+ * @returns {{starts: number[], anchors: {index: number, trackIndex: number, from: number, to: number}[]}|null}
+ *   null when there is nothing to anchor on, the list is already aligned, or the mapped list would not fit the book
  */
 function reanchorStarts(chapters, timeline, T) {
   const tracks = timeline.filter((t) => t.duration > 0 && t.offset > 0)
@@ -80,35 +81,21 @@ function reanchorStarts(chapters, timeline, T) {
     anchors.push({ index: best.i, trackIndex: track.index, from: chapters[best.i].start, to: track.offset })
     minChapter = best.i + 1
   }
-  if (!anchors.length) return null
+  if (!anchors.some((a) => Math.abs(a.to - a.from) > MIN_SHIFT)) return null
 
-  // knots: book start, then each anchor
-  const knots = [{ from: 0, to: 0 }, ...anchors.map((a) => ({ from: a.from, to: a.to }))]
-  const rates = []
-  for (let k = 1; k < knots.length; k++) {
-    const spanFrom = knots[k].from - knots[k - 1].from
-    if (spanFrom >= RATE_MIN_SPAN) rates.push((knots[k].to - knots[k - 1].to) / spanFrom)
-  }
-  let rate = rates.length ? rates.reduce((s, r) => s + r, 0) / rates.length : 1
-  if (!(rate >= RATE_RANGE[0] && rate <= RATE_RANGE[1])) rate = 1
-
-  const map = (s) => {
-    for (let k = 1; k < knots.length; k++) {
-      if (s <= knots[k].from) {
-        const a = knots[k - 1]
-        const b = knots[k]
-        return a.to + ((s - a.from) * (b.to - a.to)) / (b.from - a.from)
-      }
-    }
-    const last = knots[knots.length - 1]
-    return last.to + (s - last.from) * rate
+  const first = anchors[0]
+  const map = (s, i) => {
+    if (i < first.index) return (s * first.to) / first.from
+    let k = anchors.length - 1
+    while (anchors[k].index > i) k--
+    return s + (anchors[k].to - anchors[k].from)
   }
 
-  const starts = chapters.map((c, i) => (i === 0 ? c.start : Math.round(map(c.start) * 1000) / 1000))
+  const starts = chapters.map((c, i) => (i === 0 ? c.start : Math.round(map(c.start, i) * 1000) / 1000))
   for (let i = 1; i < starts.length; i++) {
     if (!(starts[i] > starts[i - 1]) || starts[i] >= T) return null
   }
-  return { starts, anchors, rate }
+  return { starts, anchors }
 }
 
-module.exports = { ANCHOR_MIN_TOLERANCE, ANCHOR_TOLERANCE, reanchorStarts }
+module.exports = { ANCHOR_MIN_TOLERANCE, ANCHOR_TOLERANCE, MIN_SHIFT, reanchorStarts }

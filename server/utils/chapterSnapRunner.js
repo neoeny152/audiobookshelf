@@ -129,7 +129,7 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
   const reanchored = options.reanchor ? chapterReanchor.reanchorStarts(chapters, timeline, T) : null
   const starts = reanchored ? reanchored.starts : inputStarts
   if (reanchored) {
-    Logger.info(`[ChapterSnap] Re-anchored "${libraryItemId}" on ${reanchored.anchors.length} part files: ${reanchored.anchors.map((a) => `#${a.index} ${a.from.toFixed(1)}->${a.to.toFixed(1)}`).join(', ')}, rate after the last ${reanchored.rate.toFixed(5)}`)
+    Logger.info(`[ChapterSnap] Re-anchored "${libraryItemId}" on ${reanchored.anchors.length} part files: ${reanchored.anchors.map((a) => `#${a.index} ${a.from.toFixed(1)}->${a.to.toFixed(1)}`).join(', ')}`)
   }
   const plan = chapterSnap.planSegments(starts, indexes, timeline, T, options)
 
@@ -195,7 +195,8 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
   // Verifier seam (chapterbot speech check): fills speech and may lower confidence; a located heading moves a start
   const located = []
   for (const verifier of verifiers) {
-    const snapshot = proposals.map((p) => Object.freeze({ index: p.index, originalStart: p.originalStart, proposedStart: p.proposedStart, reason: p.reason, confidence: p.confidence, pause: p.pause ? Object.freeze({ ...p.pause }) : null }))
+    // referenceStart: the caller's start (originalStart is the re-anchored one when reanchor applied)
+    const snapshot = proposals.map((p) => Object.freeze({ index: p.index, originalStart: p.originalStart, referenceStart: inputStarts[p.index], proposedStart: p.proposedStart, reason: p.reason, confidence: p.confidence, pause: p.pause ? Object.freeze({ ...p.pause }) : null }))
     const outcome = (await verifier.verify({ proposals: Object.freeze(snapshot), timeline, signal })) || []
     if (signal?.aborted) throw snapError('SNAP_ABORTED', 'Chapter snap aborted')
     const verdicts = Array.isArray(outcome) ? outcome : Array.isArray(outcome.verdicts) ? outcome.verdicts : []
@@ -205,7 +206,7 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
       if (!proposal) continue
       if (verdict.speech !== undefined) proposal.speech = verdict.speech
       if (verdict.confidence !== undefined) proposal.confidence = chapterSnap.lowerConfidence(proposal.confidence, verdict.confidence)
-      if (Number.isFinite(verdict.start) && proposal.index > 0) located.push({ proposal, start: verdict.start, headingAt: Number.isFinite(verdict.headingAt) ? verdict.headingAt : verdict.start })
+      if (Number.isFinite(verdict.start) && proposal.index > 0) located.push({ proposal, start: verdict.start, headingAt: Number.isFinite(verdict.headingAt) ? verdict.headingAt : verdict.start, predicted: verdict.predicted === true, near: verdict.predictedNear === true })
     }
   }
   if (located.length) await placeLocated({ located, proposals, starts, timeline, T, options, detect, signal, deadlineMs: Math.max(5000, deadlineMs - (now() - startedAt)), pool, now })
@@ -232,7 +233,7 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
       elapsedMs: now() - startedAt
     },
     warnings,
-    reanchor: reanchored ? { anchors: reanchored.anchors.map((a) => ({ index: a.index, trackIndex: a.trackIndex, from: a.from, to: a.to })), rate: reanchored.rate } : null
+    reanchor: reanchored ? { anchors: reanchored.anchors.map((a) => ({ index: a.index, trackIndex: a.trackIndex, from: a.from, to: a.to })) } : null
   })
 
   const { stats } = response
@@ -244,11 +245,15 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
  * Located headings (chapterLocate) onto the pause before the heading word: silence detection on a few seconds before
  * each heading, then the pause that ends within LOCATE_PAUSE_BEFORE..LOCATE_PAUSE_AFTER of the word, as snap places
  * a start (leadSec before the pause ends). Whisper often times a word that follows a silence up to ~0.8 s early (it
- * starts inside the silence), hence the allowance after the word. Without such a pause the transcript's start stays. A start that would
+ * starts inside the silence), hence the allowance after the word.
+ * A predicted start (no heading heard, placed from the headings around it) goes to the longest pause that ends within
+ * LOCATE_PREDICT_RANGE of the prediction, and is not moved when there is none. A near prediction (`near`) only moves
+ * a start that already lies in that pause, to the pause's end (minus leadSec). Without such a pause the transcript's start stays. A start that would
  * not stay between its neighbours is not moved.
  */
 const LOCATE_PAUSE_BEFORE = 2.0
 const LOCATE_PAUSE_AFTER = 1.0
+const LOCATE_PREDICT_RANGE = 3
 const LOCATE_WINDOW = 4
 
 async function placeLocated({ located, proposals, starts, timeline, T, options, detect, signal, deadlineMs, pool, now }) {
@@ -269,13 +274,22 @@ async function placeLocated({ located, proposals, starts, timeline, T, options, 
     Logger.warn(`[ChapterSnap] Pause detection for located headings failed: ${error.message}`)
   }
 
-  for (const { proposal, start, headingAt } of located.sort((a, b) => a.proposal.index - b.proposal.index)) {
+  for (const { proposal, start, headingAt, predicted, near } of located.sort((a, b) => a.proposal.index - b.proposal.index)) {
     let target = start
     let pause = null
-    const candidates = pauses.filter((p) => p.end >= headingAt - LOCATE_PAUSE_BEFORE && p.end <= headingAt + LOCATE_PAUSE_AFTER && !p.endClipped)
-    if (candidates.length) {
-      pause = candidates[candidates.length - 1]
+    if (predicted) {
+      const around = pauses.filter((p) => Math.abs(p.end - headingAt) <= LOCATE_PREDICT_RANGE && !p.endClipped)
+      if (!around.length) continue
+      pause = around.reduce((best, p) => (p.end - p.start > best.end - best.start ? p : best))
+      if (near && !(pause.start - chapterSnap.SLACK <= proposal.proposedStart && proposal.proposedStart <= pause.end + chapterSnap.SLACK)) continue
       target = Math.max(pause.start, pause.end - options.leadSec)
+      if (Math.abs(target - proposal.proposedStart) < 0.05) continue
+    } else {
+      const candidates = pauses.filter((p) => p.end >= headingAt - LOCATE_PAUSE_BEFORE && p.end <= headingAt + LOCATE_PAUSE_AFTER && !p.endClipped)
+      if (candidates.length) {
+        pause = candidates[candidates.length - 1]
+        target = Math.max(pause.start, pause.end - options.leadSec)
+      }
     }
     const i = proposal.index
     const prev = proposals[i - 1].proposedStart
@@ -286,7 +300,7 @@ async function placeLocated({ located, proposals, starts, timeline, T, options, 
       continue
     }
     proposal.proposedStart = Math.round(target * 1000) / 1000
-    proposal.reason = chapterSnap.REASONS.HEADING_LOCATED
+    proposal.reason = predicted ? chapterSnap.REASONS.ALIGNED_TO_HEADINGS : chapterSnap.REASONS.HEADING_LOCATED
     proposal.pause = pause
     proposal.confidence = chapterSnap.confidenceFor(proposal)
     if (proposal.speech?.late || proposal.speech?.early) proposal.confidence = chapterSnap.lowerConfidence(proposal.confidence, 'low')
