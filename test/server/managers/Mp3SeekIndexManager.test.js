@@ -113,7 +113,7 @@ describe('Mp3SeekIndexManager', () => {
       expect(manager.startRepair('u1', item({ audioFiles: [audioFile(0, { mp3SeekIndex: 'xing' })] }))).to.be.null
     })
 
-    it('repairs only flagged MP3s, rescans and reports old vs new durations; chapters kept by default', async () => {
+    it('repairs only flagged MP3s, rescans and reports old vs new durations; chapter times kept by default', async () => {
       const chapters = [
         { id: 0, start: 0, end: 150, title: 'A' },
         { id: 1, start: 150, end: 300, title: 'B' }
@@ -133,15 +133,40 @@ describe('Mp3SeekIndexManager', () => {
       expect(deps.watcher.addIgnoreDir.calledWith(dir)).to.be.true
       expect(deps.watcher.removeIgnoreDir.calledWith(dir)).to.be.true
       expect(deps.scanItem.calledOnceWith('li1')).to.be.true
-      expect(deps.applyChapters.called).to.be.false
+      // Times kept; only the last chapter, which ran to the old end, now runs to the new end
+      expect(deps.applyChapters.calledOnce).to.be.true
+      expect(deps.applyChapters.firstCall.args[1]).to.deep.equal([
+        { id: 0, start: 0, end: 150, title: 'A' },
+        { id: 1, start: 150, end: 310, title: 'B' }
+      ])
 
       const done = finished.firstCall.args[0]
       expect(done.isFailed).to.be.false
       expect(done.data.result.files).to.deep.equal([{ filename: 'Part 1.mp3', ino: 'ino0', status: 'repaired', oldDuration: 100, newDuration: 110 }])
       expect(done.data.result).to.include({ oldTotalDuration: 300, newTotalDuration: 310 })
-      expect(done.data.result.chapters).to.deep.equal({ count: 2, mode: 'keep', shifted: false, maxShift: 10 })
+      expect(done.data.result.chapters).to.deep.equal({ count: 2, mode: 'keep', shifted: false, endExtended: true, maxShift: 10 })
+      // The chapter snapshot is not broadcast with the task
+      expect(done.toJSON().data).to.not.have.any.keys('oldChapters', 'oldIncluded')
+      expect(manager.snapshots.size).to.equal(0)
       expect(manager.getIsLibraryItemQueuedOrProcessing('li1')).to.be.false
       expect(manager.lastResults.get('li1')).to.equal(done.data.result)
+    })
+
+    it('leaves chapters alone in keep mode when the last one does not run to the end', async () => {
+      const chapters = [
+        { id: 0, start: 0, end: 150, title: 'A' },
+        { id: 1, start: 150, end: 250, title: 'B' }
+      ]
+      const li = item({ audioFiles: [audioFile(0, { duration: 100 }), audioFile(1, { mp3SeekIndex: 'xing', duration: 200 })], chapters })
+      const fresh = item({ audioFiles: [audioFile(0, { duration: 110 }), audioFile(1, { mp3SeekIndex: 'xing', duration: 200 })], chapters })
+      const { manager, deps } = makeManager()
+      deps.getItem.resolves(fresh)
+      const finished = sinon.spy(TaskManager, 'taskFinished')
+
+      manager.startRepair('u1', li)
+      await waitForFinish()
+      expect(deps.applyChapters.called).to.be.false
+      expect(finished.firstCall.args[0].data.result.chapters).to.include({ shifted: false, endExtended: false })
     })
 
     it('shifts saved chapters when asked', async () => {

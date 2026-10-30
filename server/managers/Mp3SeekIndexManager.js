@@ -34,7 +34,9 @@ const { applyChapters } = require('../utils/applyChapters')
  * @property {RepairFileResult[]} files
  * @property {number} oldTotalDuration
  * @property {number} newTotalDuration
- * @property {{count: number, mode: 'keep'|'shift', shifted: boolean, maxShift: number}} chapters
+ * @property {{count: number, mode: 'keep'|'shift', shifted: boolean, endExtended: boolean, maxShift: number}} chapters
+ *  shifted: chapter times moved with the files (mode shift). endExtended: mode keep, only the last chapter's end moved
+ *  from the old total duration to the new one
  *
  * @typedef RepairOptions
  * @property {'keep'|'shift'} [chapters='keep'] - shift: move saved chapter times by the duration change of earlier files
@@ -58,6 +60,8 @@ class Mp3SeekIndexManager {
     this.lastResults = new Map()
     /** @type {Map<string, number>} measured duration by path|size|mtime */
     this.measureCache = new Map()
+    /** @type {Map<string, {oldIncluded: {path:string, duration:number}[], oldChapters: Object[]}>} per task id; kept out of task.data, which is broadcast */
+    this.snapshots = new Map()
 
     this.repairFile = deps.repairFile || mp3SeekIndex.repairFile
     this.detectSeekIndex = deps.detectSeekIndex || mp3SeekIndex.detectSeekIndex
@@ -181,9 +185,6 @@ class Mp3SeekIndexManager {
         path: af.metadata.path,
         duration: af.duration
       })),
-      // Snapshot of the timeline the saved chapters were made on
-      oldIncluded: audioFiles.map((af) => ({ path: af.metadata.path, filename: af.metadata.filename, ino: af.ino, duration: af.duration })),
-      oldChapters: (libraryItem.media.chapters || []).map((c) => ({ ...c })),
       duration: targets.reduce((sum, af) => sum + (af.duration || 0), 0),
       options: {
         chapters: options.chapters === 'shift' ? 'shift' : 'keep',
@@ -198,6 +199,11 @@ class Mp3SeekIndexManager {
       false,
       taskData
     )
+    // The timeline the saved chapters were made on
+    this.snapshots.set(task.id, {
+      oldIncluded: audioFiles.map((af) => ({ path: af.metadata.path, duration: af.duration })),
+      oldChapters: (libraryItem.media.chapters || []).map((c) => ({ ...c }))
+    })
 
     if (this.tasksRunning.length >= this.MAX_CONCURRENT_TASKS) {
       Logger.info(`[Mp3SeekIndexManager] Queueing seek index repair for "${title}"`)
@@ -218,6 +224,7 @@ class Mp3SeekIndexManager {
     const queued = this.tasksQueued.find((t) => t.data.libraryItemId === libraryItemId)
     if (queued) {
       this.tasksQueued = this.tasksQueued.filter((t) => t !== queued)
+      this.snapshots.delete(queued.id)
       return true
     }
     const controller = this.abortControllers.get(libraryItemId)
@@ -353,7 +360,8 @@ class Mp3SeekIndexManager {
    * @returns {Promise<RepairResult>}
    */
   async buildResult(task, fileResults, fresh) {
-    const { oldIncluded, oldChapters, options, libraryItemId } = task.data
+    const { options, libraryItemId } = task.data
+    const { oldIncluded, oldChapters } = this.snapshots.get(task.id)
     const newByPath = new Map((fresh?.media?.includedAudioFiles || []).map((af) => [af.metadata.path, af.duration]))
     const oldDurations = oldIncluded.map((f) => f.duration || 0)
     const newDurations = oldIncluded.map((f) => newByPath.get(f.path) ?? f.duration ?? 0)
@@ -368,17 +376,31 @@ class Mp3SeekIndexManager {
       files: fileResults,
       oldTotalDuration,
       newTotalDuration,
-      chapters: { count: oldChapters.length, mode: options.chapters, shifted: false, maxShift: Number(maxShift.toFixed(3)) }
+      chapters: { count: oldChapters.length, mode: options.chapters, shifted: false, endExtended: false, maxShift: Number(maxShift.toFixed(3)) }
     }
-    // Only an explicit request rewrites chapters, and only when the item's file set is unchanged
+    // Only an explicit request moves chapter times, and only when the item's file set is unchanged
     const sameFiles = fresh && fresh.media.includedAudioFiles.length === oldIncluded.length && oldIncluded.every((f) => newByPath.has(f.path))
-    if (options.chapters !== 'shift' || !oldChapters.length || !sameFiles || maxShift < 0.001) return result
-    await this.applyChapters(fresh, shiftedChapters)
-    result.chapters.shifted = true
+    if (!oldChapters.length || !sameFiles || maxShift < 0.001) return result
+    if (options.chapters === 'shift') {
+      await this.applyChapters(fresh, shiftedChapters)
+      result.chapters.shifted = true
+      return result
+    }
+    // Keep: the times stay, but a last chapter that ran to the old end would stop short of the new one
+    const current = fresh.media.chapters || []
+    const last = current[current.length - 1]
+    if (last && Math.abs(last.end - oldTotalDuration) < 0.5 && Math.abs(newTotalDuration - oldTotalDuration) >= 0.001) {
+      await this.applyChapters(
+        fresh,
+        current.map((c, i) => ({ ...c, end: i === current.length - 1 ? Number(newTotalDuration.toFixed(6)) : c.end }))
+      )
+      result.chapters.endExtended = true
+    }
     return result
   }
 
   handleTaskFinished(task) {
+    this.snapshots.delete(task.id)
     TaskManager.taskFinished(task)
     this.tasksRunning = this.tasksRunning.filter((t) => t.id !== task.id)
 
