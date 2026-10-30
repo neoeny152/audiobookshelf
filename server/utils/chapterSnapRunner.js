@@ -242,17 +242,20 @@ async function runSnap({ libraryItemId, timeline, T, chapters, itemChapters = []
 }
 
 /**
- * Located headings (chapterLocate) onto the pause before the heading word: silence detection on a few seconds before
- * each heading, then the pause that ends within LOCATE_PAUSE_BEFORE..LOCATE_PAUSE_AFTER of the word, as snap places
- * a start (leadSec before the pause ends). Whisper often times a word that follows a silence up to ~0.8 s early (it
- * starts inside the silence), hence the allowance after the word.
+ * Located headings (chapterLocate) onto the pause before the heading word: silence detection on a few seconds around
+ * each heading, then the pause that holds the word's time (Whisper often times the first word after a silence up to
+ * ~1.5 s early, inside the silence), else the last pause that ends within LOCATE_PAUSE_BEFORE..LOCATE_PAUSE_AFTER of
+ * the word, as snap places a start (leadSec before the pause ends). A heading whose start would not change is left
+ * with its snap reason.
  * A predicted start (no heading heard, placed from the headings around it) goes to the longest pause that ends within
  * LOCATE_PREDICT_RANGE of the prediction, and is not moved when there is none. A near prediction (`near`) only moves
  * a start that already lies in that pause, to the pause's end (minus leadSec). Without such a pause the transcript's start stays. A start that would
  * not stay between its neighbours is not moved.
  */
 const LOCATE_PAUSE_BEFORE = 2.0
-const LOCATE_PAUSE_AFTER = 1.0
+const LOCATE_PAUSE_AFTER = 0.4
+/** A pause that holds the heading word's time may end at most this long after it */
+const LOCATE_HOLDING_MAX = 3
 const LOCATE_PREDICT_RANGE = 3
 const LOCATE_WINDOW = 4
 
@@ -283,14 +286,14 @@ async function placeLocated({ located, proposals, starts, timeline, T, options, 
       pause = around.reduce((best, p) => (p.end - p.start > best.end - best.start ? p : best))
       if (near && !(pause.start - chapterSnap.SLACK <= proposal.proposedStart && proposal.proposedStart <= pause.end + chapterSnap.SLACK)) continue
       target = Math.max(pause.start, pause.end - options.leadSec)
-      if (Math.abs(target - proposal.proposedStart) < 0.05) continue
     } else {
+      const holding = pauses.find((p) => p.start - chapterSnap.SLACK <= headingAt && headingAt <= p.end && p.end - headingAt <= LOCATE_HOLDING_MAX && !p.endClipped)
       const candidates = pauses.filter((p) => p.end >= headingAt - LOCATE_PAUSE_BEFORE && p.end <= headingAt + LOCATE_PAUSE_AFTER && !p.endClipped)
-      if (candidates.length) {
-        pause = candidates[candidates.length - 1]
-        target = Math.max(pause.start, pause.end - options.leadSec)
-      }
+      pause = holding || candidates[candidates.length - 1] || null
+      if (pause) target = Math.max(pause.start, pause.end - options.leadSec)
     }
+    // already there: keep the snap's reason
+    if (Math.abs(target - proposal.proposedStart) < 0.05) continue
     const i = proposal.index
     const prev = proposals[i - 1].proposedStart
     const next = i + 1 < proposals.length ? proposals[i + 1].proposedStart : T

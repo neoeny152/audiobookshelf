@@ -99,8 +99,9 @@ describe('chapterLocate', () => {
       const { verdicts, warnings } = await locator.verify({ proposals: proposals([[1, 999.5], [2, 2000], [3, 2999.6]]), timeline, signal: null })
       expect(warnings).to.deep.equal([])
       expect(verdicts.map((v) => v.index)).to.deep.equal([1, 2, 3])
-      expect(verdicts[0]).to.not.have.property('start')
-      expect(verdicts[0].speech).to.include({ heading: true })
+      // heard where proposed: the runner gets the heading (and leaves a start that is already on its pause)
+      expect(verdicts[0]).to.include({ start: 999.75, headingAt: 1000 })
+      expect(verdicts[0].speech).to.include({ heading: true }).and.not.have.property('located')
       // chapter 2: 45 s late of the first window, found in the 60 s rung
       expect(verdicts[1].start).to.be.closeTo(2044.75, 1e-9)
       expect(verdicts[1].headingAt).to.equal(2045)
@@ -220,6 +221,21 @@ describe('chapterLocate', () => {
       expect(result.chapters[1]).to.include({ originalStart: 1000, delta: 39.75, changed: true })
       expect(result.chapters[1].speech).to.include({ heading: true, located: true })
       expect(result.options).to.include({ reanchor: true, locate: true })
+    })
+
+    it('puts a heading timed inside the silence before it (Whisper early) at the end of that silence', async () => {
+      // the heading words come 0.8 s before the pauses end (1038.5-1040 etc.)
+      const client = fakeClient(bookWords([{ n: 1, at: 1039.2 }, { n: 2, at: 2039.2 }, { n: 3, at: 3039.2 }]))
+      const result = await chapterSnapRunner.runSnap({
+        libraryItemId: 'li-h',
+        timeline,
+        T: 4000,
+        chapters,
+        options: { ...chapterSnap.DEFAULT_OPTIONS, verify: true },
+        detect,
+        verifiers: [createLocator({ titles, client, cacheKey: 'li-h' })]
+      })
+      expect(result.chapters.slice(1).map((c) => c.proposedStart)).to.deep.equal([1039.75, 2039.75, 3039.75])
     })
 
     it('puts a predicted start on the longest pause near the prediction, and leaves it without one', async () => {

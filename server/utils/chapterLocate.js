@@ -301,17 +301,18 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
         if (hit) {
           const found = startBefore(words, hit, leadSec)
           anchors.set(Math.round(ref * 100) / 100, found)
+          // chapterSnapRunner puts the start on the pause before the heading, and leaves it when it is already there
+          verdict.start = found
+          verdict.headingAt = hit.start
           if (Math.abs(found - p.proposedStart) > SAME_START_SEC) {
             start = found
-            verdict.start = found
-            verdict.headingAt = hit.start
             located++
           }
         }
         // the plain verdict, heard at the (possibly located) start; a found heading word always opens the after-clip
         const clips = clipsAround(words, hit ? Math.min(start, hit.start - 2 * WORD_END_SLACK) : start)
         const sp = speech.assessSpeech(title, clips.before, clips.after)
-        if (verdict.start !== undefined) sp.located = true
+        if (start !== p.proposedStart) sp.located = true
         verdict.speech = sp
         if (sp.late || sp.early) verdict.confidence = 'low'
         verdicts.push(verdict)
