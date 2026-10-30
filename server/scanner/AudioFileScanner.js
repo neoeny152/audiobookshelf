@@ -1,6 +1,7 @@
 const Path = require('path')
 const Logger = require('../Logger')
 const prober = require('../utils/prober')
+const mp3SeekIndex = require('../utils/mp3SeekIndex')
 const { LogLevel } = require('../utils/constants')
 const { parseOverdriveMediaMarkersAsChapters } = require('../utils/parsers/parseOverdriveMediaMarkers')
 const parseNameString = require('../utils/parsers/parseNameString')
@@ -164,6 +165,15 @@ class AudioFileScanner {
     if (!probeData.audioStream) {
       Logger.error('[AudioFileScanner] Invalid audio file no audio stream')
       return null
+    }
+
+    // MP3 only: a ~64 KB read for the Xing/Info/VBRI header, so a file whose duration ffprobe estimated can be flagged
+    if (probeData.audioStream.codec === 'mp3') {
+      try {
+        probeData.mp3SeekIndex = (await mp3SeekIndex.detectSeekIndex(libraryFile.metadata.path)).status
+      } catch (error) {
+        Logger.warn(`[AudioFileScanner] MP3 seek index check failed for "${libraryFile.metadata.path}": ${error.message}`)
+      }
     }
 
     const audioFile = new AudioFile()

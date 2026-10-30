@@ -26,6 +26,8 @@ class AudioFile {
     this.channelLayout = null
     this.chapters = []
     this.embeddedCoverArt = null
+    /** @type {import('../../utils/mp3SeekIndex').Mp3SeekIndexStatus|null} MP3 only: Xing/Info/VBRI header found, or none */
+    this.mp3SeekIndex = null
 
     // Tags scraped from the audio file
     /** @type {AudioMetaTags} */
@@ -64,6 +66,7 @@ class AudioFile {
       channelLayout: this.channelLayout,
       chapters: this.chapters,
       embeddedCoverArt: this.embeddedCoverArt,
+      mp3SeekIndex: this.mp3SeekIndex || null,
       metaTags: this.metaTags?.toJSON() || {},
       mimeType: this.mimeType
     }
@@ -96,6 +99,7 @@ class AudioFile {
     this.channelLayout = data.channelLayout
     this.chapters = data.chapters
     this.embeddedCoverArt = data.embeddedCoverArt || null
+    this.mp3SeekIndex = data.mp3SeekIndex || null
 
     this.metaTags = new AudioMetaTags(data.metaTags || {})
   }
@@ -133,6 +137,7 @@ class AudioFile {
     this.chapters = probeData.chapters || []
     this.metaTags = probeData.audioMetaTags
     this.embeddedCoverArt = probeData.embeddedCoverArt
+    this.mp3SeekIndex = probeData.mp3SeekIndex || null
   }
 
   syncChapters(updatedChapters) {

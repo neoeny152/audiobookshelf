@@ -13,6 +13,9 @@ const { version } = require('../../package.json')
  * - libraryDownloadPost: POST /api/libraries/:id/download with ids in the request body
  * - readAlong: GET /api/items/:id/ebook/:fileid/readalong, sentence timings of an EPUB made from the item's audio
  *   (404 when that EPUB has none; see utils/readAlong.js). Always listed: serving stored data needs no sidecar.
+ * - mp3SeekIndex: GET /api/tools/item/:id/seek-index (MP3s without a Xing/Info/VBRI header, ?measure=1 for the real
+ *   duration), POST/DELETE /api/tools/item/:id/repair-seek-index (remux with a Xing header, task action
+ *   repair-seek-index), audioFile.mp3SeekIndex (see utils/mp3SeekIndex.js).
  *
  * Optional features, only listed while they work (see utils/chapterbotClient.js advertisedFeatures):
  * - chapterbotVerify: POST /api/items/:id/chapters/snap accepts options.verify = true (Whisper speech check)
@@ -25,7 +28,7 @@ const { version } = require('../../package.json')
  *   library.settings.autoPipeline and pipeline_item_updated socket events. Listed only when the server runs with
  *   ABS_AUTO_PIPELINE=1 (see managers/AutoPipelineManager.js).
  */
-const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong'])
+const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex'])
 const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'autoPipeline'])
 
 /**

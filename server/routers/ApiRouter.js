@@ -53,6 +53,8 @@ class ApiRouter {
     this.podcastManager = Server.podcastManager
     /** @type {import('../managers/AudioMetadataManager')} */
     this.audioMetadataManager = Server.audioMetadataManager
+    /** @type {import('../managers/Mp3SeekIndexManager')} */
+    this.mp3SeekIndexManager = Server.mp3SeekIndexManager
     /** @type {import('../managers/CronManager')} */
     this.cronManager = Server.cronManager
     /** @type {import('../managers/EmailManager')} */
@@ -329,6 +331,9 @@ class ApiRouter {
     this.router.post('/tools/item/:id/encode-m4b', ToolsController.middleware.bind(this), ToolsController.encodeM4b.bind(this))
     this.router.delete('/tools/item/:id/encode-m4b', ToolsController.middleware.bind(this), ToolsController.cancelM4bEncode.bind(this))
     this.router.post('/tools/item/:id/embed-metadata', ToolsController.middleware.bind(this), ToolsController.embedAudioFileMetadata.bind(this))
+    this.router.get('/tools/item/:id/seek-index', ToolsController.middleware.bind(this), ToolsController.getSeekIndexStatus.bind(this))
+    this.router.post('/tools/item/:id/repair-seek-index', ToolsController.middleware.bind(this), ToolsController.repairSeekIndex.bind(this))
+    this.router.delete('/tools/item/:id/repair-seek-index', ToolsController.middleware.bind(this), ToolsController.cancelRepairSeekIndex.bind(this))
     this.router.post('/tools/batch/embed-metadata', ToolsController.middleware.bind(this), ToolsController.batchEmbedMetadata.bind(this))
 
     //

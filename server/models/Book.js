@@ -81,6 +81,7 @@ async function hasOtherWithSameName(model, record, name) {
  * @property {ChapterObject[]} chapters
  * @property {Object} metaTags
  * @property {string} mimeType
+ * @property {import('../utils/mp3SeekIndex').Mp3SeekIndexStatus|null} [mp3SeekIndex] - MP3 only, see utils/mp3SeekIndex
  *
  * @typedef AudioTrackProperties
  * @property {string} title
