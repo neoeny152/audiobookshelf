@@ -231,7 +231,8 @@ function parseSubtitles(text) {
   const blocks = String(text)
     .replace(/^﻿/, '')
     .replace(/\r\n?/g, '\n')
-    .split(/\n{2,}/)
+    // a "blank" line with spaces still ends a cue (common in hand-made SRT files)
+    .split(/\n(?:[ \t]*\n)+/)
   for (const block of blocks) {
     const lines = block.split('\n')
     const timeIdx = lines.findIndex((l) => l.includes('-->'))

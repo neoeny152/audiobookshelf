@@ -52,11 +52,16 @@ class TranscriptManager {
     this.now = Date.now
     this.sleep = (ms, signal) =>
       new Promise((resolve, reject) => {
-        const timer = setTimeout(resolve, ms)
-        signal?.addEventListener('abort', () => {
+        if (signal?.aborted) return reject(new Error('aborted'))
+        const onAbort = () => {
           clearTimeout(timer)
           reject(new Error('aborted'))
-        })
+        }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        signal?.addEventListener('abort', onAbort, { once: true })
       })
     /** @type {(url: string) => Promise<{data: Buffer, contentType: string}>} */
     this.fetchUrl = (url) => this.defaultFetch(url)
@@ -186,9 +191,33 @@ class TranscriptManager {
       episodeId: episode?.id || null,
       transcripts: list,
       preferredId: transcripts.preferredTranscriptId(list),
-      canGenerate: this.canGenerate && this.timelineFor(libraryItem, episode).some((t) => t.duration > 0),
+      canGenerate: await this.canGenerateFor(libraryItem, episode),
       job: this.getJob(libraryItem.id, episode?.id || null)
     }
+  }
+
+  /**
+   * Whether a transcript can be generated for this book or episode: its audio has a known duration and either
+   * chapterbot is configured, or (books only) an EPUB made from the audio has read-along data to reuse.
+   *
+   * @param {import('../models/LibraryItem')} libraryItem - expanded
+   * @param {import('../models/PodcastEpisode')|null} episode
+   * @returns {Promise<boolean>}
+   */
+  async canGenerateFor(libraryItem, episode) {
+    if (libraryItem.isMissing) return false
+    if (!this.timelineFor(libraryItem, episode).some((t) => t.duration > 0)) return false
+    if (this.canGenerate) return true
+    if (episode) return false
+    for (const libraryFile of libraryItem.libraryFiles || []) {
+      if ((libraryFile.metadata?.ext || '').toLowerCase() !== '.epub') continue
+      try {
+        if (await readAlong.find(libraryItem, libraryFile)) return true
+      } catch {
+        // not usable
+      }
+    }
+    return false
   }
 
   /**
@@ -424,7 +453,8 @@ class TranscriptManager {
     const timeline = this.timelineFor(libraryItem, episode)
     if (!timeline.some((t) => t.duration > 0)) throw new TranscriptError('The item has no audio with a known duration')
     if (episode && method === 'readalong') throw new TranscriptError('Read-along data only exists for books')
-    if (method === 'transcribe' && !this.canGenerate) throw new TranscriptError('Generating transcripts needs chapterbot, which is not configured on this server (CHAPTERBOT_URL, CHAPTERBOT_TOKEN, CHAPTERBOT_PATH_MAP)')
+    if ((method === 'transcribe' || episode) && !this.canGenerate) throw new TranscriptError('Generating transcripts needs chapterbot, which is not configured on this server (CHAPTERBOT_URL, CHAPTERBOT_TOKEN, CHAPTERBOT_PATH_MAP)')
+    this.pruneFinished()
     const key = this.jobKey(libraryItem.id, episode?.id || null)
     const existing = this.jobs.get(key)
     if (existing && ACTIVE.has(existing.status)) throw new TranscriptError('A transcript is already being generated for this item', 409)
@@ -456,6 +486,14 @@ class TranscriptManager {
     this.emitJob(job)
     this.pump()
     return this.toJSON(job)
+  }
+
+  /** Forget finished jobs older than FINISHED_TTL_MS (automatic jobs for many episodes would otherwise pile up). */
+  pruneFinished() {
+    const now = this.now()
+    for (const [key, job] of this.jobs) {
+      if (!ACTIVE.has(job.status) && job.finishedAt && now - job.finishedAt > FINISHED_TTL_MS) this.jobs.delete(key)
+    }
   }
 
   /**

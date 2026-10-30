@@ -124,6 +124,15 @@ continued
       ])
     })
 
+    it('ends a cue at a separator line that holds only spaces', () => {
+      const srt = '1\n00:00:01,000 --> 00:00:02,000\nOne\n  \n2\n00:00:02,500 --> 00:00:04,000\nTwo\n\t\n\n3\n00:00:05,000 --> 00:00:06,000\nThree\n'
+      expect(transcripts.parseSubtitles(srt)).to.deep.equal([
+        { start: 1, end: 2, text: 'One' },
+        { start: 2.5, end: 4, text: 'Two' },
+        { start: 5, end: 6, text: 'Three' }
+      ])
+    })
+
     it('round-trips through buildVtt, escaping markup in cue text', () => {
       const cues = [
         { start: 0, end: 1.25, text: 'a <script> & --> b', speaker: 'Bob' },

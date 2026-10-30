@@ -418,6 +418,48 @@ describe('TranscriptManager and /api/items/:id/transcripts', () => {
       expect((await fetch(`${base}/${bookItemId}/transcripts/generate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"method":"transcribe"}' })).status).to.equal(202)
       await TranscriptManager.idle()
       expect(TranscriptManager.getJob(bookItemId, null)).to.include({ status: 'done', generatedFrom: 'transcribe' })
+
+      // without chapterbot a book with read-along data can still be generated, an episode cannot
+      chapterbotClient.configure({})
+      expect((await getJson(`${base}/${bookItemId}/transcripts`)).canGenerate).to.equal(true)
+      expect((await getJson(`${base}/${podcastItemId}/transcripts?episodeId=${episodeId}`)).canGenerate).to.equal(false)
+      const refused = await fetch(`${base}/${podcastItemId}/transcripts/generate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ episodeId }) })
+      expect(refused.status).to.equal(400)
+      expect(await refused.text()).to.match(/needs chapterbot/)
+      expect((await fetch(`${base}/${bookItemId}/transcripts/generate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status).to.equal(202)
+      await TranscriptManager.idle()
+      expect(TranscriptManager.getJob(bookItemId, null)).to.include({ status: 'done', generatedFrom: 'readalong' })
+    })
+
+    it('lists canGenerate false without chapterbot when a book has no read-along data', async () => {
+      chapterbotClient.configure({})
+      expect((await getJson(`${base}/${bookItemId}/transcripts`)).canGenerate).to.equal(false)
+    })
+
+    it('forgets finished jobs after an hour, and a retry wait ends at once on cancel', async () => {
+      TranscriptManager.start(await Database.libraryItemModel.getExpandedById(bookItemId), null, admin)
+      await TranscriptManager.idle()
+      expect(TranscriptManager.jobs.size).to.equal(1)
+      const realNow = TranscriptManager.now
+      TranscriptManager.now = () => realNow() + 2 * 60 * 60 * 1000
+      try {
+        TranscriptManager.pruneFinished()
+        expect(TranscriptManager.jobs.size).to.equal(0)
+      } finally {
+        TranscriptManager.now = realNow
+      }
+
+      const controller = new AbortController()
+      const waiting = TranscriptManager.sleep(60000, controller.signal)
+      controller.abort()
+      let error = null
+      await waiting.catch((e) => (error = e))
+      expect(error?.message).to.equal('aborted')
+      const aborted = new AbortController()
+      aborted.abort()
+      let early = null
+      await TranscriptManager.sleep(60000, aborted.signal).catch((e) => (early = e))
+      expect(early?.message).to.equal('aborted')
     })
 
     it('fails cleanly when the sidecar refuses, and reports a sidecar without /v1/transcribe', async () => {
