@@ -6,7 +6,8 @@ const Task = require('../objects/Task')
 const ffmpegHelpers = require('../utils/ffmpegHelpers')
 const Ffmpeg = require('../libs/fluentFfmpeg')
 const SocketAuthority = require('../SocketAuthority')
-const { isWritable, copyToExisting } = require('../utils/fileUtils')
+const fileUtils = require('../utils/fileUtils')
+const { isWritable, copyToExisting } = fileUtils
 const TrackProgressMonitor = require('../objects/TrackProgressMonitor')
 
 /**
@@ -17,11 +18,23 @@ const TrackProgressMonitor = require('../objects/TrackProgressMonitor')
  */
 
 class AbMergeManager {
-  constructor() {
+  /**
+   * @param {Object} [deps] - injectable for tests
+   * @param {(libraryItemId: string) => Promise<number>} [deps.scanItem]
+   * @param {{addIgnoreDir: Function, removeIgnoreDir: Function}} [deps.watcher]
+   */
+  constructor(deps = {}) {
     this.itemsCacheDir = Path.join(global.MetadataPath, 'cache/items')
 
     /** @type {Task[]} */
     this.pendingTasks = []
+
+    this.scanItem = deps.scanItem || ((libraryItemId) => require('../scanner/LibraryItemScanner').scanLibraryItem(libraryItemId))
+    this.watcher = deps.watcher || null
+  }
+
+  getWatcher() {
+    return this.watcher || require('../Watcher')
   }
 
   /**
@@ -66,6 +79,7 @@ class AbMergeManager {
     const taskData = {
       libraryItemId: libraryItem.id,
       libraryItemDir,
+      isFile: !!libraryItem.isFile,
       userId,
       originalTrackPaths: libraryItem.media.includedAudioFiles.map((t) => t.metadata.path),
       inos: libraryItem.media.includedAudioFiles.map((f) => f.ino),
@@ -200,6 +214,40 @@ class AbMergeManager {
       return
     }
 
+    // Keep the watcher off the item folder while the tracks are swapped, we rescan the item ourselves below.
+    // A single-file item lives directly in the library folder, so that folder is not ignored.
+    const watcher = this.getWatcher()
+    const ignoreDir = !task.data.isFile
+    if (ignoreDir) watcher.addIgnoreDir(task.data.libraryItemDir)
+    try {
+      await this.replaceTracksWithM4b(task)
+    } finally {
+      // The m4b usually overwrites the first track in place (same path and inode), which the watcher
+      // does not report, so the stored audio file kept the old bitrate, codec and size (#5675).
+      await this.rescanLibraryItem(task)
+      if (ignoreDir) watcher.removeIgnoreDir(task.data.libraryItemDir)
+    }
+    if (task.isFailed) {
+      // Not pending anymore if the user canceled meanwhile (cancelEncode already removed it)
+      if (this.pendingTasks.some((d) => d.id === task.id)) await this.removeTask(task, true)
+      return
+    }
+
+    // Remove ffmetadata file
+    await fs.remove(task.data.ffmetadataPath)
+
+    task.setFinished()
+    await this.removeTask(task, false)
+    Logger.info(`[AbMergeManager] Ab task finished ${task.id}`)
+  }
+
+  /**
+   * Back up the original tracks to the cache and move the encoded m4b into the item folder.
+   * Sets the task failed if the m4b could not be moved, the caller removes the task.
+   *
+   * @param {Task} task
+   */
+  async replaceTracksWithM4b(task) {
     // Move library item tracks to cache
     for (const [index, trackPath] of task.data.originalTrackPaths.entries()) {
       const trackFilename = Path.basename(trackPath)
@@ -239,16 +287,29 @@ class AbMergeManager {
         key: 'MessageTaskFailedToMoveM4bFile'
       }
       task.setFailed(taskFailedString)
-      this.removeTask(task, true)
+    }
+  }
+
+  /**
+   * Rescan the library item after its tracks were replaced, so the new audio file is probed and stored
+   * (bitrate, codec, size, duration) and the item update is emitted to clients.
+   * A failed rescan is logged and does not fail the encode.
+   *
+   * @param {Task} task
+   */
+  async rescanLibraryItem(task) {
+    const { libraryItemId, isFile, originalTrackPaths, targetFilepath } = task.data
+    if (isFile && fileUtils.filePathToPOSIX(originalTrackPaths[0]) !== fileUtils.filePathToPOSIX(targetFilepath)) {
+      // Single-file item whose file was renamed (e.g. book.mp3 -> book.m4b): the watcher reports the rename
+      // and rescans it with the new path. Scanning here too could race with the watcher's pending update.
+      Logger.debug(`[AbMergeManager] Single-file item "${libraryItemId}" was renamed, leaving the rescan to the watcher`)
       return
     }
-
-    // Remove ffmetadata file
-    await fs.remove(task.data.ffmetadataPath)
-
-    task.setFinished()
-    await this.removeTask(task, false)
-    Logger.info(`[AbMergeManager] Ab task finished ${task.id}`)
+    try {
+      await this.scanItem(libraryItemId)
+    } catch (error) {
+      Logger.error(`[AbMergeManager] Failed to rescan library item "${libraryItemId}" after m4b encode`, error)
+    }
   }
 
   /**
