@@ -1,9 +1,18 @@
-> [!WARNING]
-> **Personal fork. Not the official Audiobookshelf project, not affiliated with or endorsed by its maintainers.**
-> I use this for my own experiments and my own server. It is not supported, may break, and may never be updated. Use it at your own risk.
-> I am not accepting issues or PRs here, and changes are not being offered upstream.
-> For the real project, go to [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) and [audiobookshelf.org](https://www.audiobookshelf.org).
-> Licensed under GPL-3.0, like upstream.
+> [!NOTE]
+> **Personal fork of Audiobookshelf for learning and experiments; not affiliated with or supported by the Audiobookshelf project.**
+> The real project is [advplyr/audiobookshelf](https://github.com/advplyr/audiobookshelf) ([audiobookshelf.org](https://www.audiobookshelf.org)). This fork follows upstream `master`, and fixes that fit upstream are offered back as pull requests.
+>
+> Added in this fork (server):
+> - Chapter snap: move chapter starts onto the nearest pause in the audio (`POST /api/items/:id/chapters/snap`), with an optional speech check through an external sidecar
+> - EPUB from audio with read-along data, made through the same optional sidecar
+> - Automatic processing of new books (match, chapters, EPUB), off by default
+> - MP3 seek index detection and repair, book health / guided fix and a needs-work list
+> - Transcripts for audiobooks and podcast episodes
+> - Possible duplicate items listed on the Issues page, library search by file name or path
+> - Batch podcast episode update/delete and a POST library download route, advertised as `serverFeatures` in `GET /status`
+> - Fixes for several open upstream issues (progress sync, scanner duplicates, moved items, chapters and duration from included files, crash-safe async routes, offline session sync size, and others), each referencing the issue number in its commit
+>
+> Built with AI assistance (Claude). Licensed under GPL-3.0, like upstream.
 
 <br />
 <div align="center">
