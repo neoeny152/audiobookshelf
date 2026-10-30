@@ -75,6 +75,8 @@ describe('JSON body limits (#4755)', () => {
 
   afterEach(async () => {
     sinon.restore()
+    // A 401 can answer before a large body is fully sent; drop that connection (and idle keep-alive ones) so close() does not wait
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
   })
 
