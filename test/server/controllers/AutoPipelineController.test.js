@@ -160,6 +160,17 @@ describe('AutoPipelineController', () => {
     expect((await call('dismissItemPipeline')).statusCode).to.equal(404)
   })
 
+  it('a fix run: booleans only, and only an admin may allow rewriting the MP3s', async () => {
+    expect((await call('runItemPipeline', { body: { fix: 1 } })).statusCode).to.equal(400)
+    expect((await call('runItemPipeline', { body: { repairSeekIndex: 'yes' } })).statusCode).to.equal(400)
+    expect((await call('runItemPipeline', { body: { fix: true, repairSeekIndex: true }, reqUser: user({ isAdminOrUp: false }) })).sendStatus.calledWith(403)).to.equal(true)
+
+    const run = await call('runItemPipeline', { body: { fix: true, repairSeekIndex: true } })
+    expect(run.statusCode).to.equal(202)
+    expect(run.body).to.include({ trigger: 'fix', force: true, repairConsent: true, userId: 'user-1' })
+    expect(run.body.steps).to.deep.equal(['match', 'chapters'])
+  })
+
   it('the item middleware lets canUpdate users dismiss without canDelete', async () => {
     const run = async (method, path, reqUser) => {
       const res = fakeResponse()

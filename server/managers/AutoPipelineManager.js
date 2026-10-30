@@ -1,6 +1,7 @@
 const Path = require('path')
 const EventEmitter = require('events')
 const fs = require('../libs/fsExtra')
+const cron = require('../libs/nodeCron')
 const Logger = require('../Logger')
 const Database = require('../Database')
 const SocketAuthority = require('../SocketAuthority')
@@ -23,30 +24,37 @@ const chapterPlan = require('../utils/autoPipeline/chapterPlan')
  * (library.settings.autoPipeline):
  * 1. waiting: until the library is not being scanned and the files have settled (no change for settleMinutes, the
  *    same fingerprint on two checks a minute apart), so a copy in progress is not processed
- * 2. matching: Audible search, scored by utils/autoPipeline/matchScore.js; applied (same as quick match) only at or
- *    above autoMatchMinConfidence and when no second edition comes close. Never when the book already has an ASIN.
- * 3. chapters: Audible chapters (raw or without Audible branding, whichever fits the audio), snapped to silence and
- *    speech checked through chapterbot, applied only when every check passes (chapterPlan.evaluatePolicy); otherwise
- *    the proposal waits for review. Chapters a person edited are never changed without review. Every change is backed
- *    up and can be undone.
- * 4. epub: an EPUB from the audio through ChapterbotEpubManager, one pipeline job at a time; the worker does not wait.
+ * 2. repairing (planned with the chapters): MP3s whose stored length is off are rewritten with a seek index
+ *    (Mp3SeekIndexManager, originals backed up, chapter times kept), only with consent: the run's (repairSeekIndex) or
+ *    the library's autoRepairSeekIndex. Without it the chapters step stops for review ("needs your OK").
+ * 3. matching: Audible search, scored by utils/autoPipeline/matchScore.js; applied (same as quick match) only at or
+ *    above autoMatchMinConfidence (FIX_MIN_CONFIDENCE for a "Fix automatically" run) and when no second edition comes
+ *    close. Never when the book already has an ASIN.
+ * 4. chapters: Audible chapters (raw or without Audible branding, whichever fits the audio), snapped to silence and
+ *    speech checked through chapterbot, applied when every check passes (chapterPlan.evaluatePolicy); otherwise the
+ *    chapters that passed are applied and the proposal waits for review of the rest. Chapters a person edited are
+ *    never changed without review. Every change is backed up and can be undone.
+ * 5. epub: an EPUB from the audio through ChapterbotEpubManager, one pipeline job at a time; the worker does not wait.
  *
  * Gates: ABS_AUTO_PIPELINE=1 on the server (else nothing runs and the feature is not advertised), a per-library mode
- * that defaults to 'off', and 'dryRun', which runs every read step and writes nothing to the item.
+ * that defaults to 'off', and 'dryRun', which runs every read step and writes nothing to the item. With nightlySweep on,
+ * the never-processed books of a library are queued in its quiet hours, and their steps only run inside them.
  *
  * State is kept in JSON files under MetadataPath/pipeline (utils/autoPipeline/store.js). After a restart, a book whose
  * step was running starts that step again; every step is idempotent.
  */
 
-const STATUSES = Object.freeze(['queued', 'waiting', 'matching', 'chapters', 'epub', 'done', 'needs-review', 'failed', 'skipped'])
-const ACTIVE_STATUSES = new Set(['queued', 'waiting', 'matching', 'chapters', 'epub'])
+const STATUSES = Object.freeze(['queued', 'waiting', 'repairing', 'matching', 'chapters', 'epub', 'done', 'needs-review', 'failed', 'skipped'])
+const ACTIVE_STATUSES = new Set(['queued', 'waiting', 'repairing', 'matching', 'chapters', 'epub'])
 /** a state with one of these statuses was in the middle of a step when the server stopped */
-const RUNNING_STEPS = new Set(['matching', 'chapters'])
-const STEP_ORDER = Object.freeze(['match', 'chapters', 'epub'])
-const STEP_STATUS = Object.freeze({ match: 'matching', chapters: 'chapters', epub: 'epub' })
+const RUNNING_STEPS = new Set(['repairing', 'matching', 'chapters'])
+const STEP_ORDER = Object.freeze(['repair', 'match', 'chapters', 'epub'])
+const STEP_STATUS = Object.freeze({ repair: 'repairing', match: 'matching', chapters: 'chapters', epub: 'epub' })
 /** chapters results after which the EPUB step may run */
 const EPUB_OK_CHAPTERS = new Set(['applied', 'kept', 'approved', 'not-run', 'would-apply'])
 const MAX_ATTEMPTS = 3
+/** match threshold of a "Fix automatically" run (its scores use the measured MP3 length) */
+const FIX_MIN_CONFIDENCE = 90
 const MAX_SNAP_ROUNDS = 3
 const SPEECH_CHUNK = chapterbotSpeech.MAX_VERIFY_STARTS
 const MIN = 60 * 1000
@@ -65,7 +73,9 @@ const DEFAULT_TIMING = Object.freeze({
   /** chapterbot busy when starting an EPUB */
   epubBackoffMs: [2 * MIN, 5 * MIN, 10 * MIN, 10 * MIN, 10 * MIN, 30 * MIN],
   /** an unexpected error: retry the step after this */
-  errorRetryMs: 5 * MIN
+  errorRetryMs: 5 * MIN,
+  /** check on a running seek index repair (or an item busy with another task) this often */
+  repairPollMs: 15 * 1000
 })
 
 /**
@@ -96,6 +106,35 @@ function plainChapters(chapters) {
   return (chapters || []).map((c) => ({ title: c.title, start: c.start, end: c.end }))
 }
 
+function minutesOf(hhmm) {
+  const [h, m] = hhmm.split(':').map(Number)
+  return h * 60 + m
+}
+
+/**
+ * Whether `date` (server local time) is inside the quiet hours [sweepStart, sweepEnd); an end before the start
+ * crosses midnight.
+ */
+function inSweepWindow(settings, date) {
+  const t = date.getHours() * 60 + date.getMinutes()
+  const start = minutesOf(settings.sweepStart)
+  const end = minutesOf(settings.sweepEnd)
+  return start <= end ? t >= start && t < end : t >= start || t < end
+}
+
+/** ms from `date` to the next start of the quiet hours */
+function msToSweepStart(settings, date) {
+  const start = minutesOf(settings.sweepStart)
+  const next = new Date(date)
+  next.setHours(Math.floor(start / 60), start % 60, 0, 0)
+  if (next <= date) next.setDate(next.getDate() + 1)
+  return next - date
+}
+
+function localDate(date) {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
+}
+
 class AutoPipelineManager extends EventEmitter {
   constructor() {
     super()
@@ -118,6 +157,10 @@ class AutoPipelineManager extends EventEmitter {
     this.autoRun = true
     this.loopPromise = null
     this.onEpubEnded = this.onEpubEnded.bind(this)
+    /** nightly sweep: the cron job, and per library the local date it was last queued */
+    this.sweepTask = null
+    /** @type {Map<string, string>} */
+    this.sweptOn = new Map()
 
     // seams (tests replace these)
     this.bookFinder = null
@@ -192,6 +235,7 @@ class AutoPipelineManager extends EventEmitter {
     this.epubManager.removeListener('ended', this.onEpubEnded)
     this.epubManager.on('ended', this.onEpubEnded)
     this.initialized = true
+    if (this.autoRun) this.sweepTask = cron.schedule('*/15 * * * *', () => this.sweepTick())
 
     // EPUB jobs that ended while the server was down (or could not be adopted)
     for (const state of this.states.values()) {
@@ -224,6 +268,9 @@ class AutoPipelineManager extends EventEmitter {
   async reset() {
     clearTimeout(this.wakeTimer)
     this.wakeTimer = null
+    this.sweepTask?.stop()
+    this.sweepTask = null
+    this.sweptOn.clear()
     if (this.loopPromise) await this.loopPromise.catch(() => {})
     this.states.clear()
     this.store = null
@@ -288,6 +335,7 @@ class AutoPipelineManager extends EventEmitter {
 
   wouldText(state) {
     const parts = []
+    if (state.repair?.would) parts.push(state.repair.would)
     if (state.match?.would) parts.push(state.match.would)
     if (state.chapters?.would) parts.push(state.chapters.would)
     if (state.epub?.would) parts.push(state.epub.would)
@@ -296,15 +344,17 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   /**
-   * The steps a state runs: the explicit list of a manual run, otherwise the library's toggles.
+   * The steps a state runs: the explicit list of a manual run, otherwise the library's toggles. The repair comes with
+   * the chapters: it puts right the timeline they are snapped to.
    *
    * @param {Object} state
    * @param {Object} settings
    * @returns {string[]}
    */
   plannedSteps(state, settings) {
-    if (Array.isArray(state.steps) && state.steps.length) return STEP_ORDER.filter((s) => state.steps.includes(s))
-    return STEP_ORDER.filter((s) => (s === 'match' ? settings.autoMatch : s === 'chapters' ? settings.autoChapters : settings.autoEpub))
+    const explicit = Array.isArray(state.steps) && state.steps.length
+    const on = (s) => (explicit ? state.steps.includes(s) : s === 'match' ? settings.autoMatch : s === 'chapters' ? settings.autoChapters : settings.autoEpub)
+    return STEP_ORDER.filter((s) => on(s === 'repair' ? 'chapters' : s))
   }
 
   nextStep(state, settings, after) {
@@ -332,6 +382,7 @@ class AutoPipelineManager extends EventEmitter {
 
   doneReason(state) {
     const parts = []
+    if (state.repair?.result === 'repaired') parts.push(`MP3 seek index repaired (${state.repair.files} files)`)
     const m = state.match
     if (m?.result === 'matched') parts.push(`matched ${m.asin} at ${m.confidence} %`)
     else if (m?.result === 'existing-asin') parts.push(`ASIN ${m.asin} kept`)
@@ -376,7 +427,7 @@ class AutoPipelineManager extends EventEmitter {
     this.kick()
   }
 
-  async createState(libraryItemId, library, settings, { trigger, steps = null, force = false, manual = false, title = null }) {
+  async createState(libraryItemId, library, settings, { trigger, steps = null, force = false, manual = false, title = null, userId = null, repairConsent = false }) {
     let itemTitle = title
     if (!itemTitle) {
       const li = await Database.libraryItemModel.findByPk(libraryItemId, { attributes: ['id', 'title'] })
@@ -396,6 +447,8 @@ class AutoPipelineManager extends EventEmitter {
       manual,
       steps,
       force,
+      userId,
+      repairConsent,
       queuedAt: now,
       updatedAt: now,
       finishedAt: null,
@@ -403,6 +456,7 @@ class AutoPipelineManager extends EventEmitter {
       notBefore: 0,
       fingerprint: null,
       waitCheck: null,
+      repair: null,
       match: null,
       chapters: null,
       epub: null
@@ -418,11 +472,13 @@ class AutoPipelineManager extends EventEmitter {
    *
    * @param {import('../models/LibraryItem')} libraryItem
    * @param {import('../models/Library')} library
-   * @param {{steps?: string[], force?: boolean}} [opts]
+   * @param {{steps?: string[], force?: boolean, fix?: boolean, repairConsent?: boolean, userId?: string|null}} [opts]
+   *   fix: "Fix automatically" (match and chapters unless steps says otherwise, force, FIX_MIN_CONFIDENCE);
+   *   repairConsent: MP3s that need it may be rewritten in this run (seek index repair)
    * @returns {Promise<Object>} state
    * @throws {PipelineError}
    */
-  async runItem(libraryItem, library, { steps = null, force = false } = {}) {
+  async runItem(libraryItem, library, { steps = null, force = false, fix = false, repairConsent = false, userId = null } = {}) {
     this.assertEnabled()
     if (!libraryItem.isBook || library.mediaType !== 'book') throw new PipelineError(400, 'The auto pipeline only processes books')
     if (this.current === libraryItem.id) throw new PipelineError(409, 'The item is being processed right now')
@@ -434,7 +490,15 @@ class AutoPipelineManager extends EventEmitter {
       await this.store.removeProposal(libraryItem.id).catch(() => {})
       await this.store.removeAnalysis(libraryItem.id).catch(() => {})
     }
-    const state = await this.createState(libraryItem.id, library, settings, { trigger: 'manual', steps, force: !!force, manual: true, title: libraryItem.media?.title || libraryItem.title })
+    const state = await this.createState(libraryItem.id, library, settings, {
+      trigger: fix ? 'fix' : 'manual',
+      steps: fix && !steps ? ['match', 'chapters'] : steps,
+      force: !!force || fix,
+      manual: true,
+      title: libraryItem.media?.title || libraryItem.title,
+      userId,
+      repairConsent
+    })
     // a pipeline-applied chapter list stays recognisable across runs
     const appliedHash = existing?.chapters?.appliedHash || existing?.chapters?.pendingHash
     if (appliedHash) state.chapters = { appliedHash }
@@ -447,9 +511,11 @@ class AutoPipelineManager extends EventEmitter {
    *
    * @param {import('../models/Library')} library
    * @param {'unprocessed'|'all'} scope
+   * @param {{trigger?: 'manual'|'sweep'}} [opts] - sweep: queued by the nightly sweep, which stops when the library is
+   *   turned off and runs only in the quiet hours
    * @returns {Promise<{queued: number}>}
    */
-  async runLibrary(library, scope) {
+  async runLibrary(library, scope, { trigger = 'manual' } = {}) {
     this.assertEnabled()
     if (library.mediaType !== 'book') throw new PipelineError(400, 'The auto pipeline only processes books')
     const items = (await Database.libraryItemModel.findAll({ where: { libraryId: library.id, mediaType: 'book' }, attributes: ['id', 'title', 'isMissing'] })).filter((li) => !li.isMissing)
@@ -465,7 +531,7 @@ class AutoPipelineManager extends EventEmitter {
         await this.store.removeProposal(li.id).catch(() => {})
         await this.store.removeAnalysis(li.id).catch(() => {})
       }
-      const state = await this.createState(li.id, library, settings, { trigger: 'manual', manual: true, title: li.title })
+      const state = await this.createState(li.id, library, settings, { trigger, manual: trigger !== 'sweep', title: li.title })
       const appliedHash = existing?.chapters?.appliedHash || existing?.chapters?.pendingHash
       if (appliedHash) state.chapters = { appliedHash }
       queued++
@@ -521,9 +587,44 @@ class AutoPipelineManager extends EventEmitter {
     this.kick()
   }
 
-  /** queued, waiting, or an EPUB step waiting for its lane */
+  /** queued, waiting, polling a seek index repair, or an EPUB step waiting for its lane */
   isWaitingToRun(state) {
-    return state.status === 'queued' || state.status === 'waiting' || (state.status === 'epub' && state.epub?.result === 'queued')
+    return state.status === 'queued' || state.status === 'waiting' || state.status === 'repairing' || (state.status === 'epub' && state.epub?.result === 'queued')
+  }
+
+  /**
+   * Every 15 minutes: a library with the nightly sweep on queues its never-processed books once a night, at the first
+   * tick inside its quiet hours. Kept in memory: after a restart inside the window they are queued again, which only
+   * adds books that still have no state.
+   */
+  async sweepTick() {
+    if (!this.enabled) return
+    const now = new Date(this.now())
+    const today = localDate(now)
+    for (const library of await Database.libraryModel.findAll({ where: { mediaType: 'book' } })) {
+      const settings = normalizeAutoPipelineSettings(library.settings?.autoPipeline)
+      if (!settings.nightlySweep || settings.mode === 'off' || !inSweepWindow(settings, now) || this.sweptOn.get(library.id) === today) continue
+      this.sweptOn.set(library.id, today)
+      const { queued } = await this.runLibrary(library, 'unprocessed', { trigger: 'sweep' })
+      Logger.info(`[AutoPipeline] Nightly sweep of library "${library.name}": ${queued} book(s) queued`)
+    }
+  }
+
+  /**
+   * A book the nightly sweep queued runs its steps only in the library's quiet hours; outside them it waits for the
+   * next start.
+   *
+   * @param {Object} state
+   * @returns {Promise<boolean>} true when the state was put back to wait
+   */
+  async deferToQuietHours(state) {
+    const library = await Database.libraryModel.findByPk(state.libraryId)
+    const settings = normalizeAutoPipelineSettings(library?.settings?.autoPipeline)
+    const now = new Date(this.now())
+    if (inSweepWindow(settings, now)) return false
+    this.queued(state, state.step || 'waiting', 'waiting for the quiet hours', msToSweepStart(settings, now))
+    await this.save(state)
+    return true
   }
 
   /**
@@ -673,7 +774,7 @@ class AutoPipelineManager extends EventEmitter {
     let best = null
     for (const s of this.states.values()) {
       if (s.notBefore && s.notBefore > now) continue
-      const runnable = s.status === 'queued' || s.status === 'waiting' || (s.status === 'epub' && s.epub?.result === 'queued' && !laneBusy)
+      const runnable = s.status === 'queued' || s.status === 'waiting' || s.status === 'repairing' || (s.status === 'epub' && s.epub?.result === 'queued' && !laneBusy)
       if (!runnable) continue
       if (!best || s.queuedAt < best.queuedAt) best = s
     }
@@ -705,6 +806,7 @@ class AutoPipelineManager extends EventEmitter {
    */
   async process(state) {
     const id = state.libraryItemId
+    if (state.trigger === 'sweep' && (await this.deferToQuietHours(state))) return
     this.current = id
     const step = state.step || 'waiting'
     state.status = step === 'epub' ? 'epub' : step
@@ -734,6 +836,7 @@ class AutoPipelineManager extends EventEmitter {
       if (!(await this.followMode(state, settings))) return
 
       if (step === 'waiting') await this.stepWaiting(state, libraryItem, library, settings)
+      else if (step === 'repairing') await this.stepRepair(state, libraryItem, library, settings)
       else if (step === 'matching') await this.stepMatching(state, libraryItem, library, settings)
       else if (step === 'chapters') await this.stepChapters(state, libraryItem, library, settings)
       else if (step === 'epub') await this.stepEpub(state, libraryItem, library, settings)
@@ -849,7 +952,70 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   //
-  // Step 2: matching
+  // Step 2: repair
+  //
+
+  /**
+   * MP3s whose stored length is off by more than a second (no seek header) put every chapter after them off. With
+   * consent they are repaired (Mp3SeekIndexManager, originals kept as a backup, chapter times kept); without it the
+   * step only records them and the chapters step stops for review. The worker never waits on the repair task: the
+   * step comes back every repairPollMs until it ended.
+   */
+  async stepRepair(state, libraryItem, library, settings) {
+    const manager = this.apiRouter?.mp3SeekIndexManager
+    const poll = (reason) => {
+      this.queued(state, 'repairing', reason, this.timing.repairPollMs)
+      if (state.repair?.result === 'running') state.status = 'repairing'
+      return this.save(state)
+    }
+    let lost = false
+    if (state.repair?.result === 'running') {
+      if (manager.getIsLibraryItemQueuedOrProcessing(libraryItem.id)) return poll('repairing the MP3 files')
+      const result = manager.lastResults.get(libraryItem.id)
+      if (result && result.finishedAt >= state.repair.startedAt) {
+        const failed = result.files.filter((f) => f.status === 'failed').length
+        if (failed) {
+          state.repair = { ...state.repair, result: 'failed' }
+          return this.finish(state, 'failed', `repair: ${failed} file(s) failed`)
+        }
+        state.repair = { ...state.repair, result: 'repaired', oldTotalDuration: result.oldTotalDuration, newTotalDuration: result.newTotalDuration, backupId: result.backupId || null }
+        this.log(state, 'repair', `repaired ${state.repair.files} MP3 file(s), ${result.oldTotalDuration.toFixed(1)}s -> ${result.newTotalDuration.toFixed(1)}s`)
+        return this.advance(state, settings, 'repair')
+      }
+      // no result: the server restarted during the repair, or the task failed before it began (twice: give up)
+      if (state.repair.lost) return this.finish(state, 'failed', 'repair: the repair task ended without a result')
+      lost = true
+    }
+
+    const status = await this.seekIndexStatus(libraryItem)
+    if (status?.processing) return poll('waiting for the seek index repair of the item')
+    if (!status?.needsRepairCount) {
+      state.repair = { result: 'not-needed' }
+      return this.advance(state, settings, 'repair')
+    }
+    const files = status.needsRepairCount
+    const maxDrift = Math.round(status.maxDrift * 10) / 10
+    // a single-file item is never repaired (as on the Tools page)
+    if (!(state.repairConsent || settings.autoRepairSeekIndex) || libraryItem.isFile) {
+      state.repair = { result: 'needs-ok', files, maxDrift }
+      this.log(state, 'repair', `${files} MP3 file(s) off by up to ${maxDrift}s, not repaired without an OK`)
+      return this.advance(state, settings, 'repair')
+    }
+    if (state.dryRun) {
+      state.repair = { result: 'would-repair', files, maxDrift, would: `would repair ${files} MP3 file(s)` }
+      return this.advance(state, settings, 'repair')
+    }
+    if (this.apiRouter.audioMetadataManager.getIsLibraryItemQueuedOrProcessing(libraryItem.id) || this.apiRouter.abMergeManager.getPendingTaskByLibraryItemId(libraryItem.id)) {
+      return poll('waiting for another task on the item')
+    }
+    const task = manager.startRepair(state.userId || null, libraryItem, { chapters: 'keep' })
+    state.repair = { result: 'running', taskId: task.id, files, maxDrift, startedAt: this.now(), ...(lost ? { lost } : {}) }
+    this.log(state, 'repair', `repairing ${files} MP3 file(s) off by up to ${maxDrift}s`)
+    return poll('repairing the MP3 files')
+  }
+
+  //
+  // Step 3: matching
   //
 
   async stepMatching(state, libraryItem, library, settings) {
@@ -877,14 +1043,15 @@ class AutoPipelineManager extends EventEmitter {
     await this.seekIndexStatus(libraryItem)
     const results = await this.getBookFinder().search(libraryItem, provider, media.title, media.authorName, media.isbn, null, { maxFuzzySearches: 2 })
     const candidates = (Array.isArray(results) ? results : []).slice(0, MAX_CANDIDATES)
-    const decision = pickMatch(itemForScoring(libraryItem), candidates, settings.autoMatchMinConfidence)
+    const minConfidence = state.trigger === 'fix' ? FIX_MIN_CONFIDENCE : settings.autoMatchMinConfidence
+    const decision = pickMatch(itemForScoring(libraryItem), candidates, minConfidence)
     state.match = {
       result: decision.result,
       reason: decision.reason,
       confidence: decision.confidence,
       asin: decision.asin,
       provider,
-      minConfidence: settings.autoMatchMinConfidence,
+      minConfidence,
       candidates: decision.candidates
     }
     const scores = decision.candidates.map(
@@ -927,7 +1094,7 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   //
-  // Step 3: chapters
+  // Step 4: chapters
   //
 
   /**
@@ -1126,11 +1293,36 @@ class AutoPipelineManager extends EventEmitter {
       this.log(state, 'chapters', `${evaluation.apply ? 'passes' : 'fails'} the apply policy (${merged.chapters.length} chapters, moved ${merged.stats?.moved ?? '?'}${summary ? `; ${summary}` : ''})`)
 
       if (!evaluation.apply) {
-        await this.store.saveProposal(libraryItem.id, { libraryItemId: libraryItem.id, createdAt: this.now(), dryRun: !!state.dryRun, fingerprint, source, diffSec: source.diffSec ?? null, snap: merged, failing: evaluation.failing, blockers: evaluation.blockers, proposedChapters: proposed, currentChapters: current })
+        // no global blocker: the chapters that passed are applied, the flagged ones keep their source start for review
+        const flagged = new Set(evaluation.failing.map((f) => f.index))
+        let partial = null
+        let applied = null
+        if (!evaluation.blockers.length && merged.chapters.some((c) => c.index > 0 && !flagged.has(c.index))) {
+          const starts = merged.chapters.map((c) => (flagged.has(c.index) ? c.originalStart : c.proposedStart))
+          partial = proposed.map((c, i) => ({ title: c.title, start: starts[i], end: i + 1 < starts.length ? starts[i + 1] : c.end }))
+          if (!state.dryRun && !chapterPlan.chaptersEqual(partial, current)) {
+            applied = await this.applyProposal(state, libraryItem.id, partial, { fingerprint, source: source.kind === 'scanner' ? 'scanner-check' : `audible:${source.kind}`, reason: 'auto-partial', auto: true })
+            if (applied.blocked) throw new StepSuperseded(applied.blocked)
+            if (applied.changedAudio) {
+              await this.store.removeAnalysis(libraryItem.id).catch(() => {})
+              state.chapters = { ...keep, result: null }
+              this.queued(state, 'chapters', 'the audio changed during the analysis, analysing again')
+              return this.save(state)
+            }
+          }
+        }
+        await this.store.saveProposal(libraryItem.id, { libraryItemId: libraryItem.id, createdAt: this.now(), dryRun: !!state.dryRun, fingerprint, source, diffSec: source.diffSec ?? null, snap: merged, failing: evaluation.failing, blockers: evaluation.blockers, proposedChapters: proposed, currentChapters: applied ? partial : current })
         await this.store.removeAnalysis(libraryItem.id).catch(() => {})
-        state.chapters = { ...base, result: 'needs-review', reason: summary }
-        if (state.dryRun) state.chapters.would = `would need review: ${summary}`
-        return this.finish(state, 'needs-review', `chapters: ${summary}`)
+        if (!partial) {
+          state.chapters = { ...base, result: 'needs-review', reason: summary }
+          if (state.dryRun) state.chapters.would = `would need review: ${summary}`
+          return this.finish(state, 'needs-review', `chapters: ${summary}`)
+        }
+        const counts = { applied: proposed.length - flagged.size, flagged: flagged.size }
+        state.chapters = { ...base, result: 'needs-review', reason: summary, partial: counts, ...(applied ? { appliedHash: applied.appliedHash, backup: applied.backup } : {}) }
+        if (state.dryRun) state.chapters.would = `would apply ${counts.applied} chapters, ${counts.flagged} wait for review`
+        else this.log(state, 'chapters', `applied ${counts.applied} chapters${applied ? ` (backup ${applied.backup})` : ' (already in place)'}, ${counts.flagged} wait for review`)
+        return this.finish(state, 'needs-review', `chapters: ${counts.applied} applied, ${counts.flagged} need review (${summary})`)
       }
       if (chapterPlan.chaptersEqual(proposed, current)) {
         await this.store.removeAnalysis(libraryItem.id).catch(() => {})
@@ -1220,7 +1412,7 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   //
-  // Step 4: EPUB
+  // Step 5: EPUB
   //
 
   async stepEpub(state, libraryItem, library, settings) {
@@ -1410,6 +1602,7 @@ const manager = new AutoPipelineManager()
 module.exports = manager
 module.exports.AutoPipelineManager = AutoPipelineManager
 module.exports.PipelineError = PipelineError
+module.exports.FIX_MIN_CONFIDENCE = FIX_MIN_CONFIDENCE
 module.exports.StepSuperseded = StepSuperseded
 module.exports.STATUSES = STATUSES
 module.exports.ACTIVE_STATUSES = ACTIVE_STATUSES

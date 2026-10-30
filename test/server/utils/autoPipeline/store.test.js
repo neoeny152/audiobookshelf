@@ -90,22 +90,25 @@ describe('autoPipeline store', () => {
 })
 
 describe('autoPipeline settings', () => {
-  it('defaults are off, 95 %, chapters on, EPUB off, 5 settle minutes', () => {
-    expect(settings.defaultAutoPipelineSettings()).to.deep.equal({ mode: 'off', autoMatch: true, autoMatchMinConfidence: 95, autoMatchProvider: null, autoChapters: true, autoEpub: false, settleMinutes: 5 })
+  it('defaults are off, 95 %, chapters on, EPUB off, 5 settle minutes, no repair or sweep without asking', () => {
+    expect(settings.defaultAutoPipelineSettings()).to.deep.equal({ mode: 'off', autoMatch: true, autoMatchMinConfidence: 95, autoMatchProvider: null, autoChapters: true, autoEpub: false, settleMinutes: 5, autoRepairSeekIndex: false, nightlySweep: false, sweepStart: '01:00', sweepEnd: '06:00' })
   })
 
   it('merges a partial object and validates each field', () => {
     const current = settings.defaultAutoPipelineSettings()
     expect(settings.mergeAutoPipelineSettings(current, { mode: 'dryRun', autoEpub: true, bogus: 1 })).to.deep.equal({ ...current, mode: 'dryRun', autoEpub: true })
-    const bad = ['x', [], { mode: 'sometimes' }, { autoMatch: 'yes' }, { autoMatchMinConfidence: 49 }, { autoMatchMinConfidence: 101 }, { autoMatchMinConfidence: 95.5 }, { settleMinutes: 0 }, { settleMinutes: 121 }, { autoMatchProvider: 'google' }, { autoMatchProvider: 5 }]
+    const bad = ['x', [], { mode: 'sometimes' }, { autoMatch: 'yes' }, { autoMatchMinConfidence: 49 }, { autoMatchMinConfidence: 101 }, { autoMatchMinConfidence: 95.5 }, { settleMinutes: 0 }, { settleMinutes: 121 }, { autoMatchProvider: 'google' }, { autoMatchProvider: 5 }, { autoRepairSeekIndex: 1 }, { nightlySweep: 'on' }, { sweepStart: '24:00' }, { sweepEnd: '6:00' }]
     for (const value of bad) expect(() => settings.mergeAutoPipelineSettings(current, value), JSON.stringify(value)).to.throw(settings.AutoPipelineSettingsError)
     expect(settings.mergeAutoPipelineSettings(current, { autoMatchProvider: 'audible.uk' }).autoMatchProvider).to.equal('audible.uk')
     expect(settings.mergeAutoPipelineSettings({ ...current, autoMatchProvider: 'audible.uk' }, { autoMatchProvider: null }).autoMatchProvider).to.equal(null)
+    expect(settings.mergeAutoPipelineSettings(current, { autoRepairSeekIndex: true, nightlySweep: true, sweepStart: '23:30', sweepEnd: '05:15' })).to.include({ autoRepairSeekIndex: true, nightlySweep: true, sweepStart: '23:30', sweepEnd: '05:15' })
   })
 
   it('normalizes stored values key by key', () => {
     expect(settings.normalizeAutoPipelineSettings(undefined).mode).to.equal('off')
     expect(settings.normalizeAutoPipelineSettings({ mode: 'on', settleMinutes: 9999 })).to.include({ mode: 'on', settleMinutes: 5 })
+    // stored before the seek index and sweep settings existed
+    expect(settings.normalizeAutoPipelineSettings({ mode: 'on' })).to.include({ autoRepairSeekIndex: false, nightlySweep: false, sweepStart: '01:00', sweepEnd: '06:00' })
   })
 
   it('gate, provider and region', () => {

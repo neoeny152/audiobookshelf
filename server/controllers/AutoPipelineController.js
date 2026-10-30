@@ -90,8 +90,10 @@ class AutoPipelineController {
   }
 
   /**
-   * POST: /api/items/:id/pipeline/run { steps?: ['match','chapters','epub'], force?: boolean } -> 202 state
-   * force analyses chapters a person edited too; applying them still goes through review.
+   * POST: /api/items/:id/pipeline/run { steps?: ['match','chapters','epub'], force?: boolean, fix?: boolean, repairSeekIndex?: boolean } -> 202 state
+   * force analyses chapters a person edited too; applying them still goes through review. fix: "Fix automatically"
+   * (match and chapters, force, match threshold FIX_MIN_CONFIDENCE). repairSeekIndex (admin): MP3s that need it may
+   * be rewritten in this run.
    */
   async runItemPipeline(req, res) {
     if (!guard(req, res)) return
@@ -101,11 +103,17 @@ class AutoPipelineController {
       if (!Array.isArray(body.steps) || !body.steps.length || body.steps.some((s) => !STEPS.includes(s))) return res.status(400).json({ error: `steps must be a non-empty array of ${STEPS.join(', ')}` })
       steps = [...new Set(body.steps)]
     }
-    if (body.force !== undefined && typeof body.force !== 'boolean') return res.status(400).json({ error: 'force must be a boolean' })
+    for (const key of ['force', 'fix', 'repairSeekIndex']) {
+      if (body[key] !== undefined && typeof body[key] !== 'boolean') return res.status(400).json({ error: `${key} must be a boolean` })
+    }
+    if (body.repairSeekIndex && !req.user.isAdminOrUp) {
+      Logger.warn(`[AutoPipelineController] Non-admin user "${req.user.username}" attempted to allow a seek index repair`)
+      return res.sendStatus(403)
+    }
     try {
       const library = await Database.libraryModel.findByPk(req.libraryItem.libraryId)
       if (!library) return res.sendStatus(404)
-      res.status(202).json(await AutoPipelineManager.runItem(req.libraryItem, library, { steps, force: !!body.force }))
+      res.status(202).json(await AutoPipelineManager.runItem(req.libraryItem, library, { steps, force: !!body.force, fix: !!body.fix, repairConsent: !!body.repairSeekIndex, userId: req.user.id }))
     } catch (error) {
       sendError(res, error, 'Queueing the item')
     }

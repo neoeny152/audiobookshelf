@@ -17,10 +17,17 @@ const DEFAULT_AUTO_PIPELINE = Object.freeze({
   autoMatchProvider: null,
   autoChapters: true,
   autoEpub: false,
-  settleMinutes: 5
+  settleMinutes: 5,
+  /** rewrite MP3s whose stored length is off (seek index repair, with a backup) without asking */
+  autoRepairSeekIndex: false,
+  /** work through never-processed books of the library in the quiet hours [sweepStart, sweepEnd), server local time */
+  nightlySweep: false,
+  sweepStart: '01:00',
+  sweepEnd: '06:00'
 })
 
 const PROVIDER_RE = /^audible(\.[a-z]{2,3})?$/
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/
 
 class AutoPipelineSettingsError extends Error {
   constructor(message) {
@@ -82,6 +89,8 @@ function mergeAutoPipelineSettings(current, update) {
       case 'autoMatch':
       case 'autoChapters':
       case 'autoEpub':
+      case 'autoRepairSeekIndex':
+      case 'nightlySweep':
         if (typeof value !== 'boolean') throw new AutoPipelineSettingsError(`Setting "autoPipeline.${key}" must be a boolean`)
         break
       case 'autoMatchMinConfidence':
@@ -92,6 +101,10 @@ function mergeAutoPipelineSettings(current, update) {
         break
       case 'autoMatchProvider':
         if (value !== null && (typeof value !== 'string' || !PROVIDER_RE.test(value))) throw new AutoPipelineSettingsError('Setting "autoPipeline.autoMatchProvider" must be null or an Audible provider (audible, audible.uk, ...)')
+        break
+      case 'sweepStart':
+      case 'sweepEnd':
+        if (typeof value !== 'string' || !TIME_RE.test(value)) throw new AutoPipelineSettingsError(`Setting "autoPipeline.${key}" must be a time HH:MM`)
         break
     }
     next[key] = value

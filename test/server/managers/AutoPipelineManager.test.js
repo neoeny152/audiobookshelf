@@ -141,7 +141,7 @@ describe('AutoPipelineManager', () => {
   async function runAll(maxRounds = 40) {
     for (let round = 0; round < maxRounds; round++) {
       await manager.drain()
-      const waiting = [...manager.states.values()].filter((s) => (s.status === 'queued' || s.status === 'waiting' || (s.status === 'epub' && s.epub?.result === 'queued')) && s.notBefore > clock)
+      const waiting = [...manager.states.values()].filter((s) => (s.status === 'queued' || s.status === 'waiting' || s.status === 'repairing' || (s.status === 'epub' && s.epub?.result === 'queued')) && s.notBefore > clock)
       if (!waiting.length) return
       clock = Math.min(...waiting.map((s) => s.notBefore))
     }
@@ -553,12 +553,12 @@ describe('AutoPipelineManager', () => {
       await runAll()
       const state = stateOf(id)
       expect(state).to.include({ status: 'needs-review' })
-      expect(state.reason).to.match(/^chapters: .*1 LATE/)
+      expect(state.reason).to.match(/^chapters: 4 applied, 1 need review \(.*1 LATE/)
       expect(epub.start.called).to.equal(false)
-      // the matched ASIN stays, the chapters do not change
+      // the matched ASIN stays; the chapters that passed are applied, the LATE one keeps its Audible start
       const li = await getItem(id)
       expect(li.media.asin).to.equal(ASIN)
-      expect(li.media.chapters).to.have.length(4)
+      expect(li.media.chapters.map((c) => [c.title, c.start])).to.deep.equal(BOOK_TITLES.map((t, i) => [t, BOOK_STARTS[i]]))
 
       const proposal = await manager.getProposal(id)
       expect(proposal.source).to.include({ kind: 'aligned', asin: ASIN })
@@ -576,7 +576,7 @@ describe('AutoPipelineManager', () => {
       expect(approved).to.include({ status: 'epub' })
       expect((await getItem(id)).media.chapters[2].start).to.equal(1490)
       expect(await manager.getProposal(id)).to.equal(null)
-      expect(await manager.listBackups(id)).to.have.length(1)
+      expect(await manager.listBackups(id)).to.have.length(2)
       await runAll()
       expect(epub.start.calledOnce).to.equal(true)
 
@@ -599,7 +599,8 @@ describe('AutoPipelineManager', () => {
       expect(rejected.chapters.result).to.equal('rejected')
       await runAll()
       expect(epub.start.calledOnce).to.equal(true)
-      expect((await getItem(id)).media.chapters).to.have.length(4)
+      // the chapters applied before the review stay
+      expect((await getItem(id)).media.chapters).to.have.length(5)
 
       const id2 = await createItem({ dir: makeDir('other'), title: 'Dungeon Crawler Carl' })
       await addItems([id2])
@@ -848,7 +849,8 @@ describe('AutoPipelineManager', () => {
       await addItems([id])
       await runAll()
       expect(stateOf(id)).to.include({ status: 'needs-review', dryRun: true })
-      expect(stateOf(id).would).to.match(/^would match B08BX5HZ5M at 100 %; would need review: .*1 LATE/)
+      expect(stateOf(id).would).to.equal('would match B08BX5HZ5M at 100 %; would apply 4 chapters, 1 wait for review')
+      expect((await getItem(id)).media.chapters).to.have.length(4)
       let error
       try {
         await manager.approve(id)
@@ -1197,6 +1199,152 @@ describe('AutoPipelineManager', () => {
       state.step = 'chapters'
       await manager.drain()
       expect(stateOf(id).chapters).to.include({ result: 'kept', reason: 'already-correct', current: 'pipeline' })
+    })
+  })
+
+  describe('guided fix', () => {
+    /** Mp3SeekIndexManager stand-in: `needs` files need a repair until end() */
+    function fakeSeekIndex({ needs = 2 } = {}) {
+      const fake = {
+        needs,
+        busy: false,
+        lastResults: new Map(),
+        getStatus: sinon.spy(async () => ({ needsRepairCount: fake.needs, maxDrift: fake.needs ? 43.38 : 0, processing: fake.busy })),
+        getIsLibraryItemQueuedOrProcessing: () => fake.busy,
+        startRepair: sinon.spy((userId, li) => {
+          fake.busy = true
+          fake.itemId = li.id
+          return { id: 'task-1' }
+        }),
+        end({ failed = 0 } = {}) {
+          fake.busy = false
+          if (!failed) fake.needs = 0
+          const files = [...Array(needs)].map((_, i) => ({ filename: `part${i}.mp3`, status: i < failed ? 'failed' : 'repaired' }))
+          fake.lastResults.set(fake.itemId, { finishedAt: clock, files, oldTotalDuration: T, newTotalDuration: T + 90, backupId: 'bk-1' })
+        }
+      }
+      apiRouter.mp3SeekIndexManager = fake
+      apiRouter.audioMetadataManager = { getIsLibraryItemQueuedOrProcessing: () => false }
+      apiRouter.abMergeManager = { getPendingTaskByLibraryItemId: () => null }
+      return fake
+    }
+
+    it('repairs with the run\'s consent: starts the task, polls it, then matches and applies the chapters', async () => {
+      const seek = fakeSeekIndex()
+      const id = await createItem()
+      await manager.runItem(await getItem(id), await Database.libraryModel.findByPk(libraryId), { fix: true, repairConsent: true, userId: 'user-1' })
+      expect(stateOf(id)).to.include({ trigger: 'fix', force: true, repairConsent: true, userId: 'user-1' })
+      await manager.drain()
+      expect(seek.startRepair.calledOnce).to.be.true
+      expect(seek.startRepair.firstCall.args[0]).to.equal('user-1')
+      expect(seek.startRepair.firstCall.args[2]).to.deep.equal({ chapters: 'keep' })
+      expect(stateOf(id)).to.include({ status: 'repairing', step: 'repairing', reason: 'repairing the MP3 files' })
+      expect(stateOf(id).repair).to.include({ result: 'running', taskId: 'task-1', files: 2, maxDrift: 43.4 })
+
+      clock += manager.timing.repairPollMs
+      await manager.drain()
+      expect(stateOf(id).status).to.equal('repairing')
+      seek.end()
+      await runAll()
+      const state = stateOf(id)
+      expect(state.repair).to.include({ result: 'repaired', oldTotalDuration: T, newTotalDuration: T + 90, backupId: 'bk-1' })
+      expect(state.match).to.include({ result: 'matched', minConfidence: 90 })
+      expect(state).to.include({ status: 'done', reason: `MP3 seek index repaired (2 files), matched ${ASIN} at 100 %, 5 chapters applied` })
+      expect(seek.startRepair.calledOnce).to.be.true
+    })
+
+    it('without consent the files are left alone and the chapters stop for an OK; the library setting is consent', async () => {
+      const seek = fakeSeekIndex()
+      const id = await createItem({ asin: ASIN })
+      await addItems([id])
+      await runAll()
+      expect(stateOf(id).repair).to.deep.equal({ result: 'needs-ok', files: 2, maxDrift: 43.4 })
+      expect(stateOf(id).chapters).to.include({ result: 'needs-review', reason: 'needs-seek-index-repair' })
+      expect(seek.startRepair.called).to.be.false
+
+      await setLibrarySettings({ autoRepairSeekIndex: true })
+      await manager.runItem(await getItem(id), await Database.libraryModel.findByPk(libraryId), {})
+      await manager.drain()
+      expect(seek.startRepair.calledOnce).to.be.true
+    })
+
+    it('a dry run says what it would repair; a failed repair fails the run', async () => {
+      const seek = fakeSeekIndex()
+      await setLibrarySettings({ mode: 'dryRun', autoRepairSeekIndex: true })
+      const id = await createItem({ asin: ASIN })
+      await addItems([id])
+      await runAll()
+      expect(seek.startRepair.called).to.be.false
+      expect(stateOf(id).repair).to.include({ result: 'would-repair', would: 'would repair 2 MP3 file(s)' })
+      expect(stateOf(id).would).to.match(/^would repair 2 MP3 file\(s\); /)
+
+      await setLibrarySettings({ mode: 'on' })
+      await manager.runItem(await getItem(id), await Database.libraryModel.findByPk(libraryId), { repairConsent: true })
+      await manager.drain()
+      seek.end({ failed: 1 })
+      await runAll()
+      expect(stateOf(id)).to.include({ status: 'failed', reason: 'repair: 1 file(s) failed' })
+      expect(stateOf(id).repair.result).to.equal('failed')
+    })
+
+    it('a fix run matches at 90 % instead of the library threshold', async () => {
+      const library = await Database.libraryModel.findByPk(libraryId)
+      const run = async (name, result) => {
+        bookFinder.results = [result]
+        const id = await createItem({ dir: makeDir(name) })
+        await manager.runItem(await getItem(id), library, { fix: true, steps: ['match'] })
+        await runAll()
+        return stateOf(id)
+      }
+      // another narrator: 91 %, under the library's 95 %
+      expect((await run('n', candidate({ narrator: 'Someone Else' }))).match).to.include({ result: 'matched', confidence: 91, minConfidence: 90 })
+      // 4 minutes longer: 89 %
+      expect(await run('d', candidate({ duration: T / 60 + 4 }))).to.include({ status: 'needs-review', reason: 'match: low-confidence' })
+    })
+
+    it('applies the chapters that passed and keeps the proposal; approving it unchanged applies the rest', async () => {
+      speech.late.add('Chapter 2')
+      const id = await createItem({ asin: ASIN })
+      await addItems([id])
+      await runAll()
+      const state = stateOf(id)
+      expect(state.chapters.partial).to.deep.equal({ applied: 4, flagged: 1 })
+      const partial = (await getItem(id)).media.chapters.map((c) => ({ title: c.title, start: c.start, end: c.end }))
+      expect(state.chapters.appliedHash).to.equal(chapterPlan.chaptersHash(partial))
+      const proposal = await manager.getProposal(id)
+      expect(proposal.currentChapters).to.deep.equal(partial)
+      expect(partial[2].start).to.equal(proposal.snap.chapters[2].originalStart)
+      expect((await manager.listBackups(id))[0]).to.include({ chapters: 4, reason: 'auto-partial' })
+
+      const approved = await manager.approve(id)
+      expect(approved.chapters).to.include({ result: 'approved', edited: false })
+      expect((await getItem(id)).media.chapters.map((c) => c.start)).to.deep.equal(proposal.proposedChapters.map((c) => c.start))
+    })
+
+    it('a sweep queues the unprocessed books once a night and runs their steps only in the quiet hours', async () => {
+      const id = await createItem()
+      await setLibrarySettings({ nightlySweep: true, sweepStart: '01:00', sweepEnd: '06:00' })
+      const at = (h, m = 0) => new Date(2026, 9, 29, h, m).getTime()
+      clock = at(12)
+      await manager.sweepTick()
+      expect(stateOf(id)).to.equal(undefined)
+      clock = at(1, 15)
+      await manager.sweepTick()
+      expect(stateOf(id)).to.include({ trigger: 'sweep', manual: false })
+      stateOf(id).queuedAt -= 10 * 60 * 1000
+      // once a night
+      const later = await createItem({ dir: makeDir('later') })
+      await manager.sweepTick()
+      expect(stateOf(later)).to.equal(undefined)
+
+      clock = at(6, 30)
+      await manager.drain()
+      expect(stateOf(id)).to.include({ status: 'waiting', step: 'waiting', reason: 'waiting for the quiet hours', notBefore: new Date(2026, 9, 30, 1, 0).getTime() })
+      expect(bookFinder.search.called).to.be.false
+
+      clock = new Date(2026, 9, 30, 1, 0).getTime()
+      await runAll()
+      expect(stateOf(id).status).to.equal('epub')
     })
   })
 })
