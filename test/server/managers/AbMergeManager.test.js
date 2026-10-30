@@ -120,7 +120,7 @@ describe('AbMergeManager', () => {
 
       await runEncode(manager, libraryItem)
 
-      expect(deps.scanItem.calledOnceWith('li1')).to.be.true
+      expect(deps.scanItem.calledOnceWith('li1', null)).to.be.true
       expect(taskFinishedAtScan).to.equal(false)
       expect(deps.watcher.addIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
       expect(deps.watcher.removeIgnoreDir.calledOnceWith(libraryItem.path)).to.be.true
@@ -157,9 +157,11 @@ describe('AbMergeManager', () => {
     it('single-file item kept at the same path: rescans without ignoring the library folder', async () => {
       const { manager, deps } = makeManager()
 
-      await runEncode(manager, stubItem({ isFile: true, trackNames: ['Book.m4b'] }))
+      const libraryItem = stubItem({ isFile: true, trackNames: ['Book.m4b'] })
+      await runEncode(manager, libraryItem)
 
-      expect(deps.scanItem.calledOnceWith('li1')).to.be.true
+      expect(deps.scanItem.calledOnce).to.be.true
+      expect(deps.scanItem.firstCall.args).to.deep.equal(['li1', { path: filePathToPOSIX(libraryItem.path), isFile: true }])
       expect(deps.watcher.addIgnoreDir.called).to.be.false
       expect(deps.watcher.removeIgnoreDir.called).to.be.false
     })
@@ -203,13 +205,18 @@ describe('AbMergeManager', () => {
      * Create the book in the database the way a library scan would have stored it
      *
      * @param {string[]} trackNames
+     * @param {boolean} [isFile] - single-file item directly in the library folder (one track)
      */
-    async function createScannedItem(trackNames) {
-      const itemPath = Path.join(libraryDir, 'Book')
-      fs.mkdirSync(itemPath)
-      for (const name of trackNames) writeAudio(Path.join(itemPath, name), 'mp3', 128000, 100)
+    async function createScannedItem(trackNames, isFile = false) {
+      const itemPath = isFile ? Path.join(libraryDir, trackNames[0]) : Path.join(libraryDir, 'Book')
+      if (isFile) {
+        writeAudio(itemPath, 'mp3', 128000, 100)
+      } else {
+        fs.mkdirSync(itemPath)
+        for (const name of trackNames) writeAudio(Path.join(itemPath, name), 'mp3', 128000, 100)
+      }
 
-      const scanData = await LibraryItemScanner.getLibraryItemScanData(filePathToPOSIX(itemPath), library, folder, false)
+      const scanData = await LibraryItemScanner.getLibraryItemScanData(filePathToPOSIX(itemPath), library, folder, isFile)
       const audioFiles = []
       for (const lf of scanData.audioLibraryFiles) {
         const af = (await fakeScan('book', lf)).toJSON()
@@ -224,7 +231,7 @@ describe('AbMergeManager', () => {
         mtime: scanData.mtimeMs,
         ctime: scanData.ctimeMs,
         birthtime: scanData.birthtimeMs,
-        isFile: false,
+        isFile,
         libraryFiles: scanData.libraryFiles.map((lf) => lf.toJSON()),
         mediaId: book.id,
         mediaType: 'book',
@@ -278,6 +285,23 @@ describe('AbMergeManager', () => {
       expect(audioFile.codec).to.equal('aac')
       expect(updated.libraryFiles.map((lf) => lf.metadata.filename)).to.deep.equal(['Book.m4b'])
       expect(emittedItem(libraryItem.id)).to.exist
+    })
+
+    it('single-file m4b in the library folder: rescanned as a file, keeps its audio file with the new values', async () => {
+      const libraryItem = await createScannedItem(['Book.m4b'], true)
+      expect(libraryItem.isFile).to.be.true
+      const ino = libraryItem.media.audioFiles[0].ino
+
+      const updated = await encodeWithRealScanner(libraryItem)
+
+      expect(!!updated.isMissing).to.be.false
+      expect(updated.media.audioFiles).to.have.length(1)
+      const [audioFile] = updated.media.audioFiles
+      expect(audioFile.ino).to.equal(ino)
+      expect(audioFile.bitRate).to.equal(96000)
+      expect(audioFile.codec).to.equal('aac')
+      expect(updated.libraryFiles.map((lf) => lf.metadata.filename)).to.deep.equal(['Book.m4b'])
+      expect(emittedItem(libraryItem.id).media.audioFiles[0].bitRate).to.equal(96000)
     })
   })
 })

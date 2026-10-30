@@ -20,7 +20,7 @@ const TrackProgressMonitor = require('../objects/TrackProgressMonitor')
 class AbMergeManager {
   /**
    * @param {Object} [deps] - injectable for tests
-   * @param {(libraryItemId: string) => Promise<number>} [deps.scanItem]
+   * @param {(libraryItemId: string, updateLibraryItemDetails?: Object) => Promise<number>} [deps.scanItem]
    * @param {{addIgnoreDir: Function, removeIgnoreDir: Function}} [deps.watcher]
    */
   constructor(deps = {}) {
@@ -29,7 +29,7 @@ class AbMergeManager {
     /** @type {Task[]} */
     this.pendingTasks = []
 
-    this.scanItem = deps.scanItem || ((libraryItemId) => require('../scanner/LibraryItemScanner').scanLibraryItem(libraryItemId))
+    this.scanItem = deps.scanItem || ((libraryItemId, updateLibraryItemDetails) => require('../scanner/LibraryItemScanner').scanLibraryItem(libraryItemId, updateLibraryItemDetails))
     this.watcher = deps.watcher || null
   }
 
@@ -305,8 +305,11 @@ class AbMergeManager {
       Logger.debug(`[AbMergeManager] Single-file item "${libraryItemId}" was renamed, leaving the rescan to the watcher`)
       return
     }
+    // The item scanner treats the item path as a folder unless told otherwise, which would drop the
+    // single file from the item and mark it missing
+    const updateLibraryItemDetails = isFile ? { path: fileUtils.filePathToPOSIX(targetFilepath), isFile: true } : null
     try {
-      await this.scanItem(libraryItemId)
+      await this.scanItem(libraryItemId, updateLibraryItemDetails)
     } catch (error) {
       Logger.error(`[AbMergeManager] Failed to rescan library item "${libraryItemId}" after m4b encode`, error)
     }
