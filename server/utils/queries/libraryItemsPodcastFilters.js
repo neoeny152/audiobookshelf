@@ -1,6 +1,7 @@
 const Sequelize = require('sequelize')
 const Database = require('../../Database')
 const Logger = require('../../Logger')
+const libraryItemFileSearch = require('./libraryItemFileSearch')
 const { profile } = require('../../utils/profiler')
 const stringifySequelizeQuery = require('../stringifySequelizeQuery')
 
@@ -412,6 +413,46 @@ module.exports = {
       itemMatches.push({
         libraryItem: libraryItem.toOldJSONExpanded()
       })
+    }
+
+    // Search file names and paths when the query looks like a file name or path (#5680)
+    const maxResults = Number(limit) || 0
+    if (libraryItemFileSearch.isFileSearchQuery(query) && itemMatches.length < maxResults) {
+      const matchedPodcastIds = itemMatches.map((match) => match.libraryItem.media.id)
+      const filePodcasts = await Database.podcastModel.findAll({
+        where: [
+          libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem'),
+          ...(matchedPodcastIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedPodcastIds } }] : []),
+          ...userPermissionPodcastWhere.podcastWhere
+        ],
+        replacements: {
+          ...userPermissionPodcastWhere.replacements,
+          fileSearchPattern: libraryItemFileSearch.getFileSearchLikePattern(query)
+        },
+        include: [
+          {
+            model: Database.libraryItemModel,
+            where: {
+              libraryId: library.id
+            }
+          }
+        ],
+        subQuery: false,
+        distinct: true,
+        limit: maxResults - itemMatches.length,
+        offset
+      })
+      for (const podcast of filePodcasts) {
+        const libraryItem = podcast.libraryItem
+        delete podcast.libraryItem
+        libraryItem.media = podcast
+        libraryItem.media.podcastEpisodes = []
+        itemMatches.push({
+          libraryItem: libraryItem.toOldJSONExpanded(),
+          matchKey: 'file',
+          matchText: libraryItemFileSearch.getMatchedFilePath(libraryItem, query)
+        })
+      }
     }
 
     // Search podcast episode title

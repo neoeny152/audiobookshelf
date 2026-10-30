@@ -2,6 +2,7 @@ const Sequelize = require('sequelize')
 const Database = require('../../Database')
 const Logger = require('../../Logger')
 const authorFilters = require('./authorFilters')
+const libraryItemFileSearch = require('./libraryItemFileSearch')
 
 const ShareManager = require('../../managers/ShareManager')
 const { profile } = require('../profiler')
@@ -1082,49 +1083,25 @@ module.exports = {
   },
 
   /**
-   * Search books, authors, series
-   * @param {import('../../models/User')} user
-   * @param {import('../../models/Library')} library
-   * @param {string} query
+   * Find books for library search and map them to search result entries
+   *
+   * @param {import('sequelize').WhereOptions} bookWhere
+   * @param {Object} replacements
+   * @param {string} libraryId
    * @param {number} limit
    * @param {number} offset
-   * @returns {{book:object[], narrators:object[], authors:object[], tags:object[], series:object[]}}
+   * @param {string} [fileQuery] when set, entries are file matches and include matchKey "file" and matchText (the matched file path)
+   * @returns {Promise<{libraryItem:object, matchKey?:string, matchText?:string}[]>}
    */
-  async search(user, library, query, limit, offset) {
-    const userPermissionBookWhere = this.getUserPermissionBookWhereQuery(user)
-
-    const textSearchQuery = await Database.createTextSearchQuery(query)
-
-    const matchTitle = textSearchQuery.matchExpression('book.title')
-    const matchSubtitle = textSearchQuery.matchExpression('book.subtitle')
-
-    // Search title, subtitle, asin, isbn
+  async findBookSearchItems(bookWhere, replacements, libraryId, limit, offset, fileQuery = null) {
     const books = await Database.bookModel.findAll({
-      where: [
-        {
-          [Sequelize.Op.or]: [
-            Sequelize.literal(matchTitle),
-            Sequelize.literal(matchSubtitle),
-            {
-              asin: {
-                [Sequelize.Op.substring]: query
-              }
-            },
-            {
-              isbn: {
-                [Sequelize.Op.substring]: query
-              }
-            }
-          ]
-        },
-        ...userPermissionBookWhere.bookWhere
-      ],
-      replacements: userPermissionBookWhere.replacements,
+      where: bookWhere,
+      replacements,
       include: [
         {
           model: Database.libraryItemModel,
           where: {
-            libraryId: library.id
+            libraryId
           }
         },
         {
@@ -1166,9 +1143,82 @@ module.exports = {
       delete book.bookAuthors
 
       libraryItem.media = book
-      itemMatches.push({
+      const itemMatch = {
         libraryItem: libraryItem.toOldJSONExpanded()
-      })
+      }
+      if (fileQuery) {
+        itemMatch.matchKey = 'file'
+        itemMatch.matchText = libraryItemFileSearch.getMatchedFilePath(libraryItem, fileQuery)
+      }
+      itemMatches.push(itemMatch)
+    }
+    return itemMatches
+  },
+
+  /**
+   * Search books, authors, series
+   * @param {import('../../models/User')} user
+   * @param {import('../../models/Library')} library
+   * @param {string} query
+   * @param {number} limit
+   * @param {number} offset
+   * @returns {{book:object[], narrators:object[], authors:object[], tags:object[], series:object[]}}
+   */
+  async search(user, library, query, limit, offset) {
+    const userPermissionBookWhere = this.getUserPermissionBookWhereQuery(user)
+
+    const textSearchQuery = await Database.createTextSearchQuery(query)
+
+    const matchTitle = textSearchQuery.matchExpression('book.title')
+    const matchSubtitle = textSearchQuery.matchExpression('book.subtitle')
+
+    // Search title, subtitle, asin, isbn
+    const itemMatches = await this.findBookSearchItems(
+      [
+        {
+          [Sequelize.Op.or]: [
+            Sequelize.literal(matchTitle),
+            Sequelize.literal(matchSubtitle),
+            {
+              asin: {
+                [Sequelize.Op.substring]: query
+              }
+            },
+            {
+              isbn: {
+                [Sequelize.Op.substring]: query
+              }
+            }
+          ]
+        },
+        ...userPermissionBookWhere.bookWhere
+      ],
+      userPermissionBookWhere.replacements,
+      library.id,
+      limit,
+      offset
+    )
+
+    // Search file names and paths when the query looks like a file name or path (#5680)
+    const maxResults = Number(limit) || 0
+    if (libraryItemFileSearch.isFileSearchQuery(query) && itemMatches.length < maxResults) {
+      const matchedBookIds = itemMatches.map((match) => match.libraryItem.media.id)
+      const fileMatches = await this.findBookSearchItems(
+        [
+          libraryItemFileSearch.getLibraryItemFileMatchWhere('libraryItem'),
+          ...(matchedBookIds.length ? [{ id: { [Sequelize.Op.notIn]: matchedBookIds } }] : []),
+          ...userPermissionBookWhere.bookWhere
+        ],
+        {
+          ...userPermissionBookWhere.replacements,
+          fileSearchPattern: libraryItemFileSearch.getFileSearchLikePattern(query)
+        },
+        library.id,
+        maxResults - itemMatches.length,
+        offset,
+        query
+      )
+      itemMatches.push(...fileMatches)
     }
 
     const matchJsonValue = textSearchQuery.matchExpression('json_each.value')
