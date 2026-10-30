@@ -12,6 +12,8 @@
 > - Batch podcast episode update/delete and a POST library download route, advertised as `serverFeatures` in `GET /status`
 > - Fixes for several open upstream issues (progress sync, scanner duplicates, moved items, chapters and duration from included files, crash-safe async routes, offline session sync size, and others), each referencing the issue number in its commit
 >
+> Full change list, upstream issue links, container images and how the fork is maintained: [FORK.md](FORK.md).
+>
 > Built with AI assistance (Claude). Licensed under GPL-3.0, like upstream.
 
 <br />

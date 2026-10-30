@@ -1,0 +1,66 @@
+name: Upstream check
+
+# Opens (or updates) one issue when upstream has commits newer than .upstream-base.
+# It never merges: the fork is replayed from the owner's private branch (see FORK.md).
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-check
+
+env:
+  UPSTREAM: advplyr/audiobookshelf
+  UPSTREAM_BRANCH: master
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with upstream
+        id: cmp
+        run: |
+          base=$(head -n1 .upstream-base | tr -d '[:space:]')
+          git fetch -q "https://github.com/$UPSTREAM.git" "$UPSTREAM_BRANCH"
+          head=$(git rev-parse FETCH_HEAD)
+          count=$(git rev-list --count "$base..$head")
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          git log --no-merges --format='- [`%h`](https://github.com/'"$UPSTREAM"'/commit/%H) %s' "$base..$head" | head -n 50 > /tmp/commits.md
+          echo "$count new upstream commit(s) since ${base:0:8}"
+
+      - name: Open or update the sync issue
+        if: steps.cmp.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: ${{ steps.cmp.outputs.base }}
+          HEAD: ${{ steps.cmp.outputs.head }}
+          COUNT: ${{ steps.cmp.outputs.count }}
+        run: |
+          title="Upstream has $COUNT new commit(s)"
+          {
+            echo "## Upstream changes"
+            echo "[\`${BASE:0:8}...${HEAD:0:8}\`](https://github.com/$UPSTREAM/compare/$BASE...$HEAD) on \`$UPSTREAM_BRANCH\`"
+            echo
+            cat /tmp/commits.md
+            if [ "$COUNT" -gt 50 ]; then echo "- ...and $((COUNT - 50)) more"; fi
+            echo
+            echo "## What to do"
+            echo "Sync the private branch, replay it here, and update \`.upstream-base\`. Nothing is merged automatically."
+          } > /tmp/body.md
+          gh label create upstream-sync --color 0e8a16 --description "Upstream has new commits" 2>/dev/null || true
+          number=$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --title "$title" --body-file /tmp/body.md
+          else
+            gh issue create --title "$title" --label upstream-sync --body-file /tmp/body.md
+          fi
