@@ -5,10 +5,13 @@ const nodeGlobals = {
   URL: 'readonly',
   URLSearchParams: 'readonly',
   __dirname: 'readonly',
+  clearImmediate: 'readonly',
   clearInterval: 'readonly',
   clearTimeout: 'readonly',
   console: 'readonly',
+  fetch: 'readonly',
   process: 'readonly',
+  setImmediate: 'readonly',
   setInterval: 'readonly',
   setTimeout: 'readonly',
   structuredClone: 'readonly'
