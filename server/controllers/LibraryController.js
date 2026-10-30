@@ -979,17 +979,13 @@ class LibraryController {
       return res.status(400).send('Invalid request body: dismissed must be a boolean')
     }
     const groupId = req.params.groupId
-    if (typeof groupId !== 'string' || !/^[0-9a-f]{1,64}$/.test(groupId)) {
-      return res.sendStatus(404)
-    }
     const updated = await DuplicateItemManager.setGroupDismissed(req.library.id, groupId, dismissed)
     if (!updated) return res.sendStatus(404)
 
+    // null when a member was removed since the last check
     const groups = await DuplicateItemManager.getGroups(req.library.id, { includeDismissed: true })
-    const group = groups.find((g) => g.id === groupId)
-    if (!group) return res.sendStatus(404)
     res.json({
-      group,
+      group: groups.find((g) => g.id === groupId) || null,
       numGroups: await DuplicateItemManager.countGroups(req.library.id)
     })
   }

@@ -269,6 +269,19 @@ describe('DuplicateItemManager', () => {
       expect(res.body.groups).to.deep.equal([])
     })
 
+    it('dismisses a group whose member was removed since the last check', async () => {
+      await addBook('A/Dune', { title: 'Dune', author: 'Frank Herbert' })
+      const b = await addBook('B/Dune', { title: 'Dune', author: 'Frank Herbert' })
+      await duplicateItemManager.checkLibrary(library.id)
+      const [group] = await duplicateItemManager.getGroups(library.id)
+      await b.destroy()
+
+      const res = mockRes()
+      await LibraryController.updateDuplicateGroup({ user: admin, library, params: { groupId: group.id }, body: { dismissed: true } }, res)
+      expect(res.statusCode).to.equal(200)
+      expect(res.body).to.deep.equal({ group: null, numGroups: 0 })
+    })
+
     it('adds numDuplicateGroups to filter data for admins only', async () => {
       await addBook('A/Dune', { title: 'Dune', author: 'Frank Herbert' })
       await addBook('B/Dune', { title: 'Dune', author: 'Frank Herbert' })
