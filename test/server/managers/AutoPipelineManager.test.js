@@ -654,7 +654,7 @@ describe('AutoPipelineManager', () => {
     it('does not snap while MP3 files need a seek index repair, and never repairs them itself', async () => {
       const getStatus = sinon.stub().resolves({ needsRepairCount: 2, maxDrift: 43.38 })
       const startRepair = sinon.stub()
-      apiRouter.mp3SeekIndexManager = { getStatus, startRepair }
+      apiRouter.mp3SeekIndexManager = { getStatus, startRepair, measure: async () => {} }
       const id = await createItem({ asin: ASIN })
       await addItems([id])
       await runAll()
@@ -1210,6 +1210,7 @@ describe('AutoPipelineManager', () => {
         busy: false,
         lastResults: new Map(),
         getStatus: sinon.spy(async () => ({ needsRepairCount: fake.needs, maxDrift: fake.needs ? 43.38 : 0, processing: fake.busy })),
+        measure: async () => {},
         getIsLibraryItemQueuedOrProcessing: () => fake.busy,
         startRepair: sinon.spy((userId, li) => {
           fake.busy = true
@@ -1268,6 +1269,17 @@ describe('AutoPipelineManager', () => {
       expect(seek.startRepair.calledOnce).to.be.true
     })
 
+    it('a single-file book is not repaired even with consent, and its chapters stop with their own reason', async () => {
+      const seek = fakeSeekIndex()
+      const id = await createItem({ asin: ASIN })
+      await Database.libraryItemModel.update({ isFile: true }, { where: { id } })
+      await manager.runItem(await getItem(id), await Database.libraryModel.findByPk(libraryId), { fix: true, repairConsent: true })
+      await runAll()
+      expect(seek.startRepair.called).to.be.false
+      expect(stateOf(id).repair).to.deep.equal({ result: 'unsupported', reason: 'single-file', files: 2, maxDrift: 43.4 })
+      expect(stateOf(id).chapters).to.include({ result: 'needs-review', reason: 'seek-index-single-file' })
+    })
+
     it('a dry run says what it would repair; a failed repair fails the run', async () => {
       const seek = fakeSeekIndex()
       await setLibrarySettings({ mode: 'dryRun', autoRepairSeekIndex: true })
@@ -1321,7 +1333,7 @@ describe('AutoPipelineManager', () => {
       expect((await getItem(id)).media.chapters.map((c) => c.start)).to.deep.equal(proposal.proposedChapters.map((c) => c.start))
     })
 
-    it('a sweep queues the unprocessed books once a night and runs their steps only in the quiet hours', async () => {
+    it('a sweep queues unprocessed books in the quiet hours, SWEEP_BATCH at a time, and runs their steps only then', async () => {
       const id = await createItem()
       await setLibrarySettings({ nightlySweep: true, sweepStart: '01:00', sweepEnd: '06:00' })
       const at = (h, m = 0) => new Date(2026, 9, 29, h, m).getTime()
@@ -1332,10 +1344,10 @@ describe('AutoPipelineManager', () => {
       await manager.sweepTick()
       expect(stateOf(id)).to.include({ trigger: 'sweep', manual: false })
       stateOf(id).queuedAt -= 10 * 60 * 1000
-      // once a night
-      const later = await createItem({ dir: makeDir('later') })
+      const more = []
+      for (let i = 0; i < AutoPipelineManager.SWEEP_BATCH; i++) more.push(await createItem({ dir: makeDir(`more${i}`) }))
       await manager.sweepTick()
-      expect(stateOf(later)).to.equal(undefined)
+      expect(more.filter((m) => stateOf(m)).length).to.equal(AutoPipelineManager.SWEEP_BATCH - 1)
 
       clock = at(6, 30)
       await manager.drain()
@@ -1345,6 +1357,16 @@ describe('AutoPipelineManager', () => {
       clock = new Date(2026, 9, 30, 1, 0).getTime()
       await runAll()
       expect(stateOf(id).status).to.equal('epub')
+    })
+
+    it('turning the nightly sweep off takes the books it queued off the queue', async () => {
+      const id = await createItem()
+      const before = (await setLibrarySettings({ nightlySweep: true })).settings.autoPipeline
+      clock = new Date(2026, 9, 29, 1, 15).getTime()
+      await manager.sweepTick()
+      expect(stateOf(id)).to.include({ trigger: 'sweep' })
+      await manager.onLibrarySettingsChanged(await setLibrarySettings({ nightlySweep: false }), before)
+      expect(stateOf(id)).to.equal(undefined)
     })
   })
 })

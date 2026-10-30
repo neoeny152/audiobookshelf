@@ -14,8 +14,8 @@ function mp3(i, { seek = 'xing', measured = null } = {}) {
 const scannerChapters = [0, 1].map((i) => ({ title: `part${i}`, start: i * FILE_SEC, end: (i + 1) * FILE_SEC }))
 const audibleChapters = [0, 1, 2].map((i) => ({ title: `Chapter ${i}`, start: (i * 2 * FILE_SEC) / 3, end: ((i + 1) * 2 * FILE_SEC) / 3 }))
 
-function health({ files = [mp3(0), mp3(1)], asin = ASIN, chapters = audibleChapters, state = null } = {}) {
-  const libraryItem = { id: 'li-1', media: { includedAudioFiles: files, duration: files.length * FILE_SEC, asin, chapters } }
+function health({ files = [mp3(0), mp3(1)], asin = ASIN, chapters = audibleChapters, state = null, isFile = false } = {}) {
+  const libraryItem = { id: 'li-1', isFile, media: { includedAudioFiles: files, duration: files.length * FILE_SEC, asin, chapters } }
   return getItemHealth({ libraryItem, pipelineState: state, scannerChapters, processing: false, autoFix })
 }
 
@@ -35,6 +35,13 @@ describe('itemHealth', () => {
     expect(result.seekIndex).to.deep.equal({ needsRepairCount: 2, maxDrift: 49, processing: false })
     expect(result.issues).to.deep.equal(['seek-index', 'unmatched', 'chapters-from-files', 'chapters-length', 'chapters-unverified'])
     expect(result.next).to.equal('repair')
+  })
+
+  it('a single-file book is never offered a repair', () => {
+    const result = health({ files: [mp3(0, { seek: 'none', measured: 1041.24 })], asin: null, chapters: scannerChapters, isFile: true })
+    expect(result.seekIndex.needsRepairCount).to.equal(1)
+    expect(result.issues).to.not.include('seek-index')
+    expect(result.next).to.equal('match')
   })
 
   it('an MP3 not measured yet counts as unmeasured, not as needing a repair', () => {

@@ -55,6 +55,8 @@ const EPUB_OK_CHAPTERS = new Set(['applied', 'kept', 'approved', 'not-run', 'wou
 const MAX_ATTEMPTS = 3
 /** match threshold of a "Fix automatically" run (its scores use the measured MP3 length) */
 const FIX_MIN_CONFIDENCE = 90
+/** books of a library the nightly sweep keeps waiting in the queue at a time */
+const SWEEP_BATCH = 10
 const MAX_SNAP_ROUNDS = 3
 const SPEECH_CHUNK = chapterbotSpeech.MAX_VERIFY_STARTS
 const MIN = 60 * 1000
@@ -131,10 +133,6 @@ function msToSweepStart(settings, date) {
   return next - date
 }
 
-function localDate(date) {
-  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`
-}
-
 class AutoPipelineManager extends EventEmitter {
   constructor() {
     super()
@@ -157,10 +155,8 @@ class AutoPipelineManager extends EventEmitter {
     this.autoRun = true
     this.loopPromise = null
     this.onEpubEnded = this.onEpubEnded.bind(this)
-    /** nightly sweep: the cron job, and per library the local date it was last queued */
+    /** nightly sweep: the cron job */
     this.sweepTask = null
-    /** @type {Map<string, string>} */
-    this.sweptOn = new Map()
 
     // seams (tests replace these)
     this.bookFinder = null
@@ -175,6 +171,7 @@ class AutoPipelineManager extends EventEmitter {
     this.readdir = (path) => fs.readdir(path, { withFileTypes: true })
     /** MP3 seek index status (Mp3SeekIndexManager.getStatus), or null when that manager is not there */
     this.seekIndexStatus = (libraryItem) => this.apiRouter?.mp3SeekIndexManager?.getStatus(libraryItem) ?? null
+    this.measureSeekIndex = (libraryItem) => this.apiRouter?.mp3SeekIndexManager?.measure(libraryItem) ?? null
     this.scannerChapters = (title, audioFiles) => require('../scanner/AudioFileScanner').getBookChaptersFromAudioFiles(title, audioFiles, { addLog: () => {} })
   }
 
@@ -235,7 +232,7 @@ class AutoPipelineManager extends EventEmitter {
     this.epubManager.removeListener('ended', this.onEpubEnded)
     this.epubManager.on('ended', this.onEpubEnded)
     this.initialized = true
-    if (this.autoRun) this.sweepTask = cron.schedule('*/15 * * * *', () => this.sweepTick())
+    if (this.autoRun) this.sweepTask = cron.schedule('*/15 * * * *', () => this.sweepTick().catch((error) => Logger.error('[AutoPipeline] Nightly sweep failed', error)))
 
     // EPUB jobs that ended while the server was down (or could not be adopted)
     for (const state of this.states.values()) {
@@ -270,7 +267,6 @@ class AutoPipelineManager extends EventEmitter {
     this.wakeTimer = null
     this.sweepTask?.stop()
     this.sweepTask = null
-    this.sweptOn.clear()
     if (this.loopPromise) await this.loopPromise.catch(() => {})
     this.states.clear()
     this.store = null
@@ -511,16 +507,17 @@ class AutoPipelineManager extends EventEmitter {
    *
    * @param {import('../models/Library')} library
    * @param {'unprocessed'|'all'} scope
-   * @param {{trigger?: 'manual'|'sweep'}} [opts] - sweep: queued by the nightly sweep, which stops when the library is
-   *   turned off and runs only in the quiet hours
+   * @param {{trigger?: 'manual'|'sweep', limit?: number}} [opts] - sweep: queued by the nightly sweep, which stops when
+   *   the library is turned off and runs only in the quiet hours; limit: queue at most this many
    * @returns {Promise<{queued: number}>}
    */
-  async runLibrary(library, scope, { trigger = 'manual' } = {}) {
+  async runLibrary(library, scope, { trigger = 'manual', limit = Infinity } = {}) {
     this.assertEnabled()
     if (library.mediaType !== 'book') throw new PipelineError(400, 'The auto pipeline only processes books')
     const items = (await Database.libraryItemModel.findAll({ where: { libraryId: library.id, mediaType: 'book' }, attributes: ['id', 'title', 'isMissing'] })).filter((li) => !li.isMissing)
     let queued = 0
     for (const li of items) {
+      if (queued >= limit) break
       const existing = this.states.get(li.id)
       // books the pipeline stopped because the library was turned off count as unprocessed
       if (scope === 'unprocessed' && existing && existing.stopped !== 'mode-off') continue
@@ -564,7 +561,7 @@ class AutoPipelineManager extends EventEmitter {
    * Library settings changed. From dry run to on clears the dry-run results of the library. To off, the books still
    * waiting in the queue are stopped (manual runs go on); to dry run, they continue as a dry run. The item being
    * processed follows at its next step and never writes after the change (see writeBlocked). EPUB jobs already
-   * running are not cancelled.
+   * running are not cancelled. Turning the nightly sweep off takes the books it queued off the queue.
    *
    * @param {import('../models/Library')} library
    * @param {Object|null} previous - autoPipeline settings before the change
@@ -584,6 +581,12 @@ class AutoPipelineManager extends EventEmitter {
         await this.followMode(state, next)
       }
     }
+    if (prev.nightlySweep && !next.nightlySweep) {
+      for (const state of [...this.states.values()]) {
+        if (state.libraryId !== library.id || state.trigger !== 'sweep' || this.current === state.libraryItemId || !this.isWaitingToRun(state)) continue
+        await this.dismiss(state.libraryItemId)
+      }
+    }
     this.kick()
   }
 
@@ -593,20 +596,19 @@ class AutoPipelineManager extends EventEmitter {
   }
 
   /**
-   * Every 15 minutes: a library with the nightly sweep on queues its never-processed books once a night, at the first
-   * tick inside its quiet hours. Kept in memory: after a restart inside the window they are queued again, which only
-   * adds books that still have no state.
+   * Every 15 minutes inside its quiet hours, a library with the nightly sweep on tops its queue up to SWEEP_BATCH
+   * never-processed books waiting, so the backlog goes through a few at a time and the queue stays short.
    */
   async sweepTick() {
     if (!this.enabled) return
     const now = new Date(this.now())
-    const today = localDate(now)
     for (const library of await Database.libraryModel.findAll({ where: { mediaType: 'book' } })) {
       const settings = normalizeAutoPipelineSettings(library.settings?.autoPipeline)
-      if (!settings.nightlySweep || settings.mode === 'off' || !inSweepWindow(settings, now) || this.sweptOn.get(library.id) === today) continue
-      this.sweptOn.set(library.id, today)
-      const { queued } = await this.runLibrary(library, 'unprocessed', { trigger: 'sweep' })
-      Logger.info(`[AutoPipeline] Nightly sweep of library "${library.name}": ${queued} book(s) queued`)
+      if (!settings.nightlySweep || settings.mode === 'off' || !inSweepWindow(settings, now)) continue
+      const waiting = [...this.states.values()].filter((s) => s.libraryId === library.id && s.trigger === 'sweep' && this.isWaitingToRun(s)).length
+      if (waiting >= SWEEP_BATCH) continue
+      const { queued } = await this.runLibrary(library, 'unprocessed', { trigger: 'sweep', limit: SWEEP_BATCH - waiting })
+      if (queued) Logger.info(`[AutoPipeline] Nightly sweep of library "${library.name}": ${queued} book(s) queued`)
     }
   }
 
@@ -995,8 +997,13 @@ class AutoPipelineManager extends EventEmitter {
     }
     const files = status.needsRepairCount
     const maxDrift = Math.round(status.maxDrift * 10) / 10
-    // a single-file item is never repaired (as on the Tools page)
-    if (!(state.repairConsent || settings.autoRepairSeekIndex) || libraryItem.isFile) {
+    // a single-file item is never repaired (as on the Tools page); its chapters stop at the drift check
+    if (libraryItem.isFile) {
+      state.repair = { result: 'unsupported', reason: 'single-file', files, maxDrift }
+      this.log(state, 'repair', `the MP3 file is off by ${maxDrift}s; single-file books are not repaired`)
+      return this.advance(state, settings, 'repair')
+    }
+    if (!(state.repairConsent || settings.autoRepairSeekIndex)) {
       state.repair = { result: 'needs-ok', files, maxDrift }
       this.log(state, 'repair', `${files} MP3 file(s) off by up to ${maxDrift}s, not repaired without an OK`)
       return this.advance(state, settings, 'repair')
@@ -1005,7 +1012,8 @@ class AutoPipelineManager extends EventEmitter {
       state.repair = { result: 'would-repair', files, maxDrift, would: `would repair ${files} MP3 file(s)` }
       return this.advance(state, settings, 'repair')
     }
-    if (this.apiRouter.audioMetadataManager.getIsLibraryItemQueuedOrProcessing(libraryItem.id) || this.apiRouter.abMergeManager.getPendingTaskByLibraryItemId(libraryItem.id)) {
+    // the seek index check again too: a repair started on the Tools page while the status was being read
+    if (manager.getIsLibraryItemQueuedOrProcessing(libraryItem.id) || this.apiRouter.audioMetadataManager.getIsLibraryItemQueuedOrProcessing(libraryItem.id) || this.apiRouter.abMergeManager.getPendingTaskByLibraryItemId(libraryItem.id)) {
       return poll('waiting for another task on the item')
     }
     const task = manager.startRepair(state.userId || null, libraryItem, { chapters: 'keep' })
@@ -1040,7 +1048,7 @@ class AutoPipelineManager extends EventEmitter {
 
     const media = libraryItem.media
     // measures MP3s without a seek header, so the scores use their real length
-    await this.seekIndexStatus(libraryItem)
+    await this.measureSeekIndex(libraryItem)
     const results = await this.getBookFinder().search(libraryItem, provider, media.title, media.authorName, media.isbn, null, { maxFuzzySearches: 2 })
     const candidates = (Array.isArray(results) ? results : []).slice(0, MAX_CANDIDATES)
     const minConfidence = state.trigger === 'fix' ? FIX_MIN_CONFIDENCE : settings.autoMatchMinConfidence
@@ -1253,10 +1261,13 @@ class AutoPipelineManager extends EventEmitter {
     const seekIndex = await this.seekIndexStatus(libraryItem)
     if (seekIndex?.needsRepairCount) {
       const drift = Math.round(seekIndex.maxDrift * 10) / 10
-      state.chapters = { ...keep, result: 'needs-review', reason: 'needs-seek-index-repair', current: kind, source, seekIndex: { files: seekIndex.needsRepairCount, maxDrift: drift } }
+      // a single-file item cannot be repaired: its own reason, so nothing offers a repair that would be refused
+      const reason = libraryItem.isFile ? 'seek-index-single-file' : 'needs-seek-index-repair'
+      const why = libraryItem.isFile ? `the MP3 file reports the wrong length (off by ${drift}s) and single-file books cannot be repaired` : `${seekIndex.needsRepairCount} MP3 file(s) need a seek index repair (off by up to ${drift}s)`
+      state.chapters = { ...keep, result: 'needs-review', reason, current: kind, source, seekIndex: { files: seekIndex.needsRepairCount, maxDrift: drift } }
       if (state.dryRun) state.chapters.would = 'would need review: MP3 files need a seek index repair'
-      this.log(state, 'chapters', `not snapped: ${seekIndex.needsRepairCount} MP3 file(s) need a seek index repair (off by up to ${drift}s)`)
-      return this.finish(state, 'needs-review', `chapters: ${seekIndex.needsRepairCount} MP3 file(s) need a seek index repair (off by up to ${drift}s)`)
+      this.log(state, 'chapters', `not snapped: ${why}`)
+      return this.finish(state, 'needs-review', `chapters: ${why}`)
     }
 
     // analysis (resumable): snap, then the speech check
@@ -1603,6 +1614,7 @@ module.exports = manager
 module.exports.AutoPipelineManager = AutoPipelineManager
 module.exports.PipelineError = PipelineError
 module.exports.FIX_MIN_CONFIDENCE = FIX_MIN_CONFIDENCE
+module.exports.SWEEP_BATCH = SWEEP_BATCH
 module.exports.StepSuperseded = StepSuperseded
 module.exports.STATUSES = STATUSES
 module.exports.ACTIVE_STATUSES = ACTIVE_STATUSES

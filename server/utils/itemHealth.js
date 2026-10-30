@@ -43,7 +43,8 @@ function getItemHealth({ libraryItem, pipelineState, scannerChapters, processing
 
   const issues = []
   if (audioFiles.length) {
-    if (flagged.length) issues.push('seek-index')
+    // a single-file item is never repaired (as on the Tools page): its chapters stay blocked, there is nothing to offer
+    if (flagged.length && !libraryItem.isFile) issues.push('seek-index')
     if (!match.asin) issues.push(LOW_CONFIDENCE_REASONS.has(match.reason) ? 'low-confidence' : 'unmatched')
     if (kind === 'scanner' || kind === 'none') issues.push('chapters-from-files')
     if (chapters.end !== null && Math.abs(chapters.end - (stored + drift)) > chapterPlan.NEAR_SEC) issues.push('chapters-length')

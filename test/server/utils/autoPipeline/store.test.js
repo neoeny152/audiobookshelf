@@ -97,7 +97,7 @@ describe('autoPipeline settings', () => {
   it('merges a partial object and validates each field', () => {
     const current = settings.defaultAutoPipelineSettings()
     expect(settings.mergeAutoPipelineSettings(current, { mode: 'dryRun', autoEpub: true, bogus: 1 })).to.deep.equal({ ...current, mode: 'dryRun', autoEpub: true })
-    const bad = ['x', [], { mode: 'sometimes' }, { autoMatch: 'yes' }, { autoMatchMinConfidence: 49 }, { autoMatchMinConfidence: 101 }, { autoMatchMinConfidence: 95.5 }, { settleMinutes: 0 }, { settleMinutes: 121 }, { autoMatchProvider: 'google' }, { autoMatchProvider: 5 }, { autoRepairSeekIndex: 1 }, { nightlySweep: 'on' }, { sweepStart: '24:00' }, { sweepEnd: '6:00' }]
+    const bad = ['x', [], { mode: 'sometimes' }, { autoMatch: 'yes' }, { autoMatchMinConfidence: 49 }, { autoMatchMinConfidence: 101 }, { autoMatchMinConfidence: 95.5 }, { settleMinutes: 0 }, { settleMinutes: 121 }, { autoMatchProvider: 'google' }, { autoMatchProvider: 5 }, { autoRepairSeekIndex: 1 }, { nightlySweep: 'on' }, { sweepStart: '24:00' }, { sweepEnd: '6:00' }, { sweepStart: '06:00' }]
     for (const value of bad) expect(() => settings.mergeAutoPipelineSettings(current, value), JSON.stringify(value)).to.throw(settings.AutoPipelineSettingsError)
     expect(settings.mergeAutoPipelineSettings(current, { autoMatchProvider: 'audible.uk' }).autoMatchProvider).to.equal('audible.uk')
     expect(settings.mergeAutoPipelineSettings({ ...current, autoMatchProvider: 'audible.uk' }, { autoMatchProvider: null }).autoMatchProvider).to.equal(null)

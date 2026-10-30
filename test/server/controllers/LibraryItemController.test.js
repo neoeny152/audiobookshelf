@@ -623,20 +623,20 @@ describe('LibraryItemController', () => {
     })
 
     it('measures only with measure=1, and reports a book without audio as healthy', async () => {
-      const getStatus = sinon.stub().resolves({})
-      apiRouter.mp3SeekIndexManager = { getStatus, getIsLibraryItemQueuedOrProcessing: () => false }
+      const measure = sinon.stub().resolves()
+      apiRouter.mp3SeekIndexManager = { measure, getIsLibraryItemQueuedOrProcessing: () => false }
       const audioFiles = [{ index: 1, ino: 'ino1', duration: 1000, codec: 'mp3', mp3SeekIndex: 'none', metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/a.mp3', size: 1, mtimeMs: 2 }, mp3Measured: { duration: 1090, size: 1, mtimeMs: 2 } }]
       const book = await createItem('book', { audioFiles, duration: 1000 })
       const health = (await callHealth(book)).json.firstCall.args[0]
-      expect(getStatus.called).to.be.false
+      expect(measure.called).to.be.false
       expect(health).to.include({ libraryItemId: book.id, next: 'repair' })
       expect(health.duration).to.deep.equal({ stored: 1000, drift: 90, unmeasured: 0 })
       expect(health.autoFix).to.deep.equal({ available: false, autoRepair: false, minConfidence: 90 })
 
       await callHealth(book, { query: { measure: '1' } })
-      expect(getStatus.calledOnce).to.be.true
+      expect(measure.calledOnce).to.be.true
       const empty = (await callHealth(await createItem('book'), { query: { measure: '1' } })).json.firstCall.args[0]
-      expect(getStatus.calledOnce).to.be.true
+      expect(measure.calledOnce).to.be.true
       expect(empty.issues).to.deep.equal([])
     })
 

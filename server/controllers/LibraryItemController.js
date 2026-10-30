@@ -1097,7 +1097,7 @@ class LibraryItemController {
     const media = libraryItem.media
     if (req.query.measure === '1') {
       if (!req.user.isAdminOrUp) return res.sendStatus(403)
-      if (media.hasAudioTracks) await this.mp3SeekIndexManager.getStatus(libraryItem)
+      if (media.hasAudioTracks) await this.mp3SeekIndexManager.measure(libraryItem)
     }
 
     const library = await Database.libraryModel.findByPk(libraryItem.libraryId)

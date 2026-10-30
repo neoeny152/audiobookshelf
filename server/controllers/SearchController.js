@@ -94,8 +94,8 @@ class SearchController {
       // Fetch library item
       const libraryItem = id ? await SearchController.fetchLibraryItem(id) : null
       // Audible scores lean on the length: MP3s without a seek header are measured first (once, then cached)
-      if (libraryItem?.isBook && provider.startsWith('audible') && getTotalDrift(libraryItem.media.includedAudioFiles).unmeasured) {
-        await this.mp3SeekIndexManager.getStatus(libraryItem)
+      if (libraryItem?.isBook && provider.startsWith('audible') && req.user.canUpdate && req.user.checkCanAccessLibraryItem(libraryItem) && getTotalDrift(libraryItem.media.includedAudioFiles).unmeasured) {
+        await this.mp3SeekIndexManager.measure(libraryItem)
       }
 
       const results = await BookFinder.search(libraryItem, provider, title, author)

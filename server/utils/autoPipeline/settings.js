@@ -109,6 +109,7 @@ function mergeAutoPipelineSettings(current, update) {
     }
     next[key] = value
   }
+  if (next.sweepStart === next.sweepEnd) throw new AutoPipelineSettingsError('Settings "autoPipeline.sweepStart" and "autoPipeline.sweepEnd" must differ')
   return next
 }
 

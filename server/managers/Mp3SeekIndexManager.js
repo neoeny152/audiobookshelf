@@ -99,8 +99,8 @@ class Mp3SeekIndexManager {
     this.abortControllers = new Map()
     /** @type {Map<string, RepairResult>} last result per library item (until restart) */
     this.lastResults = new Map()
-    /** @type {Map<string, Promise>} status checks in flight per library item */
-    this.statusInFlight = new Map()
+    /** @type {Map<string, Promise>} measurements in flight per library item */
+    this.measureInFlight = new Map()
     /** @type {Map<string, {oldIncluded: {path:string, duration:number}[], oldChapters: Object[]}>} per task id; kept out of task.data, which is broadcast */
     this.snapshots = new Map()
 
@@ -128,25 +128,24 @@ class Mp3SeekIndexManager {
   }
 
   /**
-   * Seek index status of a book's included MP3s, with its backups. Files without a stored header check get one
-   * (~64 KB read); files without a header and no measurement for their current size/mtime are checked again and
-   * measured (frame walk, reads the file). Both are stored on the audio file, so later calls only read the database.
-   * Concurrent calls for one item share the same run.
+   * Check the seek header of a book's included MP3s and measure those without one. Files without a stored header check
+   * get one (~64 KB read); files without a header and no measurement for their current size/mtime are checked again
+   * and measured (frame walk, reads the file). Both are stored on the audio file, so later calls only read the
+   * database. Concurrent calls for one item share the same run.
    *
    * @param {import('../models/LibraryItem')} libraryItem - expanded book item
-   * @returns {Promise<{files: SeekIndexFileStatus[], needsRepairCount: number, maxDrift: number, processing: boolean, lastResult: RepairResult|null, backups: BackupManifest[], backupsTotalSize: number}>}
+   * @returns {Promise<void>}
    */
-  async getStatus(libraryItem) {
-    const inFlight = this.statusInFlight.get(libraryItem.id)
+  async measure(libraryItem) {
+    const inFlight = this.measureInFlight.get(libraryItem.id)
     if (inFlight) return inFlight
-    const promise = this.computeStatus(libraryItem).finally(() => this.statusInFlight.delete(libraryItem.id))
-    this.statusInFlight.set(libraryItem.id, promise)
+    const promise = this.measureFiles(libraryItem).finally(() => this.measureInFlight.delete(libraryItem.id))
+    this.measureInFlight.set(libraryItem.id, promise)
     return promise
   }
 
-  async computeStatus(libraryItem) {
+  async measureFiles(libraryItem) {
     const media = libraryItem.media
-    const files = []
     let changed = false
     const audioFiles = (media.audioFiles || []).map((af) => ({ ...af }))
 
@@ -168,7 +167,26 @@ class Mp3SeekIndexManager {
       } catch (error) {
         Logger.warn(`[Mp3SeekIndexManager] Seek index check failed for "${af.metadata.path}": ${error.message}`)
       }
+    }
 
+    if (changed) {
+      media.audioFiles = audioFiles
+      media.changed('audioFiles', true)
+      await media.save()
+    }
+  }
+
+  /**
+   * Seek index status of a book's included MP3s (measured first, see measure), with its backups.
+   *
+   * @param {import('../models/LibraryItem')} libraryItem - expanded book item
+   * @returns {Promise<{files: SeekIndexFileStatus[], needsRepairCount: number, maxDrift: number, processing: boolean, lastResult: RepairResult|null, backups: BackupManifest[], backupsTotalSize: number}>}
+   */
+  async getStatus(libraryItem) {
+    await this.measure(libraryItem)
+    const files = []
+    for (const af of libraryItem.media.audioFiles || []) {
+      if (af.exclude || !mp3SeekIndex.isMp3AudioFile(af)) continue
       /** @type {SeekIndexFileStatus} */
       const file = {
         index: af.index,
@@ -184,12 +202,6 @@ class Mp3SeekIndexManager {
         file.durationError = Number(drift.toFixed(3))
       }
       files.push(file)
-    }
-
-    if (changed) {
-      media.audioFiles = audioFiles
-      media.changed('audioFiles', true)
-      await media.save()
     }
 
     const flagged = files.filter((f) => f.needsRepair)
