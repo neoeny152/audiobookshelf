@@ -227,13 +227,13 @@ class DuplicateItemManager {
     const rows = await Database.libraryItemDuplicateModel.findAll({ where, order: [['groupKey', 'ASC']] })
     if (!rows.length) return []
 
-    const itemsById = await this.loadItemDetails(rows.map((row) => row.libraryItemId))
+    const itemsById = await this.loadItemDetails(libraryId, rows.map((row) => row.libraryItemId))
 
     /** @type {Map<string, DuplicateGroupJSON>} */
     const groups = new Map()
     for (const row of rows) {
       const item = itemsById.get(row.libraryItemId)
-      if (!item) continue // Removed since the last check
+      if (!item) continue // Removed (or moved to another library) since the last check
       if (!groups.has(row.groupKey)) {
         groups.set(row.groupKey, {
           id: row.groupKey,
@@ -255,10 +255,11 @@ class DuplicateItemManager {
   }
 
   /**
+   * @param {string} libraryId only items still in this library
    * @param {string[]} libraryItemIds
    * @returns {Promise<Map<string, DuplicateGroupItem>>}
    */
-  async loadItemDetails(libraryItemIds) {
+  async loadItemDetails(libraryId, libraryItemIds) {
     /** @type {Map<string, DuplicateGroupItem>} */
     const itemsById = new Map()
     const ids = [...new Set(libraryItemIds)]
@@ -275,8 +276,8 @@ class DuplicateItemManager {
         FROM libraryItems li
         LEFT JOIN books b ON li.mediaType = 'book' AND b.id = li.mediaId
         LEFT JOIN podcasts p ON li.mediaType = 'podcast' AND p.id = li.mediaId
-        WHERE li.id IN (:ids)`,
-        { replacements: { ids: ids.slice(i, i + 500) } }
+        WHERE li.libraryId = :libraryId AND li.id IN (:ids)`,
+        { replacements: { libraryId, ids: ids.slice(i, i + 500) } }
       )
       for (const row of rows) {
         itemsById.set(row.id, {

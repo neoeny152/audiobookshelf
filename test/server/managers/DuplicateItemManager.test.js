@@ -145,6 +145,17 @@ describe('DuplicateItemManager', () => {
     expect(await manager.countGroups(library.id)).to.equal(0)
   })
 
+  it('does not list an item that left the library since the last check', async () => {
+    await addBook('A/Dune', { title: 'Dune', author: 'Frank Herbert' })
+    const b = await addBook('B/Dune', { title: 'Dune', author: 'Frank Herbert' })
+    await manager.checkLibrary(library.id)
+    expect(await manager.getGroups(library.id)).to.have.length(1)
+
+    const otherLibrary = await Database.libraryModel.create({ name: 'Other', mediaType: 'book' })
+    await b.update({ libraryId: otherLibrary.id })
+    expect(await manager.getGroups(library.id)).to.deep.equal([])
+  })
+
   it('finds podcasts with the same feed', async () => {
     const podcastLibrary = await Database.libraryModel.create({ name: 'Podcasts', mediaType: 'podcast' })
     const podcastFolder = await Database.libraryFolderModel.create({ path: '/pod', libraryId: podcastLibrary.id })

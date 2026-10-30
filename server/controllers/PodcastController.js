@@ -321,6 +321,8 @@ class PodcastController {
     }
 
     SocketAuthority.libraryItemEmitter('item_added', newLibraryItem)
+    // The same feed may already be in the library (#5676)
+    require('../managers/DuplicateItemManager').scheduleCheck(newLibraryItem.libraryId)
 
     res.json(newLibraryItem.toOldJSONExpanded())
 

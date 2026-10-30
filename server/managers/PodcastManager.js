@@ -724,6 +724,8 @@ class PodcastManager {
       }
 
       SocketAuthority.libraryItemEmitter('item_added', newLibraryItem)
+      // The same feed may already be in the library (#5676)
+      require('./DuplicateItemManager').scheduleCheck(newLibraryItem.libraryId)
 
       // Turn on podcast auto download cron if not already on
       if (newLibraryItem.media.autoDownloadEpisodes) {

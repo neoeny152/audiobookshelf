@@ -186,6 +186,8 @@ class Scanner {
       await libraryItem.saveMetadataFile()
 
       SocketAuthority.libraryItemEmitter('item_updated', libraryItem)
+      // A match can set the ASIN, ISBN, title or author (#5676)
+      require('../managers/DuplicateItemManager').scheduleCheck(libraryItem.libraryId)
     }
 
     return {
