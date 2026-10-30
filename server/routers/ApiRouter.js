@@ -21,6 +21,7 @@ const PlaylistController = require('../controllers/PlaylistController')
 const MeController = require('../controllers/MeController')
 const BackupController = require('../controllers/BackupController')
 const LibraryItemController = require('../controllers/LibraryItemController')
+const TranscriptController = require('../controllers/TranscriptController')
 const SeriesController = require('../controllers/SeriesController')
 const FileSystemController = require('../controllers/FileSystemController')
 const AuthorController = require('../controllers/AuthorController')
@@ -152,6 +153,13 @@ class ApiRouter {
     this.router.get('/items/:id/ebook/:fileid?', LibraryItemController.middleware.bind(this), LibraryItemController.getEBookFile.bind(this))
     this.router.get('/items/:id/ebook/:fileid/readalong', LibraryItemController.middleware.bind(this), LibraryItemController.getEbookReadAlong.bind(this))
     this.router.patch('/items/:id/ebook/:fileid/status', LibraryItemController.middleware.bind(this), LibraryItemController.updateEbookFileStatus.bind(this))
+    // fork feature transcripts (see controllers/TranscriptController.js)
+    this.router.get('/items/:id/transcripts', LibraryItemController.middleware.bind(this), TranscriptController.list.bind(this))
+    this.router.post('/items/:id/transcripts/generate', LibraryItemController.middleware.bind(this), TranscriptController.generate.bind(this))
+    this.router.post('/items/:id/transcripts/refresh-feed', LibraryItemController.middleware.bind(this), TranscriptController.refreshFeed.bind(this))
+    this.router.delete('/items/:id/transcripts/job', LibraryItemController.middleware.bind(this), TranscriptController.cancel.bind(this))
+    this.router.delete('/items/:id/transcripts/generated', LibraryItemController.middleware.bind(this), TranscriptController.removeGenerated.bind(this))
+    this.router.get('/items/:id/transcripts/:transcriptId', LibraryItemController.middleware.bind(this), TranscriptController.get.bind(this))
 
     //
     // User Routes

@@ -260,6 +260,9 @@ class PodcastManager {
       NotificationManager.onPodcastEpisodeDownloaded(libraryItem, podcastEpisode)
     }
 
+    // fork feature transcripts: feed transcripts and auto transcription, as the library settings say (never throws)
+    require('./TranscriptManager').onEpisodeDownloaded(libraryItem, podcastEpisode)
+
     return true
   }
 

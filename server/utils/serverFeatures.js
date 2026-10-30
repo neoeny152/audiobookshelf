@@ -16,6 +16,11 @@ const { version } = require('../../package.json')
  * - mp3SeekIndex: GET /api/tools/item/:id/seek-index (MP3s without a Xing/Info/VBRI header, ?measure=1 for the real
  *   duration), POST/DELETE /api/tools/item/:id/repair-seek-index (remux with a Xing header, task action
  *   repair-seek-index), audioFile.mp3SeekIndex (see utils/mp3SeekIndex.js).
+ * - transcripts: GET /api/items/:id/transcripts[?episodeId=] (feed, local sidecar and generated transcripts; an empty
+ *   list when none), GET /api/items/:id/transcripts/:transcriptId (?format=vtt|json|original), admin POST
+ *   /api/items/:id/transcripts/refresh-feed, DELETE /api/items/:id/transcripts/generated, podcast library settings
+ *   downloadPodcastTranscripts and autoTranscribePodcastEpisodes, transcripts on RSS feed episodes, and the
+ *   transcript_updated socket event (see managers/TranscriptManager.js).
  *
  * Optional features, only listed while they work (see utils/chapterbotClient.js advertisedFeatures):
  * - chapterbotVerify: POST /api/items/:id/chapters/snap accepts options.verify = true (Whisper speech check)
@@ -23,13 +28,16 @@ const { version } = require('../../package.json')
  * - chapterbotEpubCurrent: GET /api/items/:id/epub returns the item's current EPUB job without a job id (any user who
  *   can access the item), and chapterbot_epub_updated socket events carry its progress to everyone who can see the
  *   item. Listed together with chapterbotEpub.
+ * - transcriptsGenerate: admin POST /api/items/:id/transcripts/generate and DELETE /api/items/:id/transcripts/job
+ *   (task action generate-transcript, transcript_job_updated socket events). Listed together with chapterbotEpub
+ *   (it needs the sidecar's /v1/transcribe).
  * - autoPipeline: hands-off processing of new books (match, chapters, EPUB), GET/POST /api/libraries/:id/pipeline[/run],
  *   /api/items/:id/pipeline[/run|/proposal|/proposal/approve|/proposal/reject|/backups|/backups/:name/restore],
  *   library.settings.autoPipeline and pipeline_item_updated socket events. Listed only when the server runs with
  *   ABS_AUTO_PIPELINE=1 (see managers/AutoPipelineManager.js).
  */
-const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex'])
-const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'autoPipeline'])
+const SERVER_FEATURES = Object.freeze(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts'])
+const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate', 'autoPipeline'])
 
 /**
  * The optional features that are available right now.
@@ -40,7 +48,7 @@ const OPTIONAL_FEATURES = Object.freeze(['chapterbotVerify', 'chapterbotEpub', '
  */
 function availableOptionalFeatures(chapterbotFeatures = [], { autoPipeline = false } = {}) {
   const features = [...chapterbotFeatures]
-  if (chapterbotFeatures.includes('chapterbotEpub')) features.push('chapterbotEpubCurrent')
+  if (chapterbotFeatures.includes('chapterbotEpub')) features.push('chapterbotEpubCurrent', 'transcriptsGenerate')
   if (autoPipeline) features.push('autoPipeline')
   return features
 }

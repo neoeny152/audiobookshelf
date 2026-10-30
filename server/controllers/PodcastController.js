@@ -9,6 +9,7 @@ const cron = require('../libs/nodeCron')
 
 const { getPodcastFeed, findMatchingEpisodes } = require('../utils/podcastUtils')
 const { getFileTimestampsWithIno, filePathToPOSIX, isSameOrSubPath } = require('../utils/fileUtils')
+const transcripts = require('../utils/transcripts')
 const { validateUrl } = require('../utils/index')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 
@@ -642,6 +643,8 @@ class PodcastController {
 
     // Remove episode
     await episode.destroy()
+    // Stored transcripts of the episode (fork feature transcripts)
+    transcripts.removeEpisodeFiles(req.libraryItem.id, episode.id).catch(() => {})
 
     // Remove library file
     req.libraryItem.libraryFiles = req.libraryItem.libraryFiles.filter((file) => file.ino !== episode.audioFile.ino)
@@ -780,6 +783,7 @@ class PodcastController {
         }
 
         await episode.destroy()
+        transcripts.removeEpisodeFiles(libraryItem.id, episode.id).catch(() => {})
         numEpisodesDeleted++
       }
 

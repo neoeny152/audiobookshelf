@@ -1,5 +1,6 @@
 const { DataTypes, Model } = require('sequelize')
 const libraryItemsPodcastFilters = require('../utils/queries/libraryItemsPodcastFilters')
+const { normalizeFeedTranscripts } = require('../utils/transcripts')
 /**
  * @typedef ChapterObject
  * @property {number} id
@@ -79,6 +80,11 @@ class PodcastEpisode extends Model {
     }
     if (rssPodcastEpisode.guid) {
       podcastEpisode.extraData.guid = rssPodcastEpisode.guid
+    }
+    // fork: <podcast:transcript> tags of the feed item (see server/utils/transcripts.js)
+    const transcripts = normalizeFeedTranscripts(rssPodcastEpisode.transcripts)
+    if (transcripts.length) {
+      podcastEpisode.extraData.transcripts = transcripts
     }
 
     if (audioFile.chapters?.length) {

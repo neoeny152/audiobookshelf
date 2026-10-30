@@ -21,7 +21,7 @@ describe('serverFeatures', () => {
       language: 'en-us',
       authMethods: ['local'],
       authFormData: { authLoginCustomMessage: null },
-      serverFeatures: ['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex']
+      serverFeatures: ['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts']
     })
   })
 
@@ -43,16 +43,16 @@ describe('serverFeatures', () => {
   })
 
   it('adds only known optional features that are currently available', () => {
-    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex'])
-    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'chapterbotVerify', 'chapterbotEpub'])
+    expect(buildStatusPayload(fakeDatabase(true), []).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts'])
+    expect(buildStatusPayload(fakeDatabase(true), ['chapterbotEpub', 'bogus', 'chapterbotVerify']).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts', 'chapterbotVerify', 'chapterbotEpub'])
   })
 
   it('lists chapterbotEpubCurrent with chapterbotEpub and autoPipeline only behind its gate', () => {
     expect(availableOptionalFeatures([])).to.deep.equal([])
     expect(availableOptionalFeatures(['chapterbotVerify'])).to.deep.equal(['chapterbotVerify'])
-    expect(availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'])).to.deep.equal(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent'])
+    expect(availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'])).to.deep.equal(['chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate'])
     expect(availableOptionalFeatures([], { autoPipeline: true })).to.deep.equal(['autoPipeline'])
-    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'], { autoPipeline: true })).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'autoPipeline'])
+    expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures(['chapterbotVerify', 'chapterbotEpub'], { autoPipeline: true })).serverFeatures).to.deep.equal(['batchEpisodes', 'libraryDownloadPost', 'readAlong', 'mp3SeekIndex', 'transcripts', 'chapterbotVerify', 'chapterbotEpub', 'chapterbotEpubCurrent', 'transcriptsGenerate', 'autoPipeline'])
     expect(buildStatusPayload(fakeDatabase(true), availableOptionalFeatures([], { autoPipeline: false })).serverFeatures).to.not.include('autoPipeline')
   })
 
@@ -67,6 +67,8 @@ describe('serverFeatures', () => {
       chapterbotVerify: ['post /items/:id/chapters/snap'],
       chapterbotEpub: ['post /items/:id/epub', 'get /items/:id/epub/:jobId', 'delete /items/:id/epub/:jobId'],
       chapterbotEpubCurrent: ['get /items/:id/epub'],
+      transcripts: ['get /items/:id/transcripts', 'get /items/:id/transcripts/:transcriptId', 'post /items/:id/transcripts/refresh-feed', 'delete /items/:id/transcripts/generated'],
+      transcriptsGenerate: ['post /items/:id/transcripts/generate', 'delete /items/:id/transcripts/job'],
       autoPipeline: ['get /libraries/:id/pipeline', 'post /libraries/:id/pipeline/run', 'get /items/:id/pipeline', 'post /items/:id/pipeline/run', 'delete /items/:id/pipeline', 'get /items/:id/pipeline/proposal', 'post /items/:id/pipeline/proposal/approve', 'post /items/:id/pipeline/proposal/reject', 'get /items/:id/pipeline/backups', 'post /items/:id/pipeline/backups/:name/restore']
     }
     expect(Object.keys(featureRoutes).sort()).to.deep.equal([...SERVER_FEATURES, ...OPTIONAL_FEATURES].sort())

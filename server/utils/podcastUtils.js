@@ -4,6 +4,7 @@ const Logger = require('../Logger')
 const { xmlToJSON, timestampToSeconds } = require('./index')
 const htmlSanitizer = require('../utils/htmlSanitizer')
 const Fuse = require('../libs/fusejs')
+const { extractFeedTranscripts } = require('./transcripts')
 
 /**
  * @typedef RssPodcastChapter
@@ -33,6 +34,7 @@ const Fuse = require('../libs/fusejs')
  * @property {string} chaptersUrl
  * @property {string} chaptersType
  * @property {RssPodcastChapter[]} chapters
+ * @property {{url: string, type: string|null, language: string|null, rel: string|null}[]} transcripts - <podcast:transcript> tags (fork, additive)
  */
 
 /**
@@ -181,6 +183,10 @@ function extractEpisodeData(item) {
     episode.chaptersType = item['podcast:chapters'][0]['$'].type || 'application/json'
   }
 
+  // Extract transcripts (Podcasting 2.0 <podcast:transcript>)
+  const transcripts = extractFeedTranscripts(item)
+  if (transcripts.length) episode.transcripts = transcripts
+
   // Supposed to be the plaintext description but not always followed
   if (item['description']) {
     const rawDescription = extractFirstArrayItemString(item, 'description')
@@ -286,7 +292,8 @@ function cleanEpisodeData(data) {
     guid: data.guid || null,
     chaptersUrl: data.chaptersUrl || null,
     chaptersType: data.chaptersType || null,
-    chapters: data.chapters || []
+    chapters: data.chapters || [],
+    transcripts: data.transcripts || []
   }
 }
 

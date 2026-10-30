@@ -62,7 +62,11 @@ class Library extends Model {
         autoScanCronExpression: null,
         podcastSearchRegion: 'us',
         markAsFinishedPercentComplete: null,
-        markAsFinishedTimeRemaining: 10
+        markAsFinishedTimeRemaining: 10,
+        // fork only (feature transcripts): fetch the creator's transcripts with each episode, and transcribe new
+        // episodes that have no timed one through chapterbot; both off by default
+        downloadPodcastTranscripts: false,
+        autoTranscribePodcastEpisodes: false
       }
     } else {
       return {
