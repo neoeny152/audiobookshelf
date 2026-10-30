@@ -261,6 +261,7 @@ describe('TranscriptManager and /api/items/:id/transcripts', () => {
     it('answers 502 when the feed transcript cannot be downloaded or read, and 404 for unknown ids', async () => {
       TranscriptManager.fetchUrl = async () => ({ data: Buffer.from('not a subtitle file'), contentType: 'text/vtt' })
       expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-0?episodeId=${episodeId}`)).status).to.equal(502)
+      TranscriptManager.reset()
       TranscriptManager.fetchUrl = async () => {
         throw new Error('ECONNREFUSED')
       }
@@ -268,6 +269,24 @@ describe('TranscriptManager and /api/items/:id/transcripts', () => {
       expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-7?episodeId=${episodeId}`)).status).to.equal(404)
       expect((await fetch(`${base}/${podcastItemId}/transcripts/bogus?episodeId=${episodeId}`)).status).to.equal(404)
       expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-0?episodeId=${episodeId}&format=exe`)).status).to.equal(400)
+    })
+
+    it('does not download a failed feed transcript again for a few minutes', async () => {
+      const realNow = TranscriptManager.now
+      TranscriptManager.fetchUrl = async (url) => {
+        fetched.push(url)
+        throw new Error('ECONNREFUSED')
+      }
+      try {
+        expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-0?episodeId=${episodeId}`)).status).to.equal(502)
+        expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-0?episodeId=${episodeId}`)).status).to.equal(502)
+        expect(fetched).to.have.length(1)
+        TranscriptManager.now = () => realNow() + 10 * 60 * 1000
+        expect((await fetch(`${base}/${podcastItemId}/transcripts/feed-0?episodeId=${episodeId}`)).status).to.equal(502)
+        expect(fetched).to.have.length(2)
+      } finally {
+        TranscriptManager.now = realNow
+      }
     })
 
     it('downloads feed transcripts with a new episode when the library setting is on', async () => {
@@ -310,9 +329,11 @@ describe('TranscriptManager and /api/items/:id/transcripts', () => {
       expect((await post('refresh-feed')).status).to.equal(403)
       expect((await fetch(`${base}/${bookItemId}/transcripts/job`, { method: 'DELETE' })).status).to.equal(403)
       expect((await fetch(`${base}/${bookItemId}/transcripts/generated`, { method: 'DELETE' })).status).to.equal(403)
-      // and they do not see the job or the generate option
+      // and they do not see the job or the generate option, which is not worked out for them
+      const canGenerateFor = sinon.spy(TranscriptManager, 'canGenerateFor')
       const body = await getJson(`${base}/${bookItemId}/transcripts`)
       expect(body.canGenerate).to.equal(false)
+      expect(canGenerateFor.called).to.equal(false)
       expect(sidecar.requests.filter((r) => r.url === '/v1/transcribe')).to.have.length(0)
     })
 

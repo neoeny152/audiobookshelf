@@ -52,12 +52,7 @@ class TranscriptController {
    */
   async list(req, res) {
     try {
-      const payload = await TranscriptManager.list(req.libraryItem, TranscriptController.episodeIdFrom(req.query.episodeId))
-      if (!req.user.isAdminOrUp) {
-        payload.canGenerate = false
-        payload.job = null
-      }
-      res.json(payload)
+      res.json(await TranscriptManager.list(req.libraryItem, TranscriptController.episodeIdFrom(req.query.episodeId), req.user.isAdminOrUp))
     } catch (error) {
       TranscriptController.handleError(error, res, 'Listing transcripts')
     }

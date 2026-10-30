@@ -37,6 +37,8 @@ const RETRY_BASE_MS = 10000
 /** finished jobs are kept this long for GET */
 const FINISHED_TTL_MS = 60 * 60 * 1000
 const FEED_TIMEOUT_MS = 30000
+/** a feed transcript that failed to download is not tried again for this long */
+const FEED_RETRY_MS = 5 * 60 * 1000
 const ACTIVE = new Set(['queued', 'running'])
 const METHODS = new Set(['auto', 'transcribe', 'readalong'])
 
@@ -67,6 +69,8 @@ class TranscriptManager {
     this.fetchUrl = (url) => this.defaultFetch(url)
     /** @type {Map<string, Promise<string>>} in-flight feed downloads */
     this.feedFetches = new Map()
+    /** @type {Map<string, {at: number, error: Error}>} url -> last failed download */
+    this.feedFailures = new Map()
     this.rangeSec = RANGE_SEC
     this.overlapSec = RANGE_OVERLAP_SEC
     this.retryBaseMs = RETRY_BASE_MS
@@ -114,9 +118,10 @@ class TranscriptManager {
   /**
    * @param {import('../models/LibraryItem')} libraryItem - expanded
    * @param {string|null} episodeId
+   * @param {boolean} isAdmin - only admins see the generate option and the job
    * @returns {Promise<Object>} API payload
    */
-  async list(libraryItem, episodeId) {
+  async list(libraryItem, episodeId, isAdmin) {
     const episode = this.getEpisode(libraryItem, episodeId)
     const list = []
 
@@ -188,8 +193,8 @@ class TranscriptManager {
       episodeId: episode?.id || null,
       transcripts: list,
       preferredId: transcripts.preferredTranscriptId(list),
-      canGenerate: await this.canGenerateFor(libraryItem, episode),
-      job: this.getJob(libraryItem.id, episode?.id || null)
+      canGenerate: isAdmin ? await this.canGenerateFor(libraryItem, episode) : false,
+      job: isAdmin ? this.getJob(libraryItem.id, episode?.id || null) : null
     }
   }
 
@@ -277,7 +282,8 @@ class TranscriptManager {
 
   /**
    * The cached copy of an episode's feed transcript, downloaded first when needed. Concurrent callers share one
-   * download. The file is checked to be readable in its format before it is cached.
+   * download. The file is checked to be readable in its format before it is cached. A failed download is answered
+   * from memory for FEED_RETRY_MS, so readers do not fetch up to MAX_TRANSCRIPT_BYTES on every request.
    *
    * @returns {Promise<string>} the cached file
    * @throws {TranscriptError}
@@ -286,6 +292,8 @@ class TranscriptManager {
     const format = transcripts.formatFromType(entry.type, entry.url)
     const path = transcripts.feedCachePath(libraryItemId, episodeId, index, format)
     if (await fs.pathExists(path)) return path
+    const failure = this.feedFailures.get(entry.url)
+    if (failure && this.now() - failure.at < FEED_RETRY_MS) throw failure.error
     const key = path
     if (!this.feedFetches.has(key)) {
       const promise = (async () => {
@@ -309,7 +317,12 @@ class TranscriptManager {
         await transcripts.writeAtomic(path, text)
         Logger.info(`[TranscriptManager] Downloaded transcript "${entry.url}" for episode "${episodeId}"`)
         return path
-      })().finally(() => this.feedFetches.delete(key))
+      })()
+        .catch((error) => {
+          this.feedFailures.set(entry.url, { at: this.now(), error })
+          throw error
+        })
+        .finally(() => this.feedFetches.delete(key))
       this.feedFetches.set(key, promise)
     }
     return this.feedFetches.get(key)
@@ -695,6 +708,7 @@ class TranscriptManager {
     this.jobs.clear()
     this.queue = []
     this.feedFetches.clear()
+    this.feedFailures.clear()
   }
 }
 
