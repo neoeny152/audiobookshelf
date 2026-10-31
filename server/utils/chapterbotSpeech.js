@@ -7,7 +7,7 @@
  *   does not start with them (first 3 words)
  * - EARLY: the heading is in the after-clip (first 25 words) but more than 5 words in
  * - heading: the heading words are in the after-clip at most 5 words in, as whole words with the title's stop words
- *   ignored (the start looks right); not EARLY
+ *   ignored (the start looks right), or for "Chapter N ..." the number N alone as the first word; not EARLY
  * - heard (not in the script, additive): a spoken heading such as "Chapter 3", "Part 2" or "Prologue" starting within
  *   the first 5 words of the after-clip, normalised (number words and roman numerals become digits), whatever the
  *   title is; null when none is heard, and null when the start is LATE or EARLY (the clip may hold the neighbouring
@@ -439,7 +439,9 @@ function assessSpeech(title, before, after) {
     tt,
     isHeadingTitle
   )
-  const heading = keyAt >= 0 && keyAt <= 5 && !early
+  // many narrators read "Chapter 2: Allison" as "2. Allison": the chapter's number alone, as the first word, counts too
+  const numberFirst = tt[0] === 'chapter' && /^\d+$/.test(tt[1] || '') && afterTok[0] === tt[1]
+  const heading = ((keyAt >= 0 && keyAt <= 5) || numberFirst) && !early
 
   // a start flagged LATE or EARLY is not where the speech check listened for, so what it heard there may be the
   // neighbouring chapter ("End of chapter three. ... Chapter four.")

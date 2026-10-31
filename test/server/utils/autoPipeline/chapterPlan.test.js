@@ -210,6 +210,29 @@ describe('autoPipeline chapterPlan', () => {
       expect(why[8]).to.deep.equal(['not-analysed', 'no-speech-check'])
       expect(plan.summarizeFailing(result)).to.equal('1 medium confidence, 2 not speech checked, 1 low confidence, 1 LATE, 3 heading not heard, 1 EARLY, 1 other heading heard, 1 not analysed')
     })
+
+    it('with placeholder titles a heading heard at most starts means only the titles differ', () => {
+      // Black Ice: Audible numbers from the prologue, the narrator from chapter 1
+      const shifted = (n, over = {}) =>
+        snap(
+          Array.from({ length: n }, (_, i) => ({ title: `Chapter ${i + 1}`, ...(i ? { speech: speech({ heading: false, heard: `Chapter ${i}` }) } : {}) })),
+          over
+        )
+      const result = plan.evaluatePolicy({ source: 'aligned', snap: shifted(5) })
+      expect(result).to.deep.equal({ apply: false, blockers: ['titles-differ'], failing: [] })
+      expect(plan.summarizeFailing(result)).to.equal('the titles differ from the spoken headings (the starts line up; use the heard titles)')
+
+      // a chapter where nothing was heard still needs a look
+      const oneSilent = shifted(5)
+      oneSilent.chapters[4].speech = speech({ heading: false })
+      expect(plan.evaluatePolicy({ source: 'aligned', snap: oneSilent }).failing).to.deep.equal([{ index: 4, why: ['heading-not-heard'] }])
+
+      // real titles: another heading is still evidence of a wrong start
+      const named = shifted(5)
+      named.chapters.forEach((c, i) => (c.title = `The ${i}`))
+      expect(plan.evaluatePolicy({ source: 'aligned', snap: named }).failing).to.have.length(4)
+      expect(plan.hasPlaceholderTitles([{ title: 'Chapter 1' }, { title: 'Chapter 2' }, { title: 'Prologue' }])).to.equal(false)
+    })
   })
 
   it('chaptersEqual compares titles and times within 1 ms', () => {

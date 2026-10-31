@@ -336,6 +336,20 @@ describe('chapterbotSpeech', () => {
         headingExpected: false
       },
       {
+        name: 'the chapter number read out alone (Keep Them Close)',
+        title: 'Chapter 2: Allison',
+        before: 'the truck lurched toward the rail.',
+        after: '2. Allison. By some small miracle, the truck does not collide.',
+        expected: { heading: true, late: false, early: false }
+      },
+      {
+        name: 'another number first is not the heading',
+        title: 'Chapter 2: Allison',
+        before: 'she said.',
+        after: '3. Allison. The crowd is on its feet.',
+        expected: { heading: false }
+      },
+      {
         name: 'nothing heard',
         title: 'Chapter 9',
         before: '',

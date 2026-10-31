@@ -200,12 +200,25 @@ function audioFingerprint(audioFiles) {
 }
 
 /**
+ * Audible's placeholder titles, "Chapter 1" to "Chapter N" from the first entry: they count the intro or prologue, so
+ * the book's spoken headings ("Prologue", "Chapter 1", ...) can be one or two behind.
+ *
+ * @param {{title?: string}[]} chapters
+ * @returns {boolean}
+ */
+function hasPlaceholderTitles(chapters) {
+  return chapters.length > 2 && chapters.every((c, i) => typeof c.title === 'string' && c.title.trim().toLowerCase() === `chapter ${i + 1}`)
+}
+
+/**
  * Strict v1 auto-apply policy over a (complete, speech-checked) snap response.
  *
  * Apply only if the source is aligned Audible chapters or a check of scanner chapters, the snap is complete without
  * not-analysed or failed segments, and every chapter after the first is high confidence with a speech check that is
  * neither LATE nor EARLY and heard its heading (or does not expect one). A spoken heading heard where the title's was
- * not ("Chapter 5" at the start of "Chapter 4") is evidence of a wrong start.
+ * not ("Chapter 5" at the start of "Chapter 4") is evidence of a wrong start, except with placeholder titles: when
+ * most chapters hear a heading right at their start, the starts line up and only the titles differ ('titles-differ',
+ * the review offers the heard ones).
  *
  * @param {Object} params
  * @param {string} params.source - 'aligned' | 'near' | 'scanner'
@@ -220,6 +233,10 @@ function evaluatePolicy({ source, snap, extra = [] }) {
   if (!snap.complete) blockers.push('snap-incomplete')
   if ((snap.stats?.failedSegments || 0) > 0) blockers.push('analysis-failed')
 
+  const headingAtStart = (c) => !!c.speech?.heard && !c.speech.late && !c.speech.early
+  const titlesDiffer = hasPlaceholderTitles(snap.chapters) && snap.chapters.filter((c) => c.index > 0 && headingAtStart(c)).length * 2 >= snap.chapters.length - 1
+  if (titlesDiffer) blockers.push('titles-differ')
+
   const failing = []
   for (const c of snap.chapters) {
     const why = []
@@ -232,10 +249,10 @@ function evaluatePolicy({ source, snap, extra = [] }) {
       else {
         if (s.late) why.push('late')
         if (s.early) why.push('early')
-        if (!(s.heading === true || s.expected === false)) why.push('heading-not-heard')
+        if (!(s.heading === true || s.expected === false || (titlesDiffer && headingAtStart(c)))) why.push('heading-not-heard')
       }
     }
-    if (c.speech && c.speech.heard && c.speech.heading === false) why.push('heard-other-heading')
+    if (c.speech && c.speech.heard && c.speech.heading === false && !titlesDiffer) why.push('heard-other-heading')
     if (why.length) failing.push({ index: c.index, why })
   }
   return { apply: !blockers.length && !failing.length, blockers, failing }
@@ -256,7 +273,8 @@ function summarizeFailing({ blockers = [], failing = [] }) {
     'heard-other-heading': 'other heading heard',
     'no-speech-check': 'not speech checked',
     'not-analysed': 'not analysed',
-    'analysis-failed': 'analysis failed'
+    'analysis-failed': 'analysis failed',
+    'titles-differ': 'the titles differ from the spoken headings (the starts line up; use the heard titles)'
   }
   for (const f of failing) {
     for (const why of f.why) {
@@ -264,7 +282,7 @@ function summarizeFailing({ blockers = [], failing = [] }) {
       counts.set(key, (counts.get(key) || 0) + 1)
     }
   }
-  const parts = [...blockers, ...[...counts.entries()].map(([k, n]) => `${n} ${k}`)]
+  const parts = [...blockers.map((b) => label[b] || b), ...[...counts.entries()].map(([k, n]) => `${n} ${k}`)]
   return parts.join(', ')
 }
 
@@ -281,6 +299,7 @@ module.exports = {
   audibleToChapters,
   pickAudibleSource,
   audioFingerprint,
+  hasPlaceholderTitles,
   evaluatePolicy,
   summarizeFailing
 }
