@@ -40,6 +40,8 @@ const FINISHED = new Set(['done', 'failed', 'cancelled'])
 const POLL_MS = 15000
 /** Give up following a job after this many failed status polls in a row (about 10 minutes at POLL_MS) */
 const MAX_POLL_FAILURES = 40
+/** A job a chapterbot restart interrupted is resumed (its transcript goes on) at most this many times */
+const MAX_RESTART_RESUMES = 3
 /** A GET refreshes the status from the sidecar when the last poll is older than this */
 const REFRESH_MS = 5000
 /** Finished jobs are kept this long for GET */
@@ -192,6 +194,7 @@ class ChapterbotEpubManager extends EventEmitter {
       title: xmlText(libraryItem.media.title, MAX_TEXT) || 'Untitled',
       chaptersTotal: 0,
       createdAt: Number.isFinite(entry.createdAt) ? entry.createdAt : this.now(),
+      restartResumes: Number.isInteger(entry.restartResumes) ? entry.restartResumes : 0,
       // the sidecar says where the job is on the first poll (a 404 marks it failed)
       status: 'queued'
     })
@@ -214,7 +217,7 @@ class ChapterbotEpubManager extends EventEmitter {
     const entries = []
     for (const r of this.jobs.values()) {
       if (!r.jobId) continue
-      const base = { libraryItemId: r.libraryItemId, jobId: r.jobId, origin: r.origin, userId: r.userId, createdAt: r.createdAt }
+      const base = { libraryItemId: r.libraryItemId, jobId: r.jobId, origin: r.origin, userId: r.userId, createdAt: r.createdAt, restartResumes: r.restartResumes }
       if (ACTIVE.has(r.status)) entries.push(base)
       else if (FINISHED.has(r.status) && r.finishedAt && now - r.finishedAt <= FINISHED_TTL_MS) {
         entries.push({ ...base, status: r.status, finishedAt: r.finishedAt, fileName: r.fileName, ebookRole: r.ebookRole, error: r.error, title: r.title, progress: r.progress, chaptersDone: r.chaptersDone, chaptersTotal: r.chaptersTotal, access: r.access })
@@ -250,6 +253,7 @@ class ChapterbotEpubManager extends EventEmitter {
       finishedAt: null,
       lastPolledAt: 0,
       pollFailures: 0,
+      restartResumes: 0,
       timer: null,
       refreshing: null,
       /** @type {Promise<void>|null} the background download/copy/rescan once the sidecar reports done */
@@ -434,6 +438,21 @@ class ChapterbotEpubManager extends EventEmitter {
     }
     record.lastPolledAt = this.now()
     if (!['queued', 'running'].includes(record.status)) return // cancelled meanwhile
+    // chapterbot restarted under the job: put it back in its queue rather than lose hours of transcription
+    const interrupted = state.status === 'failed' && state.resumable === true && /^interrupted/.test(state.error || '')
+    if (interrupted && !record.cancelRequested && record.restartResumes < MAX_RESTART_RESUMES) {
+      try {
+        state = await this.client.resumeJob(record.jobId)
+        record.restartResumes++
+        this.persist()
+        Logger.info(`[ChapterbotEpubManager] Resumed EPUB job ${record.jobId} after a chapterbot restart`)
+      } catch (error) {
+        Logger.warn(`[ChapterbotEpubManager] Resuming EPUB job ${record.jobId} failed: ${error.message}`)
+        // busy or unreachable: the next poll tries again; a job that cannot be resumed fails below
+        if (error.status !== 404 && error.status !== 409) return
+      }
+      if (!['queued', 'running'].includes(record.status)) return
+    }
 
     const before = this.progressKey(record)
     try {

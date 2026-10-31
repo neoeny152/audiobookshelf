@@ -596,6 +596,18 @@ async function deleteJob(jobId) {
 }
 
 /**
+ * POST /v1/jobs/{id}/resume: puts a resumable failed or cancelled job back in the queue (its transcript goes on)
+ *
+ * @param {string} jobId
+ * @returns {Promise<Object>} the job's status
+ */
+async function resumeJob(jobId) {
+  const { json } = await request('POST', `/v1/jobs/${checkJobId(jobId)}/resume`, { timeoutMs: 15000, maxBytes: 64 * 1024 })
+  if (!json || typeof json.status !== 'string') throw new ChapterbotError('bad_response', 'Chapterbot returned no job status')
+  return json
+}
+
+/**
  * GET /v1/info
  *
  * @returns {Promise<Object>}
@@ -628,6 +640,7 @@ module.exports = {
   downloadJobResult,
   downloadJobReadAlong,
   deleteJob,
+  resumeJob,
   getInfo,
   HEALTH_TIMEOUT_MS,
   HEALTH_FRESH_MS,

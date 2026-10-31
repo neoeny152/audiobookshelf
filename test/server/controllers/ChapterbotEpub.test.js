@@ -108,6 +108,10 @@ async function startSidecar() {
         }
         return json(200, sidecar.readAlong)
       }
+      if (req.method === 'POST' && req.url === `/v1/jobs/${JOB_ID}/resume`) {
+        sidecar.state = { ...sidecar.state, status: 'queued', error: null, resumable: false }
+        return json(202, { id: JOB_ID, kind: 'epub', ...sidecar.state })
+      }
       if (req.method === 'DELETE' && req.url === `/v1/jobs/${JOB_ID}`) {
         const answer = { id: JOB_ID, ...sidecar.deleteAnswer }
         if (!sidecar.deleteDelayMs) return json(200, answer)
@@ -996,6 +1000,44 @@ describe('Chapterbot EPUB endpoints', () => {
       } finally {
         restarted.reset()
       }
+    })
+
+    it('resumes a job a chapterbot restart interrupted, at most 3 times (the count is persisted)', async () => {
+      await ChapterbotEpubManager.init({ persistPath })
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      const record = () => ChapterbotEpubManager.getRecord(bookItemId)
+      const resumes = () => sidecar.requests.filter((r) => r.method === 'POST' && r.url === `/v1/jobs/${JOB_ID}/resume`).length
+      const interrupt = () => (sidecar.state = { ...sidecar.state, status: 'failed', error: 'interrupted by a service restart', resumable: true })
+      for (let i = 1; i <= 3; i++) {
+        interrupt()
+        await ChapterbotEpubManager.refresh(record())
+        expect(resumes()).to.equal(i)
+        expect(record().status).to.equal('queued')
+      }
+      await ChapterbotEpubManager.persistChain
+      expect(JSON.parse(fs.readFileSync(persistPath, 'utf8'))[0]).to.include({ restartResumes: 3 })
+      interrupt()
+      await ChapterbotEpubManager.refresh(record())
+      expect(resumes()).to.equal(3)
+      expect(record().status).to.equal('failed')
+    })
+
+    it('does not resume an interrupted job the user had asked to cancel, or one that failed on its own', async () => {
+      await ChapterbotEpubManager.init({ persistPath })
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      ChapterbotEpubManager.getRecord(bookItemId).cancelRequested = true
+      sidecar.state = { ...sidecar.state, status: 'failed', error: 'interrupted by a service restart', resumable: true }
+      await ChapterbotEpubManager.refresh(ChapterbotEpubManager.getRecord(bookItemId))
+      expect(ChapterbotEpubManager.getRecord(bookItemId).status).to.equal('failed')
+
+      ChapterbotEpubManager.reset()
+      await ChapterbotEpubManager.init({ persistPath })
+      sidecar.state = { ...sidecar.state, status: 'queued', error: null }
+      expect((await call('startEpubJob')).statusCode).to.equal(202)
+      sidecar.state = { ...sidecar.state, status: 'failed', error: 'AudioError: decode failed', resumable: true }
+      await ChapterbotEpubManager.refresh(ChapterbotEpubManager.getRecord(bookItemId))
+      expect(ChapterbotEpubManager.getRecord(bookItemId).status).to.equal('failed')
+      expect(sidecar.requests.some((r) => r.url.endsWith('/resume'))).to.equal(false)
     })
 
     it('a job the sidecar no longer knows is marked failed; entries for deleted items are dropped', async () => {
