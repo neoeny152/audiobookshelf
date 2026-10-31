@@ -595,6 +595,13 @@ class AutoPipelineManager extends EventEmitter {
         await this.dismiss(state.libraryItemId)
       }
     }
+    if (prev.sweepStart !== next.sweepStart || prev.sweepEnd !== next.sweepEnd) {
+      // books waiting for the old quiet hours (EPUBs, sweep runs) look at the new ones now
+      for (const state of this.states.values()) {
+        if (state.libraryId !== library.id || !this.isWaitingToRun(state) || (state.step !== 'epub' && state.trigger !== 'sweep')) continue
+        state.notBefore = 0
+      }
+    }
     this.kick()
   }
 
@@ -1482,6 +1489,15 @@ class AutoPipelineManager extends EventEmitter {
     }
     // dismissed while the item was being loaded: start nothing
     if (this.states.get(state.libraryItemId) !== state) return
+    // Hours of transcription each: the pipeline starts EPUBs only in the library's quiet hours (one running at the end
+    // of them finishes); EPUBs a person asks for start at once (ChapterbotEpubManager.start)
+    const now = new Date(this.now())
+    if (!inSweepWindow(settings, now)) {
+      // a new night: chapterbot-busy retries start again
+      state.epub = { result: 'queued' }
+      this.queued(state, 'epub', `waiting for tonight's window (${settings.sweepStart}-${settings.sweepEnd})`, msToSweepStart(settings, now))
+      return this.save(state)
+    }
     state.epub = { ...(state.epub || {}), result: 'starting' }
     let job
     try {

@@ -285,10 +285,15 @@ function createLocator({ titles, skipReasons = new Set(), leadSec = 0.25, cacheK
             Logger.info('[ChapterLocate] Chapterbot has no /v1/transcribe, using the plain speech check')
             return fallback.verify({ proposals, timeline, signal })
           }
-          Logger.warn(`[ChapterLocate] Speech check failed: ${error.message}`)
           const left = checked.length - k
-          if (error.code === 'timeout') notChecked = left
-          else warnings.push(error.status === 503 || error.status === 429 ? `Speech check skipped: chapterbot is busy, ${left} chapters not checked, try again later` : `Speech check failed: ${left} chapters not checked`)
+          if (error.code === 'timeout') {
+            // the request's time budget ran out: the client sends the chapters left in its next batch
+            Logger.info(`[ChapterLocate] Speech check stopped at the time budget, ${left} chapters left for the next batch`)
+            notChecked = left
+          } else {
+            Logger.warn(`[ChapterLocate] Speech check failed: ${error.message}`)
+            warnings.push(error.status === 503 || error.status === 429 ? `Speech check skipped: chapterbot is busy, ${left} chapters not checked, try again later` : `Speech check failed: ${left} chapters not checked`)
+          }
           break
         }
         if (hit === undefined) {

@@ -229,7 +229,8 @@ describe('AutoPipelineManager', () => {
     sinon.stub(SocketAuthority, 'emitter').callsFake((evt, data) => emitted.push([evt, data]))
     sinon.stub(SocketAuthority, 'libraryItemEmitter').callsFake((evt, li) => emitted.push([evt, { id: li.id }]))
 
-    const settings = { ...Database.libraryModel.getDefaultLibrarySettingsForMediaType('book'), autoPipeline: { ...defaultAutoPipelineSettings(), mode: 'on', autoEpub: true } }
+    // quiet hours all day: EPUB steps start at once unless a test sets the window
+    const settings = { ...Database.libraryModel.getDefaultLibrarySettingsForMediaType('book'), autoPipeline: { ...defaultAutoPipelineSettings(), mode: 'on', autoEpub: true, sweepStart: '00:00', sweepEnd: '23:59' } }
     // scanned before: the first scan of a library queues nothing
     const library = await Database.libraryModel.create({ name: 'Books', mediaType: 'book', provider: 'audible', settings, lastScan: clock - 24 * 3600 * 1000 })
     const folder = await Database.libraryFolderModel.create({ path: metadataDir, libraryId: library.id })
@@ -792,6 +793,38 @@ describe('AutoPipelineManager', () => {
       await runAll()
       expect(epub.start.callCount).to.equal(2)
       expect(stateOf(id2).epub.result).to.equal('running')
+    })
+
+    it('starts pipeline EPUBs only in the quiet hours; one that is running when they end finishes', async () => {
+      await setLibrarySettings({ sweepStart: '01:00', sweepEnd: '06:00' })
+      const at = (day, h, m = 0) => new Date(2026, 9, day, h, m).getTime()
+      clock = at(29, 12)
+      const id1 = await createItem({ asin: ASIN })
+      const id2 = await createItem({ asin: ASIN, dir: makeDir('two') })
+      await addItems([id1, id2])
+      await manager.drain()
+      clock += 60 * 1000
+      await manager.drain()
+      expect(epub.start.called).to.be.false
+      expect(stateOf(id1)).to.include({ status: 'epub', reason: "waiting for tonight's window (01:00-06:00)", notBefore: at(30, 1) })
+
+      clock = at(30, 5, 30)
+      await manager.drain()
+      expect(epub.start.callCount).to.equal(1)
+      clock = at(30, 6, 30)
+      await epub.end(id1, 'done')
+      await manager.drain()
+      expect(epub.start.callCount).to.equal(1)
+      expect(stateOf(id2)).to.include({ status: 'epub', notBefore: at(31, 1) })
+
+      // quiet hours moved earlier: the waiting EPUB looks at the new window at once
+      clock = at(30, 22)
+      const library = await Database.libraryModel.findByPk(libraryId)
+      const previous = library.settings.autoPipeline
+      await setLibrarySettings({ sweepStart: '21:00', sweepEnd: '23:00' })
+      await manager.onLibrarySettingsChanged(await Database.libraryModel.findByPk(libraryId), previous)
+      await manager.drain()
+      expect(epub.start.callCount).to.equal(2)
     })
 
     it('backs off while chapterbot has too many jobs', async () => {
