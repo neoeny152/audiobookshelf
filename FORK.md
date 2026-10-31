@@ -10,20 +10,22 @@ This is an unofficial personal fork of [advplyr/audiobookshelf](https://github.c
 ### Chapters
 - **Chapter snap:** `POST /api/items/:id/chapters/snap` proposes chapter starts moved onto the nearest pause in the audio, including pauses split across a file joint. It never writes chapters itself.
 - **Speech check:** optional, checks whether the chapter heading is spoken at the snapped start (`options.verify`). It needs the chapterbot sidecar.
-- Locating spoken headings far from the reference start, and predicting unheard chapters from the headings found around them.
+- **Re-anchoring** (`options.reanchor`, default on): before snapping, a reference list (e.g. Audible's) that drifts against books split into part files is shifted onto the files named like its chapters.
+- **Heading search** (`options.locate`, default on with the speech check): a heading not heard at its start is looked for in a wider transcript and the start moves there; unheard chapters are predicted from the headings found around them.
 
 ### Ebooks
-- **EPUB from audio:** `POST /api/items/:id/epub`, with job status and cancel. It needs the sidecar. The generated EPUB becomes the primary ebook when the book has none.
+- **EPUB from audio:** `POST /api/items/:id/epub`, with job status and cancel. It needs the sidecar. The EPUB is written next to the audio as `<Title> (from audio).epub` and becomes the primary ebook when the book has none, or when it comes with read-along data (a published ebook then stays as a supplementary file).
 - **Read-along:** sentence timings are stored with the EPUB and served at `GET /api/items/:id/ebook/:fileid/readalong`.
 
 ### Transcripts
-- Transcripts for audiobooks and podcast episodes, from creator feeds, local files or generation ([#5683](https://github.com/advplyr/audiobookshelf/issues/5683), [#2919](https://github.com/advplyr/audiobookshelf/issues/2919)).
+- Transcripts for audiobooks and podcast episodes, from creator feeds (`<podcast:transcript>`), `.vtt`/`.srt` files next to the audio, or generated: from the read-along data of an EPUB made from the audio, otherwise through the sidecar. Podcast library settings `downloadPodcastTranscripts` and `autoTranscribePodcastEpisodes` ([#5683](https://github.com/advplyr/audiobookshelf/issues/5683), [#2919](https://github.com/advplyr/audiobookshelf/issues/2919)).
 
 ### Library maintenance
-- **Automatic processing of new books:** match, chapters and EPUB, with approvals, undo and a nightly sweep. Off unless `ABS_AUTO_PIPELINE=1`.
-- **MP3 seek index:** detects MP3s without a seek index and repairs them, with backups and restore.
-- **Book health:** `GET /api/items/:id/health`, guided fix, and `GET /api/libraries/:id/needs-work`.
-- **Possible duplicates:** detected after scans and listed for the Issues page, never deleted or merged ([#5676](https://github.com/advplyr/audiobookshelf/issues/5676)).
+- **Automatic processing of new books:** waits for the files to settle, then MP3 seek index repair (only with consent), Audible match (only above a confidence threshold, never over an existing ASIN), Audible chapters snapped and speech checked (applied only when every check passes, otherwise left for review), and optionally an EPUB from the audio. Every change is backed up and can be undone. Per-library mode `off` (default), `dryRun` or `on`, an optional nightly sweep of never-processed books, and a library run limited to the books that need work. Nothing runs unless the server is started with `ABS_AUTO_PIPELINE=1`.
+- **MP3 seek index:** finds MP3s without a seek (Xing/VBRI) header whose measured length differs from the stored one, and remuxes them with a header (no re-encoding), keeping the originals as a restorable backup; a repair cut short by a restart resumes (`/api/tools/item/:id/seek-index`, `.../repair-seek-index`, `.../seek-index/backups/:backupId[/restore]`).
+- **Book health:** `GET /api/items/:id/health` says what is probably wrong with a book's length, match and chapters, and what to do first; `GET /api/libraries/:id/needs-work` lists the books with such an issue (update permission). The client's guided fix is built on these.
+<!-- TODO: backlog checkbox (in progress); describe it here when it lands on neo. -->
+- **Possible duplicates:** detected after scans and listed for the Issues page, by ASIN, ISBN, title + author + length, or podcast feed; never deleted or merged ([#5676](https://github.com/advplyr/audiobookshelf/issues/5676)).
 - **Library search** also matches file names and paths ([#5680](https://github.com/advplyr/audiobookshelf/issues/5680)).
 
 ### API
