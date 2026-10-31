@@ -12,6 +12,7 @@ This is an unofficial personal fork of [advplyr/audiobookshelf](https://github.c
 - **Speech check:** optional, checks whether the chapter heading is spoken at the snapped start (`options.verify`). It needs the chapterbot sidecar.
 - **Re-anchoring** (`options.reanchor`, default on): before snapping, a reference list (e.g. Audible's) that drifts against books split into part files is shifted onto the files named like its chapters.
 - **Heading search** (`options.locate`, default on with the speech check): a heading not heard at its start is looked for in a wider transcript and the start moves there; unheard chapters are predicted from the headings found around them.
+- Audible's placeholder titles ("Chapter 1".."Chapter N" counted from an intro) are recognised: when the spoken headings confirm the starts, automatic processing reports only that the titles differ and offers the heard titles. A spoken chapter number alone ("2. Allison" for "Chapter 2: Allison") counts as the heading.
 
 ### Ebooks
 - **EPUB from audio:** `POST /api/items/:id/epub`, with job status and cancel. It needs the sidecar. The EPUB is written next to the audio as `<Title> (from audio).epub` and becomes the primary ebook when the book has none, or when it comes with read-along data (a published ebook then stays as a supplementary file). A job that a sidecar restart interrupted is resumed instead of starting over (at most 3 times, never after a cancel). While the sidecar runs a chapter speech check it pauses EPUB jobs, and they go on afterwards.
