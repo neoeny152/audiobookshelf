@@ -1,4 +1,5 @@
 const Path = require('path')
+const { Op } = require('sequelize')
 const EventEmitter = require('events')
 const fs = require('../libs/fsExtra')
 const cron = require('../libs/nodeCron')
@@ -16,6 +17,7 @@ const { PipelineStore } = require('../utils/autoPipeline/store')
 const { normalizeAutoPipelineSettings, isGateOn, effectiveProvider, isAudibleProvider, regionForProvider } = require('../utils/autoPipeline/settings')
 const { itemForScoring, pickMatch, MAX_CANDIDATES } = require('../utils/autoPipeline/matchScore')
 const chapterPlan = require('../utils/autoPipeline/chapterPlan')
+const { getItemHealth } = require('../utils/itemHealth')
 
 /**
  * Auto pipeline (fork only): hands-off processing of newly added books.
@@ -511,14 +513,16 @@ class AutoPipelineManager extends EventEmitter {
    *
    * @param {import('../models/Library')} library
    * @param {'unprocessed'|'all'} scope
-   * @param {{trigger?: 'manual'|'sweep', limit?: number}} [opts] - sweep: queued by the nightly sweep, which stops when
-   *   the library is turned off and runs only in the quiet hours; limit: queue at most this many
+   * @param {{trigger?: 'manual'|'sweep', limit?: number, libraryItemIds?: string[]}} [opts] - sweep: queued by the nightly
+   *   sweep, which stops when the library is turned off and runs only in the quiet hours; limit: queue at most this
+   *   many; libraryItemIds: only these books
    * @returns {Promise<{queued: number}>}
    */
-  async runLibrary(library, scope, { trigger = 'manual', limit = Infinity } = {}) {
+  async runLibrary(library, scope, { trigger = 'manual', limit = Infinity, libraryItemIds = null } = {}) {
     this.assertEnabled()
     if (library.mediaType !== 'book') throw new PipelineError(400, 'The auto pipeline only processes books')
-    const items = (await Database.libraryItemModel.findAll({ where: { libraryId: library.id, mediaType: 'book' }, attributes: ['id', 'title', 'isMissing'] })).filter((li) => !li.isMissing)
+    const where = { libraryId: library.id, mediaType: 'book', ...(libraryItemIds && { id: libraryItemIds }) }
+    const items = (await Database.libraryItemModel.findAll({ where, attributes: ['id', 'title', 'isMissing'] })).filter((li) => !li.isMissing)
     let queued = 0
     for (const li of items) {
       if (queued >= limit) break
@@ -706,6 +710,38 @@ class AutoPipelineManager extends EventEmitter {
       counts,
       items
     }
+  }
+
+  /**
+   * The library's books the user can access whose health (utils/itemHealth.js) has an issue other than unverified
+   * chapters: GET /api/libraries/:id/needs-work and the needs-work scope of a library run. One query, nothing is
+   * measured.
+   *
+   * @param {import('../models/Library')} library - book library
+   * @param {import('../models/User')} user
+   * @returns {Promise<{libraryItemId: string, title: string, issues: string[], next: string|null, duration: Object, match: Object, chapters: Object}[]>}
+   */
+  async findNeedsWork(library, user) {
+    const libraryItems = await Database.libraryItemModel.findAll({
+      where: { libraryId: library.id, mediaType: 'book', isMissing: { [Op.not]: true } },
+      attributes: ['id', 'libraryId', 'mediaType', 'isFile'],
+      include: { model: Database.bookModel, attributes: ['id', 'title', 'duration', 'asin', 'chapters', 'audioFiles', 'explicit', 'tags'] }
+    })
+    const items = []
+    for (const libraryItem of libraryItems) {
+      if (!user.checkCanAccessLibraryItem(libraryItem)) continue
+      const media = libraryItem.media
+      const { issues, next, duration, match, chapters } = getItemHealth({
+        libraryItem,
+        pipelineState: this.getState(libraryItem.id),
+        scannerChapters: this.getScannerChapters(media.title, media.includedAudioFiles),
+        processing: false,
+        autoFix: null
+      })
+      const relevant = issues.filter((issue) => issue !== 'chapters-unverified')
+      if (relevant.length) items.push({ libraryItemId: libraryItem.id, title: media.title, issues: relevant, next, duration, match, chapters })
+    }
+    return items
   }
 
   async getProposal(libraryItemId) {

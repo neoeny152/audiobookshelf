@@ -131,6 +131,22 @@ describe('AutoPipelineController', () => {
     expect(res.body).to.deep.equal({ queued: 1 })
   })
 
+  it('queues only the books that need work with the needs-work scope', async () => {
+    const audioFiles = [{ index: 1, ino: 'ino1', duration: 100, codec: 'mp3', mp3SeekIndex: 'xing', metadata: { filename: 'a.mp3', ext: '.mp3', path: '/books/Red Rising/a.mp3', size: 1, mtimeMs: 2 } }]
+    const book = await Database.bookModel.create({ title: 'Red Rising', audioFiles, duration: 100, tags: [], narrators: [], genres: [], chapters: [] })
+    const folder = await Database.libraryFolderModel.findOne({ where: { libraryId: library.id } })
+    const unmatched = await Database.libraryItemModel.create({ libraryFiles: [], mediaId: book.id, mediaType: 'book', libraryId: library.id, libraryFolderId: folder.id, path: '/books/Red Rising', relPath: 'Red Rising' })
+
+    expect((await call('runLibraryPipeline', { body: { scope: 'needs-work', except: [unmatched.id] } })).body).to.deep.equal({ queued: 0 })
+    expect((await call('runLibraryPipeline', { body: { scope: 'needs-work', except: 'x' } })).statusCode).to.equal(400)
+    const res = await call('runLibraryPipeline', { body: { scope: 'needs-work' } })
+    expect(res.body).to.deep.equal({ queued: 1 })
+    expect(AutoPipelineManager.getState(unmatched.id)).to.include({ trigger: 'manual' })
+    expect(AutoPipelineManager.getState(libraryItem.id)).to.equal(null)
+    // Now on the pipeline: left as it is
+    expect((await call('runLibraryPipeline', { body: { scope: 'needs-work' } })).body).to.deep.equal({ queued: 0 })
+  })
+
   it('runs, reads and dismisses one item', async () => {
     expect((await call('getItemPipeline')).statusCode).to.equal(404)
     expect((await call('runItemPipeline', { body: { steps: ['bogus'] } })).statusCode).to.equal(400)

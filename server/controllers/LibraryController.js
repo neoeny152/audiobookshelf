@@ -22,7 +22,6 @@ const RssFeedManager = require('../managers/RssFeedManager')
 const AutoPipelineManager = require('../managers/AutoPipelineManager')
 const DuplicateItemManager = require('../managers/DuplicateItemManager')
 const { mergeAutoPipelineSettings, normalizeAutoPipelineSettings, AutoPipelineSettingsError } = require('../utils/autoPipeline/settings')
-const { getItemHealth } = require('../utils/itemHealth')
 
 const libraryFilters = require('../utils/queries/libraryFilters')
 const libraryItemsPodcastFilters = require('../utils/queries/libraryItemsPodcastFilters')
@@ -1021,26 +1020,7 @@ class LibraryController {
       return res.sendStatus(403)
     }
     if (!req.library.isBook) return res.status(400).json({ error: 'Library is not a book library' })
-
-    const libraryItems = await Database.libraryItemModel.findAll({
-      where: { libraryId: req.library.id, mediaType: 'book', isMissing: { [Sequelize.Op.not]: true } },
-      attributes: ['id', 'libraryId', 'mediaType', 'isFile'],
-      include: { model: Database.bookModel, attributes: ['id', 'title', 'duration', 'asin', 'chapters', 'audioFiles', 'explicit', 'tags'] }
-    })
-    const items = []
-    for (const libraryItem of libraryItems) {
-      if (!req.user.checkCanAccessLibraryItem(libraryItem)) continue
-      const media = libraryItem.media
-      const { issues, next, duration, match, chapters } = getItemHealth({
-        libraryItem,
-        pipelineState: AutoPipelineManager.getState(libraryItem.id),
-        scannerChapters: AutoPipelineManager.getScannerChapters(media.title, media.includedAudioFiles),
-        processing: false,
-        autoFix: null
-      })
-      const relevant = issues.filter((issue) => issue !== 'chapters-unverified')
-      if (relevant.length) items.push({ libraryItemId: libraryItem.id, title: media.title, issues: relevant, next, duration, match, chapters })
-    }
+    const items = await AutoPipelineManager.findNeedsWork(req.library, req.user)
     res.json({ items: naturalSort(items).asc((item) => item.title) })
   }
 

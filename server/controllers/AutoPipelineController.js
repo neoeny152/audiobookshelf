@@ -12,7 +12,8 @@ const AutoPipelineManager = require('../managers/AutoPipelineManager')
  */
 
 const STEPS = ['match', 'chapters', 'epub']
-const SCOPES = ['unprocessed', 'all']
+/** needs-work: the books whose health has an issue (AutoPipelineManager.findNeedsWork), processed again if need be */
+const SCOPES = ['unprocessed', 'all', 'needs-work']
 
 /**
  * @param {Response} res
@@ -61,7 +62,8 @@ class AutoPipelineController {
   }
 
   /**
-   * POST: /api/libraries/:id/pipeline/run { scope: 'unprocessed' | 'all' } -> { queued }
+   * POST: /api/libraries/:id/pipeline/run { scope: 'unprocessed' | 'all' | 'needs-work', except?: [libraryItemId] } -> { queued }
+   * except: books the needs-work scope leaves out (the book a guide just fixed).
    * Admin only.
    */
   async runLibraryPipeline(req, res) {
@@ -72,7 +74,19 @@ class AutoPipelineController {
     }
     const scope = req.body?.scope ?? 'unprocessed'
     if (!SCOPES.includes(scope)) return res.status(400).json({ error: `scope must be one of ${SCOPES.join(', ')}` })
+    const except = req.body?.except ?? []
+    if (!Array.isArray(except) || except.some((id) => typeof id !== 'string')) return res.status(400).json({ error: 'except must be an array of item ids' })
     try {
+      if (scope === 'needs-work') {
+        // Books on the pipeline or waiting for a review are left as they are
+        const ids = (await AutoPipelineManager.findNeedsWork(req.library, req.user))
+          .map((item) => item.libraryItemId)
+          .filter((id) => {
+            const status = AutoPipelineManager.getState(id)?.status
+            return !except.includes(id) && !AutoPipelineManager.ACTIVE_STATUSES.has(status) && status !== 'needs-review'
+          })
+        return res.json(await AutoPipelineManager.runLibrary(req.library, 'all', { libraryItemIds: ids }))
+      }
       res.json(await AutoPipelineManager.runLibrary(req.library, scope))
     } catch (error) {
       sendError(res, error, 'Queueing the library')
